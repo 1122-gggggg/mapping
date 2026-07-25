@@ -1,0 +1,141 @@
+{
+  "schema": "T_align_gravity/1",
+  "ok": true,
+  "convention": {
+    "up_axis": "+Z",
+    "gravity_axis": "-Z",
+    "applies_as": "X_aligned = R_align @ X_map",
+    "handedness": "right",
+    "scale": 1.0,
+    "metric": false,
+    "note": "rotation only; the map stays scale-free. Do not read heights out of the aligned frame."
+  },
+  "gravity_in_map": [
+    -0.009003266968341797,
+    -0.9242722953099628,
+    -0.3816276527013598
+  ],
+  "R_align": [
+    [
+      0.9999413309251992,
+      -0.006022947072496339,
+      -0.009003266968341797
+    ],
+    [
+      -0.006022947072496339,
+      0.3816863217761606,
+      -0.9242722953099628
+    ],
+    [
+      0.009003266968341797,
+      0.9242722953099628,
+      0.3816276527013598
+    ]
+  ],
+  "T_align_gravity": [
+    [
+      0.9999413309251992,
+      -0.006022947072496339,
+      -0.009003266968341797,
+      0.0
+    ],
+    [
+      -0.006022947072496339,
+      0.3816863217761606,
+      -0.9242722953099628,
+      0.0
+    ],
+    [
+      0.009003266968341797,
+      0.9242722953099628,
+      0.3816276527013598,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "method": {
+    "primary": "camera_x_axis_orthogonality_irls",
+    "irls_iters": 12,
+    "irls_soft_deg": 2.0,
+    "effective_weight_sum": 1383.8985851134025,
+    "singular_values": [
+      34.53993699145668,
+      13.6995665631038,
+      0.4445360120312257
+    ],
+    "yaw_diversity_s2_over_s1": 0.3966297496863511,
+    "roll_residual_deg": {
+      "p50": 0.4680028535924934,
+      "p95": 1.384627690494429,
+      "max": 10.009788525494969
+    },
+    "crosscheck": {
+      "name": "camera_center_plane_fit",
+      "normal_in_map": [
+        -0.9813277024007268,
+        -0.1563875564212211,
+        0.11197710791724373
+      ],
+      "singular_values": [
+        56.19321572222373,
+        7.737147343348303,
+        4.645654214230752
+      ],
+      "planarity_s2_over_s3": 1.6654591552784035,
+      "angle_to_primary_deg": 83.64742788142675,
+      "applicable": false
+    }
+  },
+  "gates": {
+    "G-GRAV-1a_yaw_diversity": {
+      "value": 0.3966297496863511,
+      "threshold": 0.1,
+      "ok": true,
+      "meaning": "s2/s1: the camera x-axes must actually span two dimensions. A single-heading straight flight leaves s2 and s3 BOTH near zero, so G-GRAV-1b alone reads as perfectly conditioned. This is the real guard."
+    },
+    "G-GRAV-1b_conditioning": {
+      "value": 30.81767549158986,
+      "threshold": 5.0,
+      "ok": true,
+      "meaning": "s2/s3: given a 2D row space, the null direction must be well separated from it"
+    },
+    "G-GRAV-2_roll_residual_p95_deg": {
+      "value": 1.384627690494429,
+      "threshold": 3.0,
+      "ok": true,
+      "meaning": "the roll==0 assumption must actually hold for the fleet of frames"
+    },
+    "G-GRAV-3_sign_margin": {
+      "value": 0.26391507030592554,
+      "threshold": 0.15,
+      "ok": true,
+      "meaning": "cameras must sit clearly above what they filmed; a side-on capture of a vertical structure cannot have its sign guessed"
+    },
+    "G-GRAV-4_crosscheck_deg": {
+      "value": 83.64742788142675,
+      "threshold": 10.0,
+      "planarity": 1.6654591552784035,
+      "planarity_threshold": 3.0,
+      "applicable": false,
+      "ok": true,
+      "meaning": "independent camera-centre plane fit; SKIPPED when the flight is not planar, because then the plane normal is not gravity"
+    }
+  },
+  "model": {
+    "path": "/media/cihcilab/新增磁碟區/sfm_system/建圖/target_site/runs/target_site_v1/final_model",
+    "files_sha256": {
+      "cameras.bin": "c63ab12c1a31f127d81a9cb43a4e2249dd17009047bac5902c7dd1c1cb4db208",
+      "frames.bin": "0051e48696e8f8b7b8816196bf04cfdfc8015c67755e44504dc59e69cf2092f8",
+      "images.bin": "9d03dc8bd46405e3f06615212467f6adc93992d67c59e258633948a08f041875",
+      "points3D.bin": "0697acd14d991dcb194b5ce5b9cf5f785548cccf92f513081e3af3baeeb76372",
+      "rigs.bin": "50fe1fc63c04582f691f5d73f89275ad91415bd89e7c16f44b1c88eb79194b42"
+    },
+    "num_images": 1390,
+    "num_points3D": 388353
+  }
+}

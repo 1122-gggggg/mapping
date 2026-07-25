@@ -23,6 +23,59 @@ _2026-07-26 · 取代 `UPDATE_PIPELINE_METHODS.md` 的 XFeat 假設，不取代
 
 ---
 
+## 標準答案：三個不同頻率的迴圈
+
+長期地圖維護的公認有效解（Bürki et al., IV 2018）不是「一種更新方式」，
+是**用成本不對稱把工作分層**：便宜的事天天做，昂貴的事只在**量到**需要時才做。
+
+| 迴圈 | 觸發 | 做什麼 | 成本 | 三樣交付物 |
+|---|---|---|---|---|
+| **L1 observation session** | **每次飛行，無條件** | 只記錄哪些 ref / 3D 點被命中。**不加任何幾何** | ~0 | 全部不動 |
+| **L2 rich session（保 gauge）** | 某區域定位品質**掉到門檻以下** | 固定舊 pose，只對該區局部三角化 | 分鐘級 | bundle 補 delta；**尺度參數重算**；重力沿用 |
+| **L3 controlled rebuild** | gauge 必須改 / 漂移累積 / 大範圍變更 | 完整重建 + S0–S9 驗收 | 6–8 小時 | 全部重出 |
+
+原論文的流程就是：新資料先對現有地圖離線定位 → **定位表現低於預設門檻**就當
+rich session（三角化新 landmark 加進地圖），**高於門檻**就只當 observation session
+（只更新共視統計，不加 landmark）→ 每次 rich session 之後跑一次
+**offline summarization** 把 landmark 總數壓回固定上限。
+
+論文的具體設定：門檻是 **10 cm translation RMS**，summarization 上限
+City-Environment **75k**、Parking-Lot **150k** landmarks；驗證涵蓋停車場整年季節變化
+與市區全日夜光照變化。
+
+### 這三件事各自為什麼重要
+
+1. **L1 讓 L2 的判斷有依據，而且免費。** 沒有持續累積的 observation 統計，
+   你根本分不清「這區真的變了」還是「這次拍攝角度不好」。
+   單次證據不足以退役任何 3D 點。
+2. **L2 只在量到退化時才做。** 不是排程、不是「有新影片就更新」。
+   「每次拍完就 merge 進地圖」是最常見也最貴的錯誤：地圖無界成長、
+   同一批 appearance 重複加權、定位反而變慢變差。
+3. **每次 L2 之後必須 summarize，否則地圖無界成長。**
+   `map_update/core/sparsify_reloc_bundle.py` 已經在做這件事
+   （observation-hit score + 每 sequence/prefix 的 ordered K-cover），
+   這正是 Dymczyk 式 summarization 的形狀。**它目前是選用的，應該變成 L2 的強制收尾。**
+
+### 要照抄，但有一處不能照抄
+
+論文用 **10 cm translation RMS**（來自輪速計）當 rich / observation 的分界。
+**你沒有輪速計，也沒有公制尺度**，這個門檻搬不過來。
+
+替代品你已經有了——就是 **S9 的驗收契約**，套在新影片上：
+
+```
+成功率            < 90%           → 這段需要 L2
+inlier p5         < 30            → 幾何支撐不足
+最大連續失敗       > 30 frames     → 有連續盲區
+失敗在空間上聚集   （非隨機分布）   → 指出要局部更新的區域
+```
+
+**改一點：論文是整趟 sortie 二選一，你應該做到 per-tile。** 你的航線是線狀的，
+一小段爛不該觸發整趟 rich session。用失敗幀的空間聚集去圈出要動的區域，
+其餘區域維持 observation-only——這樣 L2 的範圍最小，gauge 也最容易保住。
+
+---
+
 ## 為什麼不是「先定位 → 找定位不到的區域 → 局部三角化」就好
 
 你的直覺方向是對的，而且就是文獻上的 method 2 / method 3。但有兩個坑：
