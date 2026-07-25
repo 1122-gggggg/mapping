@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.venv/
+env/
+
+# build artifacts / evidence — these live on the work disk, not here
+runs/
+outputs/
+weights/
+*.db
+*.h5
+*.npz
+*.npy
+*.pt
+*.ply
+*.MP4
+*.mp4
+*.log
+*.tar.zst

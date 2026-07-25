@@ -1,0 +1,24 @@
+{
+ "P1230123": {
+  "n": 112,
+  "base_succ": 0.8214285714285714,
+  "upd_succ": 0.875,
+  "gain_pp": 5.35714285714286,
+  "base_med": 257.0,
+  "upd_med": 276.5,
+  "recovered": 6,
+  "regressed": 0,
+  "ret_new": 0.125
+ },
+ "P1260126": {
+  "n": 142,
+  "base_succ": 1.0,
+  "upd_succ": 1.0,
+  "gain_pp": 0.0,
+  "base_med": 590.0,
+  "upd_med": 962.0,
+  "recovered": 0,
+  "regressed": 0,
+  "ret_new": 0.3028169014084507
+ }
+}

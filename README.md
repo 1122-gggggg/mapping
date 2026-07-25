@@ -1,0 +1,319 @@
+# mapping — 無人機影片 → 可定位 SfM 地圖
+
+這個 repo 是 `sfm_system` 的**建圖側**程式碼與方法文件。
+飛行時的即時定位（tracker / PCMD / EDM runtime）**不在這裡**，在另一個 repo。
+
+界線是這樣劃的：**產生地圖與 bundle 的東西在這裡；消費 bundle 去飛的東西不在這裡。**
+所以 `finalize_edm_model.py`（產生 EDM bundle）、`validate_heldout_localization.py`
+（用留出影片驗收地圖）都在，因為沒有它們就無法證明地圖可用。
+
+原始工作目錄是 `/media/cihcilab/新增磁碟區/sfm_system/`。這裡不含任何 `runs/` 產物
+（那裡有 265 GB 的影像、database、model、log）。
+
+---
+
+## ⚠️ 先讀這段：這裡有兩代建圖系統
+
+| | 位置 | 狀態 |
+|---|---|---|
+| **現行** | `sites/<site>/tools/` 的 **S0–S9** | ✅ 活的。target_site 1390/1414、388,353 pts、1.4436 px 就是這條建出來的 |
+| 舊「一鍵建圖」 | `pipeline/build_pipeline.py` + `pipeline/stage_gate_contract.py` | ⚠️ **半死** |
+
+`build_pipeline.py` 引用的這些路徑在現在的磁碟上**都不存在**：
+
+```
+sfm_system/tools/verify_package.py
+sfm_system/tools/system_verify.py
+sfm_system/定位/pipeline/localize_pipeline.py
+sfm_system/建圖/runs/          (實際是 建圖/<site>/runs/)
+sfm_system/建圖/outputs/
+```
+
+`docs/mapping/ONE_CLICK_MAP_BUILD_GATES.md` 描述的也是這一代。它的**驗收哲學仍然有效**
+（gate 分級、promotion rule、「多做檢查可以接受，少做檢查不接受」），但裡面的命令跑不起來。
+
+`pipeline/stage_gate_contract.py`（94 KB）本身是獨立的 gate 彙總器，只吃 `--run-dir`，
+這支還是可用的。`pipeline/run_fuhe_gluemap_build.py`、
+`pipeline/run_football_gluemap_from_motion_manifest.py`、
+`pipeline/repair_fuhe_gluemap_fixed_ba.py` 也都是實際跑過的活程式。
+
+`pipeline/build_localizable_map_core.py` 是 symlink，指到
+`map_update/build_localizable_map.py`（357 KB 單檔巨獸，上一代的 all-in-one builder）。
+
+---
+
+## 現行方法：S0–S9
+
+每個 site 一份 `tools/`。三份高度重疊（`ts_common.py` / `ts_env.py` / `ts_intrinsics.py`
+是共用骨架的三份副本），差異在各場域的實際限制。**target_site 是最完整、最新的那份**。
+
+| Stage | 工具 | 做什麼 | 硬 gate |
+|---|---|---|---|
+| **S0** | `s0_corpus_lock.py` | 鎖定影片語料，並在動任何東西之前證明 build/test split | held-out 影片不得洩漏進 map |
+| **S1** | `s1_motion_scan.py` | **抽幀之前**先分類運動、判定飛行方向 | pure rotation / hover 不得主導 |
+| **S1b** | `s1b_bridge_feasibility.py` | 到底需不需要 forced cross-video pairs、需要在哪 | 見下方「MegaLoc 對反向是盲的」 |
+| **S2** | `s2_extract.py` | motion-adaptive 抽幀。**不做 undistortion、不做強制 resize** | 每段抽出的幀數與視差比例 |
+| **S2b** | `s2b_intrinsics_bakeoff.py` | crash-safe 雙 seed 內參可辨識性烘培 | 多解析度 × 多相機模型獨立 replay |
+| **S3** | `s3_pairs.py` | forced VPR-blind bridge candidates + real-loader 契約 gate | 跨影片 bridge pairs > 0 |
+| **S4** | `audit_dg_graph.py` + Doppelgangers++ | **反鬼影主閘**。拒絕重複結構造成的假橋接 | 最大 component ratio、不得清光跨向邊 |
+| **S5** | `run_gluemap_memory_safe.py` → `finalize_edm_model.py` | GlueMap 建圖 → 移除 pure-rotation observations → **固定內參 BA** | 內參與 seed 逐參數比對，容差 `1e-6` |
+| **S6** | `audit_map_geometry.py` | 鬼影稽核 | G6.1–G6.4 |
+| **S5.7** | `audit_independent_sim3.py` | 各 sequence 獨立建圖，再獨立驗證跨方向 Sim3 橋接 | 不靠同一次建圖自我背書 |
+| **S7** | `build_bundle_seed.py` → `validate_tracking_bundle.py` | MegaLoc seed bundle → tracking bundle | `ref_global.shape == [refs, 8448]` |
+| **S8** | `finalize_edm_model.py` → `validate_edm_bundle.py` | EDM detector-free 固定姿態重三角化 → bundle | cell-anchor round-trip |
+| **S9** | `validate_heldout_localization.py` | **唯一真正重要的 gate**：未參與建圖的影片 | target_site 要 ≥95% |
+| — | `verify_final_release.py` | S0–S9 全綠才發 release | 缺一不發 |
+
+### 為什麼是這個順序
+
+- **S1 在 S2 之前**是刻意的。先分類運動再抽幀，才不會把 hover 重複幀和 pure rotation
+  送進昂貴前端。`s1_motion_scan.py` 同時判定飛行方向，S1b 才有辦法問「需不需要強制橋接」。
+- **S2 不做 undistortion**。內參政策是「固定、不讓下游估」，任何 resize / undistort 決策
+  都必須明確記錄在 manifest 裡。
+- **S2b 存在的原因**：ANAFI 到底該用 PINHOLE（韌體已去畸變）還是 SIMPLE_RADIAL，
+  規格書講不清楚。三個焦距來源互差 7.5%，所以用實測 bake-off 定案，不用猜的。
+- **S5 的固定內參 BA 是硬要求**。GlueMap 的 BA 會**默默漂移內參**——
+  `refine_extra_params` 是那個陷阱。最終模型的相機參數必須與 seed 完全一致（實測 delta `0.0`）。
+- **S9 才是驗收**。「有輸出檔」不等於完成。
+
+---
+
+## 場域狀態
+
+| 場域 | 地圖 | 結果 | 可交付？ |
+|---|---|---|---|
+| **target_site** | `runs/target_site_v1/final_model` | 1390/1414 registered、388,353 pts、1.4436 px；S0–S9 + G6.1–G6.4 全過 | ✅ 唯一通過完整 release 合約 |
+| **football_field** | `runs/ff_a1/final_model` | 509/515、82,264 pts、1.5657 px | ⚠️ 走簡化 route A，**沒有 held-out** |
+| **fuhe_bridge** | `runs/fuhe_bridge_probe_v5/.../final_fixed` | 239/240、0.9265 px | ❌ **G6.1 鬼影幾何未過**。是研究紀錄，不是定位圖 |
+
+fuhe_bridge 的 `tools/` 裡多了 `probe_hotspot_loftr.py` 與
+`audit_hotspot_repair_reachability.py`，就是在追那個鬼影。
+
+---
+
+## 踩過的坑（這些是這套流程存在的理由）
+
+**MegaLoc 對「同一條航線的正反向」是可測量地盲目的。**
+正↔反的 retrieval similarity 只有 0.10–0.17，同向是 0.31–0.59。
+所以 S1b/S3 的 forced VPR-blind bridging 不是保險，是**承重結構**。
+target_site 靠 446 條 accepted forced edges 把三組雙區域骨幹接起來。
+
+**「純旋轉」段落常常不是退化的。** 雲台在動的時候仍有 0.8–4.3° 視差。
+不要用「看起來像轉彎」就丟掉整段——用 `s1_motion_scan.py` 的 H/F inlier ratio 判。
+
+**GlueMap BA 會默默漂移內參。** 見上面 S5。
+
+**GlueMap 沒有原生 append-existing-map 契約。** 這是下面「更新地圖」那節的核心問題。
+
+**pure-rotation 影像可以保留 pose，但最終 3D map 必須是零 observation。**
+
+---
+
+## 更新地圖（新拍資料進來怎麼辦）
+
+`map_update/` 是這條線的全部程式碼與研究紀錄。
+
+- `map_update/MAP_UPDATE_STRATEGY_RECORD.md` — **主文件**。長期地圖更新的架構決策紀錄
+  (v2, 2026-07-15)，含 7 篇論文的可移植/不可照搬對照、point-level evidence ledger 設計、
+  release gates、P0–P8 實作順序。
+- `docs/map_update/UPDATE_PIPELINE_METHODS.md` — 目前**已實作**的路由邏輯與參數。
+- `map_update/core/` — 實際程式：`map_update_tool.py`（60 KB，主工具）、
+  `prepare_update_frames.py`（geometry/connector 分流）、`sparsify_reloc_bundle.py`、
+  `stability_scores.py`、`changed_region_evidence.py`、`update_quality_gates.py`。
+
+### 四條路由
+
+```
+新資料進來 → 對舊地圖定位 → 看 register_rate
+  ├─ >0.95 且無場景變更  → 1. 不更新地圖，留作 validation/QA，只記 observation
+  ├─ 高重疊              → 2. 增量註冊 + 局部三角化（PnP 舊 3D 點，固定舊 pose）
+  ├─ 部分重疊、新區域多  → 3. 獨立 submap + bridge frames 算 Sim3 併入
+  └─ 有重疊但幾何/語義不符 → 4. 局部 tile 替換（invalidate 舊點，邊界當 anchor）
+```
+
+`register_rate` 是 overlap 的 proxy，**不是** 場景變更偵測器。
+一段影片可以 register_rate 很高、同時某面牆已經變了。
+
+### 🔴 最大的問題：這條更新線整條是 XFeat 的，但部署已經是 EDM
+
+定位主線已經定案為 **EDM**（detector-free + cell-anchor LUT + MegaLoc 檢索）。
+但 `map_update/core/map_update_tool.py` 從頭到尾用 **XFeat + LighterGlue**：
+
+- 對舊地圖 PnP（判 `register_rate`、找 bridge frames）→ `extract_xfeat` + `match_lighterglue`
+- 建新 submap → XFeat + LighterGlue → hloc 三角化
+- 輸出 bundle → `reloc_map_xfeat_tri.pt`
+
+**照現況跑一次更新，會產出一個你已經不部署的 bundle 格式。**
+這是遷移到 EDM 前的第一順位工作，細節見下面「往 EDM 遷移」。
+
+（本 repo 已刪掉純 XFeat 定位驗證器 `eval_stream.py` 與 XFeat bundle 匯出器
+`export_track_landmarks.py`；`map_update_tool.py` 裡的 XFeat 沒有刪，因為它是**更新時的
+匹配前端**，不是飛行定位器——刪掉等於刪掉整條更新線。）
+
+### ⚠️ 目前的實作落差（別誤以為這套已經完成）
+
+| 路由 | 宣稱 | 實際 |
+|---|---|---|
+| 2. register | 增量註冊 + **局部三角化** | 只做 PnP + 加定位 keyframe。**不產生新 3D 點，不做 joint BA** |
+| 3. submap | submap + Sim3 合併 | 有實作（XFeat+LighterGlue 建 submap → Umeyama Sim3），但**合併後沒有 joint BA** |
+| 4. tile replace | 自動 tile 重建 | **沒有**。只產生偵測證據（`observation_stats.json` 的 changed-region candidates） |
+| stability | ExMaps | 是 **reference-level** 衰減，不是 ExMaps 的 **3D point-level** visibility/recency |
+
+而且 `map_update/update_pipeline.py` 預設的 base model / bundle / MegaLoc cache 路徑
+指向已經不存在的 `sfm_glomap/`。這是 `MAP_UPDATE_STRATEGY_RECORD.md` 裡的 **P0**：
+在恢復 map snapshot contract 之前，任何更新都不該標成 production。
+
+### 更新完之後，定位端一定要拿到的三樣東西
+
+這是**建圖 → 定位的交付契約**。每次更新地圖都必須重新產生（或明確證明不必重產）：
+
+| # | 交付物 | 為什麼不能沿用 |
+|---|---|---|
+| 1 | **EDM bundle** | detector-free。2D→3D 層是用「該次 COLMAP 位姿」把 cell-anchor 打到 3D 的，位姿一動整層就失效 |
+| 2 | **五個尺度參數 + 到達容差** | 全是 map units。新地圖的 `S` 不同就得重算 |
+| 3 | **重力對齊 `T_align_gravity.json`** | 新重建 = 新 gauge，重力在新座標裡是別的方向 |
+
+尺度參數的定義（`EDM定位測試/build/make_transfer_package.py` 的 `derive_site_profile()`）：
+
+```
+S = 2 · p95( ‖ center_i − componentwise_median(all centers) ‖ )      # robust_camera_span()
+
+radius                    = 0.16   · S
+max_jump                  = 0.40   · S
+adaptive_jump_floor       = 0.0006 · S
+adaptive_jump_bootstrap   = 0.004  · S
+adaptive_jump_ceiling     = 0.0016 · S
+```
+
+比例是**無因次、全場域共用**；`S` 是每張地圖各自算的。已知 `S`：
+target_site `5.0065`、football_field `1.8328`、fuhe_bridge `2.0271`。
+`EDMConfig` 的預設值（0.8 / 2.0 / 0.003 / 0.02 / 0.008）正好是這條規則在 target_site
+尺度的取值，**不是通用常數**——沒有自己 profile 的場域會默默沿用它們。
+
+#### 這三樣東西的失效條件不一樣，別一律當成「要全部重來」
+
+| 更新方式 | gauge | 相機集合 | EDM bundle | 5 參數 | T_align_gravity |
+|---|---|---|---|---|---|
+| 方法 2：固定舊 pose 增量註冊 + 局部三角化 | 不變 | **變大** | 只需補新 keyframe | **必須重算** | ✅ 不變 |
+| 方法 3：submap + Sim3 併入（含 joint BA） | **變** | 變大 | 全部重建 | 全部重算 | **必須重求** |
+| 方法 4：局部 tile 替換（邊界 anchor + BA） | 邊界會動 | 可能不變 | 全部重建 | 重算 | 視 BA 是否動到全域 |
+| 週期性 `global_mapper` 全域重解 | **全變** | 變 | 全部重建 | 全部重算 | **必須重求** |
+
+兩個非直覺的點：
+
+- **`S` 對「純加點」也敏感。** 它是 `p95` 掃過**全部**相機中心算的，所以就算 gauge
+  一動也沒動，只要往新區域加了 keyframe，`p95` 就位移、五個參數全部跟著變。
+  「舊 pose 沒變 ⇒ 尺度參數不用改」是錯的。
+- **反過來，`T_align_gravity` 對「純加點」是免疫的。** 只要舊相機的 pose 逐值不變，
+  座標系就沒轉，重力方向仍指同一邊。
+
+所以方法 2 值錢的地方不是省時間，是**它保住了 gauge**——三樣交付物只有一樣要真的重建。
+
+#### 要靠這點，就得證明舊 pose 真的沒動
+
+`colmap mapper --Mapper.fix_existing_frames 1` 只是「請求」，不是證據。
+建圖側已經有這個模式可以照抄：`finalize_edm_model.py` 對內參做逐參數比對
+（容差 `1e-6`，target_site 實測 delta `0.0`）。**對舊相機 pose 做一模一樣的 gate**：
+
+```
+G-UPDATE-1  舊 image 的 R,t 對更新前後逐值比對，max delta ≤ 1e-9   → 通過才可宣稱 gauge 不變
+G-UPDATE-2  舊 point3D 的 xyz 逐值比對（未被 tile 替換的部分）
+G-UPDATE-3  重算 S，寫進 update report；即使 gauge 不變也要重發 site profile
+G-UPDATE-4  T_align_gravity：G-UPDATE-1 通過才可沿用，否則標記為 stale 並擋下交付
+```
+
+沒有 G-UPDATE-1 就別宣稱 gauge 不變——BA 只要碰到一點舊 pose，重力對齊就悄悄歪掉，
+而這種歪法在定位成功率上**看不出來**（成功率照樣 99%，只是飛機以為的「上」不是上）。
+
+### 往 EDM 遷移（`map_update_tool.py` 的改造清單）
+
+1. **匹配前端**：`extract_xfeat` + `match_lighterglue` → EDM detector-free +
+   `round(kpt/8)` cell-anchor（`EDM定位測試/build/build_reloc_map_edm.py` 已有這套 identity 機制）
+2. **bundle 輸出**：`reloc_map_xfeat_tri.pt` → EDM bundle，且 2D→3D 層用該次 COLMAP 位姿重建
+3. **交付物**：更新流程結束時一併輸出 site profile（5 參數 + 到達容差）與 `T_align_gravity.json`，
+   而不是只丟一個 `.pt`
+4. **檢索**：MegaLoc 不變（8448 維、L2-normalized、322×322），這層可以整個沿用
+
+第 1 項不是純換 API：XFeat 給的是可跨 pair 重用的 per-image keypoints/descriptors，
+EDM 是 pair-specific 的 detector-free 匹配。cell-anchor 就是為了在 detector-free 上
+造出穩定的 keypoint identity 才存在的——`round(kpt/8)` 精確可逆。
+**不要在沒過 round-trip / resize / multi-resolution gate 之前改 input canvas。**
+
+### 重送原始建圖資料時
+
+正確結果應該接近 **no-op**，不是把它當新的長期觀測。content hash 相同的影像要對應既有
+image identity，不新增 ID、不更新 `last_seen_session`、不進 held-out set。
+否則同一批舊資料會讓過期點被永久「續命」，而且驗收指標會有 test leakage。
+
+---
+
+## 沒有 vendor 進來的外部工具
+
+`建圖/external_tools/` 有 7.8 GB 的第三方 repo，這裡**不含**。要重現請自己 clone
+（下面是原機器上的 pinned commit）：
+
+| 工具 | Upstream | Commit |
+|---|---|---|
+| MV-RoMa | https://github.com/IceTea-CV/MV-RoMa | `acb09ef` |
+| Doppelgangers++ | https://github.com/doppelgangers25/doppelgangers-plusplus | `f58d86a` |
+| LFOE-GlobalSfM | https://github.com/DmblnNicole/LFOE-GlobalSfM | `a80c845` |
+| DetectorFreeSfM | https://github.com/zju3dv/DetectorFreeSfM | `4a370f1` |
+| GGPT | https://github.com/ChenYutongTHU/GGPT | `2f39fcf` |
+| SLiM | https://github.com/Band-127/SLiM | `8b34762` |
+| SplatHLoc | https://github.com/HqiTao/SplatHLoc | `c73657e` |
+| DeViLoc | https://github.com/TruongKhang/DeViLoc | `c9e990b` |
+| scrstudio (R-SCoRe) | https://github.com/cvg/scrstudio | `a2b40bd` |
+| colmap (mpsfm ext) | https://github.com/Zador-Pataki/colmap | `739d84b` |
+| LoFTR / UFM | (原機器上非 git checkout) | — |
+| EDM | https://github.com/chicleee/EDM | (在定位 repo) |
+| GlueMap | https://github.com/colmap/gluemap | — |
+
+`pipeline/preflight_research_backends.py` 會檢查這些後端在不在。
+
+---
+
+## 環境（原機器實測）
+
+| 用途 | 直譯器 |
+|---|---|
+| GlueMap / GLOMAP / pycolmap 4.0.4 | `~/micromamba/envs/target-site-gluemap-run` |
+| EDM bundle 產生 | `sfm_system/EDM定位測試/env/edm_eval_py312`（`/usr/bin/python3.12` venv + `yacs`） |
+| sm_120 CUDA 編譯 | `CUDA_HOME=~/miniconda3/envs/gsplat`（唯一完整的 CUDA 12.8） |
+
+- shell 打 `python3` 會抓到 miniconda base (3.13)，**那支沒有 pycolmap**。
+- `/usr/bin/python3` (3.12) 有 torch 2.11.0+cu128 與 pycolmap 4.0.4，**但沒有 yacs**。
+- `/usr/bin/nvcc` 是 CUDA **12.0**，編 sm_120 會 `Unsupported gpu architecture 'compute_120'`。
+- `micromamba/envs/target-site-gluemap-run` 有 nvcc 12.8 **但沒有 toolkit headers**。
+  **nvcc 在 PATH 上不等於有 toolkit。**
+
+pycolmap 4.0.4 的 rig model 會擋掉部分 CLI / model surgery，繞法是走 text model。
+
+---
+
+## 絕對路徑
+
+約 50 個檔案裡寫死 `/media/cihcilab/新增磁碟區/...` 或 `/home/cihcilab/...`。
+這是刻意的——原系統的每份 `*receipt*.json` / `gates/*.json` 都用絕對路徑 + SHA-256
+記錄輸入輸出，搬動目錄會讓證據無法重新驗證。
+
+在別台機器上跑之前先 grep：
+
+```bash
+grep -rn '/media/cihcilab\|/home/cihcilab' --include='*.py' --include='*.json' .
+```
+
+---
+
+## 原始路徑對照
+
+| 這個 repo | 原始磁碟位置 |
+|---|---|
+| `pipeline/` | `sfm_system/建圖/pipeline/` |
+| `sites/<site>/` | `sfm_system/建圖/<site>/` （不含 `runs/`） |
+| `map_update/` | `sfm_system/更新地圖/pipeline/` + `更新地圖/source/sfm_reshot25/` |
+| `map_update/core/` | `sfm_system/更新地圖/source/sfm_reshot25/update_pipeline/` |
+| `configs/` | `sfm_system/configs/` |
+| `docs/` | `sfm_system/docs/` |
+
+**沒有推上來的**：`runs/`（265 GB 產物與證據）、`external_tools/`（7.8 GB 第三方）、
+`定位/` 與 `EDM定位測試/`（定位側，在另一個 repo）、`LoMa建圖測試/`（另一條建圖路線的實驗）。

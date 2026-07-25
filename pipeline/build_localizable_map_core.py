@@ -1,0 +1,1 @@
+../map_update/build_localizable_map.py

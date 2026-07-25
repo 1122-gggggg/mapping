@@ -1,0 +1,44 @@
+{
+  "pipeline": "更新地圖",
+  "paths_relative_to": "sfm_system",
+  "entrypoint": "更新地圖/pipeline/update_pipeline.py",
+  "core": "更新地圖/pipeline/update_pipeline_core/map_update_tool.py",
+  "prepare_frames": "更新地圖/pipeline/update_pipeline_core/prepare_update_frames.py",
+  "python": "/usr/bin/python3.12",
+  "current_bundle": "定位/bundles/current_reloc_map_updated_v3.pt",
+  "current_ply": "定位/maps/current_realrgb_v3.ply",
+  "current_workspace": "更新地圖/current/v3_final",
+  "update_build_data": "data/target_site/updates/build",
+  "update_test_data": "data/target_site/updates/test",
+  "future_update_requires_explicit_cli_assets": [
+    "--base-bundle",
+    "--base-model",
+    "--base-images",
+    "--base-megaloc-cache"
+  ],
+  "frame_preparation": {
+    "fps": 3.0,
+    "motion_filter": "parallax",
+    "min_flow_px": 0.8,
+    "max_flow_px": 180.0,
+    "keep_rotation_every": 8,
+    "split_classes": true
+  },
+  "update_defaults": {
+    "bundle_vpr": "megaloc",
+    "qk": 4096,
+    "topk": 15,
+    "min_conf": 0.1,
+    "min_inliers": 50,
+    "seq_window": 6,
+    "retr_nn": 10,
+    "overlap_thr": 0.6,
+    "skip_overlap_thr": 0.95,
+    "classify_stride": 5,
+    "min_bridges": 4,
+    "adaptive_params": true,
+    "adaptive_bridge_qk": 8192,
+    "adaptive_bridge_topks": "30,50",
+    "adaptive_bridge_min_confs": "0.05,0.1"
+  }
+}

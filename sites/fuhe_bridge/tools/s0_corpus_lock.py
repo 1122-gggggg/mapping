@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""S0 -- lock the corpus and prove the build/test split before anything is built.
+
+Writes corpus_manifest.json (sha256 + probed streams) and runs the S0 gates.
+
+The 16:9 gate is not cosmetic. EDM plain-resizes every reference into a 1024x576
+canvas and rescales keypoints by a SINGLE width-derived factor applied to both
+axes (build_reloc_map_edm.py:386). That is exact only while every source is 16:9.
+A 4:3 source would be squashed and its y-coordinates would be wrong by a third,
+silently, with a perfectly healthy-looking map.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ts_common import (  # noqa: E402
+    ASPECT, BUILD, DROPPED, EXCLUDED_DIRS, FRAMES_PER_BUILD_VIDEO, RUNS, RUN_ID,
+    SUBFOLDER_REGEX, TEST, WORKING_HEIGHT, WORKING_WIDTH, Gate, corpus_invariants,
+    ffprobe, log, required_check_ids, resolution_groups, sha256,
+    stage_material_artifacts, write_json,
+)
+from ts_intrinsics import CANDIDATES, cameras_for  # noqa: E402
+
+
+TS_COMMON = Path(__file__).with_name("ts_common.py")
+TS_INTRINSICS = Path(__file__).with_name("ts_intrinsics.py")
+
+
+def probe_all(videos, *, want_hash: bool) -> list[dict]:
+    out = []
+    for v in videos:
+        if not v.path.exists():
+            raise SystemExit(f"missing video: {v.path}")
+        p = ffprobe(v.path)
+        tags = p["tags"]
+        rec = {
+            "seq": v.seq,
+            "rel": v.rel,
+            "declared": {"width": v.width, "height": v.height, "fps": round(v.fps, 4)},
+            "probed": {k: p[k] for k in ("width", "height", "fps", "nb_frames", "duration", "codec")},
+            "aspect": p["width"] / p["height"],
+            "aspect_err": p["width"] / p["height"] - ASPECT,
+            "parrot": tags.get("make", "") == "Parrot",
+            "make": tags.get("make", ""),
+            "creation_time": tags.get("creation_time", ""),
+            "direction": v.direction,
+            "epoch": v.epoch,
+            "bytes": v.path.stat().st_size,
+        }
+        if want_hash:
+            log(f"  sha256 {v.rel} ({rec['bytes'] / 1e9:.2f} GB) ...")
+            rec["sha256"] = sha256(v.path)
+            rec["source_rel"] = v.rel
+            rec["source_sha256"] = rec["sha256"]
+        out.append(rec)
+    return out
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--run-name", default=RUN_ID)
+    ap.add_argument("--no-hash", action="store_true",
+                    help="skip sha256 (10 GB of reads); for iterating only")
+    args = ap.parse_args()
+
+    run_dir = RUNS / args.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log(f"S0 corpus lock -> {run_dir}")
+
+    build = probe_all(BUILD, want_hash=not args.no_hash)
+    test = probe_all(TEST, want_hash=not args.no_hash)
+    invariants = corpus_invariants()
+
+    g = Gate(
+        "S0_corpus",
+        required_check_ids("S0_corpus"),
+        script_path=Path(__file__),
+        input_artifacts=stage_material_artifacts("S0_corpus", run_dir),
+        source_files=[TS_COMMON, TS_INTRINSICS],
+    )
+
+    # G0.1 -- the build set is exactly what we declared, and it probes as declared
+    mismatched = [
+        r["rel"] for r in build
+        if (r["probed"]["width"], r["probed"]["height"]) != (r["declared"]["width"], r["declared"]["height"])
+    ]
+    g.check("G0.1a", len(build) == invariants["n_build"] and not mismatched,
+            f"{len(build)} build videos, all probing at their declared resolution"
+            if not mismatched else f"resolution mismatch: {mismatched}",
+            n_build=len(build), mismatched=mismatched)
+
+    hashes = [r.get("source_sha256") for r in build + test]
+    if all(hashes):
+        g.check("G0.1b", len(set(hashes)) == len(hashes),
+                f"all {len(hashes)} videos are fully hashed and content-distinct",
+                n_hashed=len(hashes), n_unique=len(set(hashes)))
+    else:
+        g.incomplete(
+            "G0.1b",
+                "--no-hash is diagnostic only; release corpus requires every declared hash",
+            n_hashed=sum(bool(h) for h in hashes),
+            n_required=len(build) + len(test),
+        )
+
+    # G0.2 -- no test video is in the build set, by path OR by content
+    build_rels = {r["rel"] for r in build}
+    test_rels = {r["rel"] for r in test}
+    overlap = build_rels & test_rels
+    bh = {r["sha256"] for r in build if r.get("sha256")}
+    th = {r["sha256"] for r in test if r.get("sha256")}
+    g.check("G0.2a", not overlap,
+            "held-out video paths are disjoint from all declared build paths"
+            if not overlap else f"PATH LEAK: {sorted(overlap)}",
+            build_paths=sorted(build_rels), test_paths=sorted(test_rels),
+            path_overlap=sorted(overlap))
+    if all(hashes):
+        g.check("G0.2b", not (bh & th),
+                "all declared hashes are present and build/test content is disjoint"
+                if not (bh & th) else f"CONTENT LEAK: {sorted(bh & th)}",
+                n_build_hashes=len(bh), n_test_hashes=len(th),
+                hash_overlap=sorted(bh & th))
+    else:
+        g.incomplete(
+            "G0.2b",
+            "build/test content separation cannot be proved without every declared hash",
+            n_build_hashes=len(bh), n_test_hashes=len(th),
+        )
+
+    # G0.3 -- 16:9, exactly. EDM's single width-derived scale depends on it.
+    bad = [(r["rel"], r["aspect"], r["aspect_err"]) for r in build if r["aspect_err"] != 0.0]
+    g.check("G0.3", not bad,
+            f"all {len(build)} build videos are exactly 16:9 (aspect_err == 0.0 in IEEE754)"
+            if not bad else f"NOT 16:9 -- EDM would silently corrupt y-coords: {bad}",
+            worst_aspect_err=max((abs(r["aspect_err"]) for r in build), default=0.0))
+
+    # G0.4 -- Parrot provenance (the one file without it is the one we dropped)
+    non_parrot = [r["rel"] for r in build if not r["parrot"]]
+    g.check("G0.4", not non_parrot,
+            f"all {len(build)} build videos carry Parrot metadata"
+            if not non_parrot else f"non-Parrot in build set: {non_parrot}",
+            dropped=list(DROPPED))
+
+    # G0.5 -- heldout defence is derived from TEST, not a previous site's names.
+    heldout_sequences = {video.seq for video in TEST}
+    heldout_rels = {video.rel for video in TEST}
+    build_sequences = {record["seq"] for record in build}
+    build_lineage = {record.get("source_rel", record["rel"]) for record in build}
+    excluded_ok = not (heldout_sequences & build_sequences) and not (
+        heldout_rels & build_lineage
+    )
+    g.check(
+        "G0.5",
+        excluded_ok,
+        "declared TEST sequences and paths are absent from BUILD lineage"
+        if excluded_ok else "held-out source leaked into BUILD lineage",
+        heldout_sequences=sorted(heldout_sequences),
+        heldout_paths=sorted(heldout_rels),
+        sequence_overlap=sorted(heldout_sequences & build_sequences),
+        path_overlap=sorted(heldout_rels & build_lineage),
+    )
+
+    # G0.6 -- sequence names must match gluemap's subfolder_regex, or its
+    # multi-sequence loader discovers ZERO sequences and drops them silently
+    import re
+    rx = re.compile(SUBFOLDER_REGEX)
+    unmatched = [v.seq for v in BUILD if not rx.match(v.seq)]
+    g.check("G0.6", not unmatched,
+            f"all {len(BUILD)} sequence names match subfolder_regex {SUBFOLDER_REGEX!r}"
+            if not unmatched else f"would be SILENTLY DROPPED by gluemap: {unmatched}",
+            regex=SUBFOLDER_REGEX)
+
+    # G0.7 -- resolution groups -> one camera each
+    groups = resolution_groups()
+    working_groups = invariants["working_resolution_groups"]
+    g.check("G0.7", len(working_groups) == 1,
+            f"all {len(BUILD)} sources adapt to one {WORKING_WIDTH}x{WORKING_HEIGHT} PINHOLE camera",
+            source_groups={f"{w}x{h}": [x.seq for x in v] for (w, h), v in groups.items()},
+            working_groups=working_groups)
+
+    # G0.8 -- both directions present, or forward<->reverse fusion is moot
+    dirs = {v.direction for v in BUILD}
+    g.check("G0.8", "fwd" in dirs and "rev" in dirs,
+            f"directions present: {sorted(dirs)} (unknown ones resolved by S1)",
+            directions={v.seq: v.direction for v in BUILD},
+            unknown=[v.seq for v in BUILD if v.direction == "unknown"])
+
+    manifest = {
+        "run_name": args.run_name,
+        "schema_version": "fuhe-corpus-v2",
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "build": build,
+        "test": test,
+        "dropped": DROPPED,
+        "excluded_dirs": [str(d) for d in EXCLUDED_DIRS],
+        "subfolder_regex": SUBFOLDER_REGEX,
+        "invariants": invariants,
+        "adapter": {
+            "working_resolution": [WORKING_WIDTH, WORKING_HEIGHT],
+            "resize_interpolation": "INTER_AREA",
+            "undistort": False,
+            "frames_per_build_video": FRAMES_PER_BUILD_VIDEO,
+            "camera": cameras_for("fuhe_v2_fixed")[(WORKING_WIDTH, WORKING_HEIGHT)].__dict__,
+        },
+        "resolution_groups": {
+            f"{WORKING_WIDTH}x{WORKING_HEIGHT}": {
+                "videos": [video.seq for video in BUILD],
+                "candidates": {
+                    candidate: cameras_for(candidate)[(WORKING_WIDTH, WORKING_HEIGHT)].__dict__
+                    for candidate in CANDIDATES
+                },
+            }
+        },
+        "totals": {
+            "build_videos": len(build),
+            "build_frames": sum(r["probed"]["nb_frames"] for r in build),
+            "build_seconds": round(sum(r["probed"]["duration"] for r in build), 2),
+            "build_bytes": sum(r["bytes"] for r in build),
+            "test_videos": len(test),
+        },
+    }
+    write_json(run_dir / "corpus_manifest.json", manifest)
+    g.write(run_dir)
+
+    t = manifest["totals"]
+    log(f"S0 PASS -- {t['build_videos']} build videos, {t['build_frames']} frames, "
+        f"{t['build_seconds']:.0f}s, {t['build_bytes'] / 1e9:.2f} GB; "
+        f"{t['test_videos']} held out")
+    log(f"  manifest: {run_dir / 'corpus_manifest.json'}")
+
+
+if __name__ == "__main__":
+    main()
