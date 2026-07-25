@@ -115,9 +115,9 @@ target_site 靠 446 條 accepted forced edges 把三組雙區域骨幹接起來�
 
 - `docs/map_update/EDM_INCREMENTAL_UPDATE_DESIGN.md` — **從這裡開始讀**。EDM 時代的具體
   增量更新設計：以 gauge 是否被動過分流、U0–U5 流程、G-U1~G-U6 gates、P0–P8 實作順序。
-- `map_update/MAP_UPDATE_STRATEGY_RECORD.md` — 長期架構論證。長期地圖更新的架構決策紀錄
-  (v2, 2026-07-15)，含 7 篇論文的可移植/不可照搬對照、point-level evidence ledger 設計、
-  release gates、P0–P8 實作順序。
+- `map_update/MAP_UPDATE_STRATEGY_RECORD.md` — 長期架構論證 (v2, 2026-07-15)。
+  7 篇論文的可移植 / 不可照搬對照、point-level evidence ledger 設計、release gates。
+  上面那份設計不取代它，是把它落到 EDM 的具體形狀。
 - `docs/map_update/UPDATE_PIPELINE_METHODS.md` — 目前**已實作**的路由邏輯與參數。
 - `map_update/core/` — 實際程式：`map_update_tool.py`（60 KB，主工具）、
   `prepare_update_frames.py`（geometry/connector 分流）、`sparsify_reloc_bundle.py`、
