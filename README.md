@@ -63,6 +63,8 @@ sfm_system/建圖/outputs/
 | **S8** | `finalize_edm_model.py` → `validate_edm_bundle.py` | EDM detector-free 固定姿態重三角化 → bundle | cell-anchor round-trip |
 | **S9** | `validate_heldout_localization.py` | **唯一真正重要的 gate**：未參與建圖的影片 | target_site 要 ≥95% |
 | — | `build_gravity_alignment.py` | 從 model 推 `T_align_gravity.json`（相機 x 軸 ⊥ 重力） | G-GRAV-1a/1b/2/3/4 |
+| — | `verify_gauge_invariance.py` | 更新前後逐元素比對舊 pose / 舊 point3D | G-U1a/1b/1c、G-U2a/2b |
+| — | `recompute_site_scale.py` | 重算 `S` 與五個尺度參數 | G-U3 |
 | — | `verify_final_release.py` | S0–S9 全綠才發 release | 缺一不發 |
 
 ### 為什麼是這個順序
@@ -137,7 +139,7 @@ target_site 靠 446 條 accepted forced edges 把三組雙區域骨幹接起來�
 `register_rate` 是 overlap 的 proxy，**不是** 場景變更偵測器。
 一段影片可以 register_rate 很高、同時某面牆已經變了。
 
-### 🔴 最大的問題：這條更新線整條是 XFeat 的，但部署已經是 EDM
+### ✅ 已遷移到 EDM（對舊圖匹配的部分）
 
 定位主線已經定案為 **EDM**（detector-free + cell-anchor LUT + MegaLoc 檢索）。
 但 `map_update/core/map_update_tool.py` 從頭到尾用 **XFeat + LighterGlue**：
@@ -146,8 +148,13 @@ target_site 靠 446 條 accepted forced edges 把三組雙區域骨幹接起來�
 - 建新 submap → XFeat + LighterGlue → hloc 三角化
 - 輸出 bundle → `reloc_map_xfeat_tri.pt`
 
-**照現況跑一次更新，會產出一個你已經不部署的 bundle 格式。**
-這是遷移到 EDM 前的第一順位工作，細節見下面「往 EDM 遷移」。
+**已改**：`map_update/core/update_matcher.py` 把匹配前端抽成後端介面，
+`--matcher edm` 為預設。對舊圖定位／路由判定／register 路徑與 bundle keyframe
+全部走 EDM；`--matcher xfeat` 保留只為 A/B。
+
+**尚未遷移**：route 3 的 submap 重建仍是 XFeat + hloc。在 `--matcher edm` 下會
+**直接擋下**並要求改走 register/skip，或明示 `--allow-xfeat-submap` 接受混合前端
+候選（必須留在 quarantine）。不會靜默混用。
 
 （本 repo 已刪掉純 XFeat 定位驗證器 `eval_stream.py` 與 XFeat bundle 匯出器
 `export_track_landmarks.py`；`map_update_tool.py` 裡的 XFeat 沒有刪，因為它是**更新時的
@@ -231,14 +238,25 @@ G-UPDATE-4  T_align_gravity：G-UPDATE-1 通過才可沿用，否則標記為 st
 沒有 G-UPDATE-1 就別宣稱 gauge 不變——BA 只要碰到一點舊 pose，重力對齊就悄悄歪掉，
 而這種歪法在定位成功率上**看不出來**（成功率照樣 99%，只是飛機以為的「上」不是上）。
 
-### 往 EDM 遷移（`map_update_tool.py` 的改造清單）
+### 往 EDM 遷移的狀態
 
-1. **匹配前端**：`extract_xfeat` + `match_lighterglue` → EDM detector-free +
-   `round(kpt/8)` cell-anchor（`EDM定位測試/build/build_reloc_map_edm.py` 已有這套 identity 機制）
-2. **bundle 輸出**：`reloc_map_xfeat_tri.pt` → EDM bundle，且 2D→3D 層用該次 COLMAP 位姿重建
-3. **交付物**：更新流程結束時一併輸出 site profile（5 參數 + 到達容差）與 `T_align_gravity.json`，
-   而不是只丟一個 `.pt`
-4. **檢索**：MegaLoc 不變（8448 維、L2-normalized、322×322），這層可以整個沿用
+| # | 項目 | 狀態 |
+|---|---|---|
+| 1 | 匹配前端 `extract_xfeat`/`match_lighterglue` → EDM cell-anchor | ✅ `update_matcher.py` |
+| 2 | bundle keyframe → `xyz_by_cell` + `image_jpg`（EDMRelocMap schema） | ✅ |
+| 3 | route 3 submap 重建 | ⛔ 未遷移，`--matcher edm` 下會擋下 |
+| 4 | 交付 site profile + `T_align_gravity.json` | ✅ 工具已有（`recompute_site_scale.py` / `build_gravity_alignment.py`），尚未接進更新流程收尾 |
+| 5 | 檢索 MegaLoc（8448 維 / 322×322） | ✅ 不變，整層沿用 |
+
+**第 1 項不是純換 API**：XFeat 給的是可跨 pair 重用的 per-image keypoints，
+EDM 是 pair-specific detector-free。`round(kpt/8)` cell 就是為了在 detector-free 上
+造出穩定 keypoint 身分才存在的，dedup 就靠它。
+
+一個實作陷阱：`correspondences_by_ref` 回傳的是**相機像素**（1280 寬），
+不是 EDM canvas（1024 寬）。量化成 cell 之前要先除以 `scale = 1.25`，
+否則會索引到錯的 `xyz_by_cell` 槽。已有回歸測試。
+
+**不要在沒過 round-trip / resize / multi-resolution gate 之前改 input canvas。**
 
 第 1 項不是純換 API：XFeat 給的是可跨 pair 重用的 per-image keypoints/descriptors，
 EDM 是 pair-specific 的 detector-free 匹配。cell-anchor 就是為了在 detector-free 上

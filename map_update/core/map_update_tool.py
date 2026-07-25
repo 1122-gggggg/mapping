@@ -268,6 +268,16 @@ def main():
     ap=argparse.ArgumentParser(add_help=False)
     ap.add_argument("-h","--help",action="store_true")
     ap.add_argument("--repo",default=DEF_REPO)
+    ap.add_argument("--matcher",choices=["edm","xfeat"],default="edm",
+                    help="Update-time correspondence frontend. Default edm, matching the "
+                         "deployed localizer. xfeat is legacy and feeds a bundle format that "
+                         "is no longer flown -- A/B only.")
+    ap.add_argument("--allow-xfeat-submap",action="store_true",
+                    help="Permit the not-yet-migrated XFeat submap route while --matcher edm. "
+                         "Output is mixed-frontend and must stay in quarantine.")
+    ap.add_argument("--edm-deploy",default=None,
+                    help="EDM deploy dir (reloc_localizer_edm.py / edm_matcher.py). "
+                         "Defaults to <repo>/../EDM定位測試/deploy.")
     ap.add_argument("--base-bundle",default=DEF_BUNDLE)
     ap.add_argument("--base-model",default=DEF_MODEL)
     ap.add_argument("--base-images",default=DEF_IMAGES)
@@ -346,8 +356,9 @@ def main():
         print(__doc__); return
 
     sys.path.insert(0, a.repo+"/deploy"); sys.path.insert(0, a.repo+"/scripts")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     import megaloc_lib
-    from reloc_localizer_xfeat import load_xfeat, extract_xfeat
+    from update_matcher import dedup_anchored
     import pycolmap, h5py
     import hloc.reconstruction as RC
     DEV="cuda"; QK=a.qk; ADD=a.min_inliers
@@ -373,7 +384,6 @@ def main():
     out=Path(a.out_dir); out.mkdir(parents=True,exist_ok=True)
     log(f"videos to add: {vids}")
 
-    xf=load_xfeat(QK)
     b=torch.load(a.base_bundle,map_location='cpu',weights_only=False)
     refs=dict(b['refs']); base_names=list(b['ref_names'])
     base_stability=np.asarray(b.get('ref_stability',np.ones(len(base_names),np.float32)),np.float32)
@@ -409,36 +419,47 @@ def main():
     if cache != out_cache:
         write_megaloc_cache(out_cache,bdesc,base_names,input_size=322)
     bdesc=normalize_desc("base MegaLoc",bdesc)
+
+    if a.matcher=="edm":
+        edm_deploy=Path(a.edm_deploy) if a.edm_deploy else (SYSTEM_ROOT/"EDM定位測試"/"deploy")
+        if not edm_deploy.is_dir():
+            raise SystemExit(f"--edm-deploy not found: {edm_deploy}. The EDM localizer lives in "
+                             f"the localization repo; pass its deploy dir explicitly.")
+        from update_matcher import EDMUpdateMatcher
+        cam0,_=make_camera(a.width,a.height,a) if hasattr(a,"width") else (None,None)
+        matcher_backend=EDMUpdateMatcher.from_deploy(
+            edm_deploy, Path(a.base_bundle), cam0,
+            topk=a.topk, min_conf=a.min_conf,
+            pnp_max_error=a.pnp_max_error if hasattr(a,"pnp_max_error") else 8.0,
+            min_inliers=a.min_inliers)
+    else:
+        log("WARNING: --matcher xfeat is legacy. The resulting bundle is NOT the deployed "
+            "format; use this for A/B measurement only.")
+        from update_matcher import XFeatUpdateMatcher
+        matcher_backend=XFeatUpdateMatcher.from_deploy(
+            Path(a.repo)/"deploy", Path(a.repo)/"scripts", refs,
+            qk=a.qk, topk=a.topk, min_conf=a.min_conf)
+    log(f"update matcher backend: {matcher_backend.name}")
     def mnorm(names,base):
         return normalize_desc(f"query MegaLoc {base}",megaloc_lib.extract(names,base,DEV).astype(np.float32))
 
-    def collect_anchored(q,qk,qg,topk=None,min_conf=None,matcher=None):
-        """dedup 2D-3D vs base bundle: 每個 query keypoint 只留最佳 → inlier ≤ #kp."""
+    def collect_anchored(query,qg,topk=None,min_conf=None,matcher=None):
+        """dedup 2D-3D vs base bundle: one best anchor per query observation.
+
+        Backend-neutral: the matcher supplies a stable per-image identity for
+        each query observation (XFeat keypoint index / EDM query cell), so the
+        inlier count stays comparable across frontends.
+        """
         topk=topk or a.topk; min_conf=a.min_conf if min_conf is None else min_conf
-        matcher=matcher or xf
+        matcher=matcher or matcher_backend
         sims=bdesc@qg
         idx=rerank_indices_by_stability(sims,base_stability,topk,stability_weight=a.stability_rerank_weight)
-        best={}
-        for ti in idx:
-            rname=base_names[ti]
-            r=refs[rname]; rff={k:(v.to(DEV) if hasattr(v,'to') else v) for k,v in r['feats'].items()}
-            try: _,_,mi=matcher.match_lighterglue(q,rff,min_conf=min_conf)
-            except Exception: continue
-            if mi is None or len(mi)==0: continue
-            mi=np.asarray(mi.detach().cpu() if hasattr(mi,'detach') else mi); rx=np.asarray(r['xyz'])
-            for qi,rj in mi:
-                v=rx[int(rj)]; qi=int(qi)
-                if np.isfinite(v).all() and qi not in best:
-                    best[qi]={
-                        'qidx':qi,'p2':qk[qi],'xyz':v,
-                        'ref_name':rname,'ref_index':int(ti),'ref_kp':int(rj)
-                    }
-        if not best: return None,None,[]
-        vals=list(best.values())
-        return np.array([x['p2'] for x in vals]), np.array([x['xyz'] for x in vals]), vals
+        rows=matcher.correspondences(query,[base_names[ti] for ti in idx],[int(ti) for ti in idx],
+                                     min_conf=min_conf)
+        return dedup_anchored(rows).as_tuple()
 
-    def collect(q,qk,qg,topk=None,min_conf=None):
-        P2,P3,_=collect_anchored(q,qk,qg,topk,min_conf)
+    def collect(query,qg,topk=None,min_conf=None):
+        P2,P3,_=collect_anchored(query,qg,topk,min_conf)
         return P2,P3
 
     def pnp(P2,P3,W,H):
@@ -501,9 +522,10 @@ def main():
         kept=0
         for k in range(0,len(fr),max(1,a.observation_stride)):
             p=fr[k]; nm=names[k]
-            rgb=load_rgb(p); H,W=rgb.shape[:2]; q=extract_xfeat(xf,rgb,QK)
-            qk=np.asarray(q['keypoints'].detach().cpu())
-            P2,P3,meta=collect_anchored(q,qk,em[k])
+            rgb=load_rgb(p); H,W=rgb.shape[:2]
+            query=matcher_backend.prepare_query(rgb)
+            P2,P3,meta=collect_anchored(query,em[k])
+            qk=query.keypoints_or_empty()
             result=None
             if P2 is not None and len(P2)>=6:
                 result=pnp(P2,P3,W,H)
@@ -517,8 +539,9 @@ def main():
             if nm not in sub_pose:
                 continue
             rgb=load_rgb(p); H,W=rgb.shape[:2]
-            q=extract_xfeat(xf,rgb,int(qk_limit)); qk=np.asarray(q['keypoints'].detach().cpu())
-            P2,P3,meta=collect_anchored(q,qk,qg,topk=int(topk),min_conf=float(min_conf))
+            query=matcher_backend.prepare_query(rgb,**({'qk':int(qk_limit)} if matcher_backend.name=='xfeat' else {}))
+            P2,P3,meta=collect_anchored(query,qg,topk=int(topk),min_conf=float(min_conf))
+            qk=query.keypoints_or_empty()
             if P2 is None or len(P2)<ADD:
                 continue
             r=pnp(P2,P3,W,H)
@@ -605,19 +628,17 @@ def main():
         nreg=0
         inliers=[]
         for k,(p,nm) in enumerate(zip(fr,names)):
-            rgb=load_rgb(p); H,W=rgb.shape[:2]; q=extract_xfeat(xf,rgb,QK)
-            qk=np.asarray(q['keypoints'].detach().cpu())
-            P2,P3,meta=collect_anchored(q,qk,em[k])
+            rgb=load_rgb(p); H,W=rgb.shape[:2]
+            query=matcher_backend.prepare_query(rgb)
+            P2,P3,meta=collect_anchored(query,em[k])
+            qk=query.keypoints_or_empty()
             if P2 is None or len(P2)<ADD:
                 record_observation(seq,nm,W,H,qk,np.zeros((0,2)),[],None,label)
                 continue
             r=pnp(P2,P3,W,H)
             record_observation(seq,nm,W,H,qk,P2,meta,r,label)
             if not r or r.get('num_inliers',0)<ADD: continue
-            inh=np.full((len(qk),3),np.nan,np.float32)
-            for m in meta:
-                inh[m['qidx']]=m['xyz']
-            new_kf.append((nm,{'feats':{'keypoints':q['keypoints'].detach().cpu(),'descriptors':q['descriptors'].detach().cpu(),'scores':q['scores'].detach().cpu() if 'scores' in q else None,'image_size':(W,H)},'xyz':inh}))
+            new_kf.append((nm,matcher_backend.bundle_keyframe(query,meta,rgb,nm)))
             C,yaw,_=pose_center_yaw_from_result(r)
             ii=inlier_indices(r,len(meta))
             cov=[meta[int(j)]['ref_index'] for j in ii if int(j)<len(meta)]
@@ -661,9 +682,9 @@ def main():
             samp=list(range(0,len(classify_fr),a.classify_stride)); ok=0; attempts=0
             sample_inliers=[]; sample_areas=[]; warnings=[]
             for i in samp:
-                rgb=load_rgb(classify_fr[i]); H,W=rgb.shape[:2]; q=extract_xfeat(xf,rgb,QK)
-                qk=np.asarray(q['keypoints'].detach().cpu())
-                P2,P3=collect(q,qk,classify_em[i])
+                rgb=load_rgb(classify_fr[i]); H,W=rgb.shape[:2]
+                query=matcher_backend.prepare_query(rgb)
+                P2,P3=collect(query,classify_em[i])
                 if P2 is not None and len(P2)>=6:
                     attempts+=1
                     r=pnp(P2,P3,W,H)
@@ -754,6 +775,17 @@ def main():
             sub_em=np.stack([x[3] for x in sub_items]).astype(np.float32)
             geom_names=set(names)
             sub_img_root=NB
+            if a.matcher!="xfeat" and not a.allow_xfeat_submap:
+                raise SystemExit(
+                    "route 3 (submap + Sim3) still builds its submap with XFeat+LighterGlue; "
+                    "it has NOT been migrated to EDM. Running it under --matcher edm would "
+                    "silently mix frontends and emit a submap the deployed stack never sees. "
+                    "Either route this sequence to register/skip, or pass --allow-xfeat-submap "
+                    "to accept a mixed-frontend candidate that must stay in quarantine.")
+            # The submap route is the last XFeat holdout; import it here so an
+            # EDM-only run never loads XFeat at all.
+            from reloc_localizer_xfeat import load_xfeat, extract_xfeat
+            xf=load_xfeat(QK)
             if any(not is_geom for _,_,is_geom,_ in sub_items):
                 sub_img_root=W_/"images"
                 materialize_images(sub_items,sub_img_root)
