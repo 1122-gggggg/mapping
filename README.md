@@ -62,6 +62,7 @@ sfm_system/建圖/outputs/
 | **S7** | `build_bundle_seed.py` → `validate_tracking_bundle.py` | MegaLoc seed bundle → tracking bundle | `ref_global.shape == [refs, 8448]` |
 | **S8** | `finalize_edm_model.py` → `validate_edm_bundle.py` | EDM detector-free 固定姿態重三角化 → bundle | cell-anchor round-trip |
 | **S9** | `validate_heldout_localization.py` | **唯一真正重要的 gate**：未參與建圖的影片 | target_site 要 ≥95% |
+| — | `build_gravity_alignment.py` | 從 model 推 `T_align_gravity.json`（相機 x 軸 ⊥ 重力） | G-GRAV-1a/1b/2/3/4 |
 | — | `verify_final_release.py` | S0–S9 全綠才發 release | 缺一不發 |
 
 ### 為什麼是這個順序
@@ -174,6 +175,9 @@ target_site 靠 446 條 accepted forced edges 把三組雙區域骨幹接起來�
 | 1 | **EDM bundle** | detector-free。2D→3D 層是用「該次 COLMAP 位姿」把 cell-anchor 打到 3D 的，位姿一動整層就失效 |
 | 2 | **五個尺度參數 + 到達容差** | 全是 map units。新地圖的 `S` 不同就得重算 |
 | 3 | **重力對齊 `T_align_gravity.json`** | 新重建 = 新 gauge，重力在新座標裡是別的方向 |
+
+第 3 樣由 `pipeline/build_gravity_alignment.py` 產生（見下）。已產好的兩份在
+`reference/gravity/`。
 
 尺度參數的定義（`EDM定位測試/build/make_transfer_package.py` 的 `derive_site_profile()`）：
 

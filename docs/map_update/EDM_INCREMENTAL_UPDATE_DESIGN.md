@@ -188,6 +188,7 @@ inlier p5         < 30            → 幾何支撐不足
 | **G-U2** | 未被替換的舊 `points3D` xyz 逐值比對 | 同上 |
 | **G-U3** | 重算 `S = 2·p95(‖center − componentwise_median‖)`，重發五個尺度參數 | **即使 G-U1 通過也必須做**（見下） |
 | **G-U4** | EDM bundle：新 keyframe 的 cell→xyz round-trip、`ref_global` 為 `[refs, 8448]` | 不得交付 |
+| **G-U1b** | `build_gravity_alignment.py --verify <舊 json>`：重算重力並與舊值比對（預設容差 `0.05°`） | 與 G-U1 互為獨立後盾 |
 | **G-U5** | held-out 定位：用沒進過建圖也沒進過這次更新的影片，成功率不得退步 | 不得取代 production |
 | **G-U6** | 舊場域 regression set 不得出現新增失敗 | 不得取代 production |
 
@@ -241,7 +242,7 @@ R1 的價值不在省時間，在**三樣交付物只有一樣要真的重建**�
 | **P3** | G-U3 尺度參數重算，接 `derive_site_profile()` | P2 | 純量計算，最便宜、最容易漏 |
 | **P4** | U4 新點三角化：接 `build_reloc_map_edm.py` stage A–E | P1, P2 | 補上 register 路徑缺的「局部三角化」 |
 | **P5** | EDM bundle 增量打包（只補新 keyframe） | P4 | |
-| **P6** | `T_align_gravity` 的 carry / re-derive 決策，綁 G-U1 | P2 | |
+| **P6** | ~~`T_align_gravity` 產生器~~ ✅ 已完成。剩 carry / re-derive 決策接進更新流程 | P2 | `--verify` 模式已可用 |
 | **P7** | point-level evidence ledger（ExMaps 式） | P0–P2 | 目前 `stability_scores.py` 是 reference-level，不是 point-level |
 | **P8** | R3 tile 替換自動化 | P7 | 需要多 session 證據才有意義，排最後 |
 
@@ -274,5 +275,7 @@ P2 排在功能之前是刻意的：**先讓「有沒有動到 gauge」變成可
 - **GlueMap 沒有原生 append-existing-map 契約。** R1 是繞過去（固定 pose + 只加新點），
   不是 GlueMap 支援的操作。真要走 R2 得先做一次 canonicalization
   （見 `MAP_UPDATE_STRATEGY_RECORD.md` 的「已有 GlueMap map」一節）。
-- **`T_align_gravity.json` 目前不在建圖側產生。** 它需要一個明確的產生者與 provenance，
-  否則 R2/R3 之後沒有東西可以重求。
+- ~~`T_align_gravity.json` 目前不在建圖側產生。~~ **已補**：`pipeline/build_gravity_alignment.py`
+  （含 provenance 與逐檔 SHA-256）。剩下的限制是它假設 gimbal roll≈0——這個假設在
+  兩張已驗收地圖上實測 p95 為 1.14° / 1.38°，成立；但手持或固定翼機身傾斜的素材不成立，
+  屆時 G-GRAV-2 會擋下來。
