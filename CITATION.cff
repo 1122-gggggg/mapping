@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: update_map
+message: "Please cite this software and the research papers listed in docs/literature_mapping.md."
+type: software
+version: 0.1.0
+date-released: 2026-08-18
+license: MIT
+repository-code: "https://github.com/1122-gggggg/update_map"

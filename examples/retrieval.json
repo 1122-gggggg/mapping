@@ -1,0 +1,6 @@
+{
+  "historical/session_01/frame_000100.jpg": [
+    {"reference_id": "current/000230.jpg", "score": 0.91},
+    {"reference_id": "current/000231.jpg", "score": 0.87}
+  ]
+}

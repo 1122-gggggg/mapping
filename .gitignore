@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+dist/
+build/
+
+# Research data and generated outputs
+/data/
+/maps/
+/datasets/
+/cache/
+/runs/
+/output/
+reports/generated/
+*.parquet
+*.npz
+*.npy
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

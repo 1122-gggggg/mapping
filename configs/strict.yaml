@@ -1,0 +1,24 @@
+# Conservative promotion profile. Merge this into a local copy of default.yaml.
+pose:
+  gate:
+    min_unique_point3d: 50
+    min_inlier_ratio: 0.30
+    max_reprojection_p90_px: 2.5
+    min_convex_hull_ratio: 0.20
+    min_grid_occupancy: 8
+    min_independent_reference_support: 3
+    max_fim_condition_number: 750.0
+    max_translation_std: 0.10
+    max_rotation_std_deg: 2.0
+change:
+  stable_ratio_active: 0.80
+bridge:
+  min_anchor_count: 2
+  min_disjoint_paths: 2
+  max_rotation_cycle_deg: 2.0
+  max_translation_cycle: 0.2
+  max_scale_cycle_fraction: 0.02
+validation:
+  max_p95_latency_increase_fraction: 0.15
+  min_weak_cell_success_gain: 0.02
+  min_failure_run_reduction: 1.0
