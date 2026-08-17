@@ -189,7 +189,7 @@ def read_points3d_binary(path: Path) -> dict[int, Landmark]:
             point_id = _read_bytes(handle, 8, "Q")[0]
             xyz = np.asarray(_read_bytes(handle, 24, "ddd"), dtype=np.float64)
             rgb = np.asarray(_read_bytes(handle, 3, "BBB"), dtype=np.uint8)
-            error = float(_read_bytes(handle, 8, "d")[0]
+            error = float(_read_bytes(handle, 8, "d")[0])
             track_length = _read_bytes(handle, 8, "Q")[0]
             track = [tuple(map(int, _read_bytes(handle, 8, "II"))) for _ in range(track_length)]
             points[int(point_id)] = Landmark(int(point_id), xyz, rgb, error, track)
