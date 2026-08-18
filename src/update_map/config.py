@@ -140,6 +140,89 @@ class StabilityConfig:
 
 
 @dataclass
+class LifelongConfig:
+    """Predictive/adaptive feature-map management configuration."""
+
+    strategy: str = "fremen"
+    map_budget: int = 500
+    query_budget: int = 500
+    exchange_fraction: float = 0.05
+    min_exchange_count: int = 1
+    correct_reward: float = 1.0
+    incorrect_penalty: float = 1.0
+    unmatched_penalty: float = 0.0
+    initial_score: float = 0.0
+    score_min: float = -100.0
+    score_max: float = 100.0
+    min_temporal_samples: int = 8
+    max_harmonics: int = 3
+    candidate_periods_days: list[float] = field(
+        default_factory=lambda: [0.5, 1.0, 7.0, 30.4375, 365.25]
+    )
+    frequency_grid_size: int = 0
+    min_period_days: float = 0.25
+    max_period_days: float = 365.25
+    min_observed_cycles: float = 0.5
+    min_log_period_separation: float = 0.05
+    ridge: float = 1e-6
+    prediction_min: float = -1.0
+    prediction_max: float = 1.0
+    descriptor_metric: str = "cosine"
+    history_limit: int = 4096
+
+    def validate(self) -> list[str]:
+        errors: list[str] = []
+        supported = {
+            "static",
+            "latest",
+            "aggressive",
+            "strict",
+            "summary",
+            "score",
+            "fremen",
+        }
+        if self.strategy not in supported:
+            errors.append(f"strategy must be one of {sorted(supported)}")
+        if self.map_budget < 1:
+            errors.append("map_budget must be >= 1")
+        if self.query_budget < 0:
+            errors.append("query_budget must be non-negative")
+        if not (0.0 <= self.exchange_fraction <= 1.0):
+            errors.append("exchange_fraction must be in [0, 1]")
+        if self.min_exchange_count < 0:
+            errors.append("min_exchange_count must be non-negative")
+        if self.correct_reward < 0.0:
+            errors.append("correct_reward must be non-negative")
+        if self.incorrect_penalty < 0.0 or self.unmatched_penalty < 0.0:
+            errors.append("feature penalties must be non-negative")
+        if self.score_min >= self.score_max:
+            errors.append("score_min must be smaller than score_max")
+        if self.min_temporal_samples < 1:
+            errors.append("min_temporal_samples must be >= 1")
+        if self.max_harmonics < 0:
+            errors.append("max_harmonics must be non-negative")
+        if any(period <= 0.0 for period in self.candidate_periods_days):
+            errors.append("candidate_periods_days must contain only positive periods")
+        if self.frequency_grid_size < 0:
+            errors.append("frequency_grid_size must be non-negative")
+        if self.min_period_days <= 0.0 or self.max_period_days < self.min_period_days:
+            errors.append("period search bounds are invalid")
+        if self.min_observed_cycles < 0.0:
+            errors.append("min_observed_cycles must be non-negative")
+        if self.min_log_period_separation < 0.0:
+            errors.append("min_log_period_separation must be non-negative")
+        if self.ridge < 0.0:
+            errors.append("ridge must be non-negative")
+        if self.prediction_min >= self.prediction_max:
+            errors.append("prediction_min must be smaller than prediction_max")
+        if self.descriptor_metric not in {"cosine", "l2", "hamming"}:
+            errors.append("descriptor_metric must be cosine, l2 or hamming")
+        if self.history_limit < 0:
+            errors.append("history_limit must be non-negative")
+        return errors
+
+
+@dataclass
 class ValidationConfig:
     success_translation_thresholds_m: list[float] = field(default_factory=lambda: [0.25, 0.5, 1.0])
     success_rotation_thresholds_deg: list[float] = field(default_factory=lambda: [2.0, 5.0, 10.0])
@@ -182,6 +265,7 @@ class UpdateMapConfig:
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     stability: StabilityConfig = field(default_factory=StabilityConfig)
+    lifelong: LifelongConfig = field(default_factory=LifelongConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     adapters: AdapterConfig = field(default_factory=AdapterConfig)
     route_cells: RouteCellConfig = field(default_factory=RouteCellConfig)
@@ -201,6 +285,7 @@ class UpdateMapConfig:
             errors.append("change.stable_ratio_candidate cannot exceed stable_ratio_active")
         if self.selection.budget < 0:
             errors.append("selection.budget must be non-negative")
+        errors.extend(f"lifelong.{error}" for error in self.lifelong.validate())
         if require_paths:
             for field_name in ("base_map", "historical_data"):
                 value = getattr(self.paths, field_name)
@@ -238,6 +323,7 @@ def _build_config(data: Mapping[str, Any]) -> UpdateMapConfig:
         bridge=BridgeConfig(**data.get("bridge", {})),
         selection=SelectionConfig(weights=selection_weights, **selection_data),
         stability=StabilityConfig(**data.get("stability", {})),
+        lifelong=LifelongConfig(**data.get("lifelong", {})),
         validation=ValidationConfig(**data.get("validation", {})),
         adapters=AdapterConfig(**data.get("adapters", {})),
         route_cells=RouteCellConfig(**data.get("route_cells", {})),

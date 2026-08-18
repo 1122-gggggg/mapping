@@ -106,6 +106,32 @@ stability:
   retire_threshold: 0.10
   active_threshold: 0.60
 
+lifelong:
+  strategy: fremen
+  map_budget: 500
+  query_budget: 500
+  exchange_fraction: 0.05
+  min_exchange_count: 1
+  correct_reward: 1.0
+  incorrect_penalty: 1.0
+  unmatched_penalty: 0.0
+  initial_score: 0.0
+  score_min: -100.0
+  score_max: 100.0
+  min_temporal_samples: 8
+  max_harmonics: 3
+  candidate_periods_days: [0.5, 1.0, 7.0, 30.4375, 365.25]
+  frequency_grid_size: 0
+  min_period_days: 0.25
+  max_period_days: 365.25
+  min_observed_cycles: 0.5
+  min_log_period_separation: 0.05
+  ridge: 1.0e-6
+  prediction_min: -1.0
+  prediction_max: 1.0
+  descriptor_metric: cosine
+  history_limit: 4096
+
 validation:
   success_translation_thresholds_m: [0.25, 0.5, 1.0]
   success_rotation_thresholds_deg: [2.0, 5.0, 10.0]

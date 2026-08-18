@@ -29,8 +29,9 @@ This repository is a synthesis. No cited paper directly evaluates the complete c
 ## Predictive and Adaptive Maps for Long-Term Visual Navigation
 
 - Link: https://arxiv.org/abs/2603.12460
-- Used for: privileged experience, history-aware feature management and avoiding repeated map-to-map degradation.
-- Adaptation: the newest GLUEMAP is the privileged canonical geometry; historical data cannot recursively redefine it.
+- Executable implementation: `src/update_map/lifelong/` and `docs/predictive_adaptive_maps.md`.
+- Used for: correct/incorrect/unmatched feature history, gradual score-based replacement, descriptor-uniqueness admission and FreMEn harmonic prediction.
+- Adaptation: PnP/LO-RANSAC supplies stronger geometric labels than displacement voting. The GLUEMAP geometry remains canonical; temporal memory changes only a sidecar active set, and historical-only geometry is quarantined. Unmatched events have zero scalar penalty by default but remain zero-valued temporal observations.
 
 ## ExMaps: Long-Term Localization in Dynamic Scenes Using Exponential Decay
 
