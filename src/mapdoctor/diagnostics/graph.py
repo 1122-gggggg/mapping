@@ -1,103 +1,34 @@
 from __future__ import annotations
 
 import sys
-from collections import deque
-from dataclasses import asdict, dataclass
-from itertools import combinations
 from typing import Iterable
 
 from mapdoctor.model import MapModel
 
+from ._graph_sparse import (
+    _connected_components,
+    _graph_at_threshold,
+    _shared_landmark_counts,
+    _spectral_metrics,
+    _sensitivity_thresholds,
+    _threshold_sensitivity,
+)
+from ._graph_types import (
+    ArticulationImage,
+    BridgeEdge,
+    CovisibilityFragilityReport,
+    SpectralConnectivity,
+    ThresholdSensitivityPoint,
+)
 
-@dataclass(frozen=True)
-class ArticulationImage:
-    image_id: int
-    image_name: str
-    degree: int
-    component_size: int
-    component_sizes_after_removal: tuple[int, ...]
-    separated_from_largest: int
-    separated_fraction: float
-    route_images_separated: int
-
-    def to_dict(self) -> dict[str, object]:
-        output = asdict(self)
-        output["component_sizes_after_removal"] = list(
-            self.component_sizes_after_removal
-        )
-        return output
-
-
-@dataclass(frozen=True)
-class BridgeEdge:
-    image_id_a: int
-    image_name_a: str
-    image_id_b: int
-    image_name_b: str
-    shared_landmarks: int
-    component_size: int
-    side_sizes: tuple[int, int]
-    smaller_side_size: int
-    smaller_side_fraction: float
-    splits_route: bool
-    route_images_on_smaller_side: int
-
-    def to_dict(self) -> dict[str, object]:
-        output = asdict(self)
-        output["side_sizes"] = list(self.side_sizes)
-        return output
-
-
-@dataclass(frozen=True)
-class CovisibilityFragilityReport:
-    minimum_shared_landmarks: int
-    node_count: int
-    edge_count: int
-    component_count: int
-    component_sizes: tuple[int, ...]
-    largest_component_ratio: float
-    isolated_images: tuple[dict[str, object], ...]
-    articulation_images: tuple[ArticulationImage, ...]
-    bridge_edges: tuple[BridgeEdge, ...]
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "minimum_shared_landmarks": self.minimum_shared_landmarks,
-            "node_count": self.node_count,
-            "edge_count": self.edge_count,
-            "component_count": self.component_count,
-            "component_sizes": list(self.component_sizes),
-            "largest_component_ratio": self.largest_component_ratio,
-            "isolated_images": list(self.isolated_images),
-            "articulation_images": [
-                image.to_dict() for image in self.articulation_images
-            ],
-            "bridge_edges": [edge.to_dict() for edge in self.bridge_edges],
-        }
-
-
-def _connected_components(
-    adjacency: dict[int, set[int]],
-) -> tuple[list[set[int]], dict[int, int]]:
-    components: list[set[int]] = []
-    component_index: dict[int, int] = {}
-    seen: set[int] = set()
-    for start in adjacency:
-        if start in seen:
-            continue
-        component: set[int] = set()
-        queue = deque([start])
-        seen.add(start)
-        while queue:
-            node = queue.popleft()
-            component.add(node)
-            component_index[node] = len(components)
-            for neighbor in adjacency[node]:
-                if neighbor not in seen:
-                    seen.add(neighbor)
-                    queue.append(neighbor)
-        components.append(component)
-    return components, component_index
+__all__ = [
+    "ArticulationImage",
+    "BridgeEdge",
+    "CovisibilityFragilityReport",
+    "SpectralConnectivity",
+    "ThresholdSensitivityPoint",
+    "analyze_covisibility_fragility",
+]
 
 
 def analyze_covisibility_fragility(
@@ -106,36 +37,30 @@ def analyze_covisibility_fragility(
     minimum_shared_landmarks: int = 15,
     route_image_names: Iterable[str] | None = None,
 ) -> CovisibilityFragilityReport:
-    """Find single-image and single-edge cuts in the SfM covisibility graph."""
+    """Find hard cuts, soft bottlenecks, and support-threshold instability."""
 
     if minimum_shared_landmarks < 1:
         raise ValueError("minimum_shared_landmarks must be >= 1")
 
-    image_names = {image_id: image.name for image_id, image in model.images.items()}
-    adjacency: dict[int, set[int]] = {
-        image_id: set() for image_id in model.images
+    image_names = {
+        image_id: image.name for image_id, image in model.images.items()
     }
-    shared: dict[tuple[int, int], int] = {}
-    for point in model.points3d.values():
-        image_ids = sorted(
-            {
-                element.image_id
-                for element in point.track
-                if element.image_id in model.images
-            }
-        )
-        for image_a, image_b in combinations(image_ids, 2):
-            edge = (image_a, image_b)
-            shared[edge] = shared.get(edge, 0) + 1
-
-    edge_support = {
-        edge: support
-        for edge, support in shared.items()
-        if support >= minimum_shared_landmarks
-    }
-    for image_a, image_b in edge_support:
-        adjacency[image_a].add(image_b)
-        adjacency[image_b].add(image_a)
+    sensitivity_thresholds = _sensitivity_thresholds(minimum_shared_landmarks)
+    minimum_retained_support = min(sensitivity_thresholds)
+    (
+        shared,
+        track_observations,
+        estimated_pair_expansions,
+        shared_landmark_block_rows,
+    ) = _shared_landmark_counts(
+        model,
+        minimum_support=minimum_retained_support,
+    )
+    adjacency, edge_support = _graph_at_threshold(
+        model.images,
+        shared,
+        minimum_shared_landmarks,
+    )
 
     components, component_index = _connected_components(adjacency)
     component_sizes = [len(component) for component in components]
@@ -148,7 +73,9 @@ def analyze_covisibility_fragility(
             + ", ".join(unknown_route_names)
         )
     route_nodes = {
-        image_id for image_id, name in image_names.items() if name in route_names
+        image_id
+        for image_id, name in image_names.items()
+        if name in route_names
     }
     component_route_counts = [
         len(component & route_nodes) for component in components
@@ -233,7 +160,9 @@ def analyze_covisibility_fragility(
             range(len(parts)),
             key=lambda index: (parts[index][0], parts[index][1]),
         )
-        separated_from_largest = component_size - 1 - parts[largest_index][0]
+        separated_from_largest = (
+            component_size - 1 - parts[largest_index][0]
+        )
         route_separated = sum(
             route_count
             for index, (_, route_count) in enumerate(parts)
@@ -279,7 +208,9 @@ def analyze_covisibility_fragility(
                 image_name_b=image_names[edge[1]],
                 shared_landmarks=edge_support[edge],
                 component_size=component_size,
-                side_sizes=tuple(sorted((child_side, other_side), reverse=True)),
+                side_sizes=tuple(
+                    sorted((child_side, other_side), reverse=True)
+                ),
                 smaller_side_size=smaller_size,
                 smaller_side_fraction=smaller_size / component_size,
                 splits_route=child_route > 0 and other_route > 0,
@@ -310,7 +241,11 @@ def analyze_covisibility_fragility(
             "image_name": image_names[image_id],
         }
         for image_id in sorted(
-            (node for node, neighbors in adjacency.items() if not neighbors),
+            (
+                node
+                for node, neighbors in adjacency.items()
+                if not neighbors
+            ),
             key=lambda item: image_names[item],
         )
     )
@@ -329,4 +264,17 @@ def analyze_covisibility_fragility(
         isolated_images=isolated,
         articulation_images=tuple(articulation_rows),
         bridge_edges=tuple(bridge_rows),
+        shared_landmark_backend="scipy_sparse_block_incidence_product",
+        shared_landmark_block_rows=shared_landmark_block_rows,
+        minimum_retained_support=minimum_retained_support,
+        track_observations=track_observations,
+        estimated_pair_expansions=estimated_pair_expansions,
+        spectral_connectivity=_spectral_metrics(
+            adjacency, edge_support, components
+        ),
+        threshold_sensitivity=_threshold_sensitivity(
+            tuple(model.images),
+            shared,
+            minimum_shared_landmarks,
+        ),
     )
