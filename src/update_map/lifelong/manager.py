@@ -203,6 +203,11 @@ class PredictiveAdaptiveMapManager:
         plan.metadata["candidate_uniqueness"] = {
             item.feature_id: score for item, score in ranked_candidates
         }
+        active_set = {
+            feature_id
+            for feature_id, record in self.records.items()
+            if record.state == FeatureState.ACTIVE
+        }
 
         if selected_strategy == MapManagementStrategy.LATEST:
             chosen = candidate_ids[: self.config.map_budget]
@@ -221,11 +226,9 @@ class PredictiveAdaptiveMapManager:
             requested = sorted(
                 feature_id
                 for feature_id, event in normalized_events.items()
-                if event in removable
-                and feature_id in self.records
-                and self.records[feature_id].state == FeatureState.ACTIVE
+                if event in removable and feature_id in active_set
             )
-            available = [item for item in candidate_ids if item not in self.active_ids]
+            available = [item for item in candidate_ids if item not in active_set]
             replacement_count = min(len(requested), len(available))
             plan.retired.extend(self._retire(requested[:replacement_count]))
             capacity = max(self.config.map_budget - len(self.active_ids), 0)
@@ -235,19 +238,17 @@ class PredictiveAdaptiveMapManager:
             requested = [
                 feature_id
                 for feature_id, event in normalized_events.items()
-                if event == FeatureEvent.INCORRECT
-                and feature_id in self.records
-                and self.records[feature_id].state == FeatureState.ACTIVE
+                if event == FeatureEvent.INCORRECT and feature_id in active_set
             ]
             plan.retired.extend(self._retire(requested))
-            chosen = [item for item in candidate_ids if item not in self.active_ids]
+            chosen = [item for item in candidate_ids if item not in active_set]
             plan.activated.extend(self._activate(chosen, admissible))
         elif selected_strategy in {
             MapManagementStrategy.SCORE,
             MapManagementStrategy.FREMEN,
         }:
-            available = [item for item in candidate_ids if item not in self.active_ids]
-            overflow = max(len(self.active_ids) - self.config.map_budget, 0)
+            available = [item for item in candidate_ids if item not in active_set]
+            overflow = max(len(active_set) - self.config.map_budget, 0)
             if overflow > 0:
                 plan.retired.extend(
                     self._retire(self._worst_active(overflow, selected_strategy))
@@ -387,15 +388,13 @@ class PredictiveAdaptiveMapManager:
     ) -> list[str]:
         if count <= 0:
             return []
-        records = [self.records[item] for item in self.active_ids]
+        records = [
+            record
+            for record in self.records.values()
+            if record.state == FeatureState.ACTIVE
+        ]
         if strategy == MapManagementStrategy.FREMEN:
-            records.sort(
-                key=lambda item: (
-                    fit_fremen_model(item.observations, self.config).empirical_mean,
-                    item.score,
-                    item.feature_id,
-                )
-            )
+            records.sort(key=lambda item: (item.mean_event_score, item.score, item.feature_id))
         else:
             records.sort(key=lambda item: (item.score, item.feature_id))
         return [item.feature_id for item in records[:count]]

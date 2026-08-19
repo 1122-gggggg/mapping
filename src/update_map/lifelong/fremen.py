@@ -138,10 +138,12 @@ def descriptor_distance(left: np.ndarray, right: np.ndarray, metric: str) -> flo
     if first.shape != second.shape or first.ndim != 1:
         raise ValueError("descriptors must be one-dimensional and have equal shape")
     if metric == "l2":
-        return float(np.linalg.norm(first.astype(np.float64) - second.astype(np.float64)))
+        a = np.asarray(first, dtype=np.float64)
+        b = np.asarray(second, dtype=np.float64)
+        return float(np.linalg.norm(a - b))
     if metric == "cosine":
-        a = first.astype(np.float64)
-        b = second.astype(np.float64)
+        a = np.asarray(first, dtype=np.float64)
+        b = np.asarray(second, dtype=np.float64)
         denominator = float(np.linalg.norm(a) * np.linalg.norm(b))
         if denominator <= 1e-12:
             return 0.0 if np.allclose(a, b) else 1.0
@@ -150,8 +152,8 @@ def descriptor_distance(left: np.ndarray, right: np.ndarray, metric: str) -> flo
     if metric == "hamming":
         if first.dtype == np.bool_ or second.dtype == np.bool_:
             return float(np.mean(first.astype(bool) != second.astype(bool)))
-        a = np.unpackbits(first.astype(np.uint8))
-        b = np.unpackbits(second.astype(np.uint8))
+        a = np.unpackbits(np.asarray(first, dtype=np.uint8))
+        b = np.unpackbits(np.asarray(second, dtype=np.uint8))
         return float(np.mean(a != b))
     raise ValueError(f"Unsupported descriptor metric: {metric}")
 
@@ -165,10 +167,33 @@ def descriptor_uniqueness(
 
     if descriptor is None:
         return -1.0
-    compatible = [item for item in map_descriptors if np.asarray(item).shape == descriptor.shape]
+    query = np.asarray(descriptor)
+    compatible = [np.asarray(item) for item in map_descriptors if np.shape(item) == query.shape]
     if not compatible:
         return 1.0
-    return float(min(descriptor_distance(descriptor, item, metric) for item in compatible))
+    if metric == "l2":
+        stacked = np.stack(compatible).astype(np.float64, copy=False)
+        delta = stacked - np.asarray(query, dtype=np.float64)
+        return float(np.min(np.linalg.norm(delta, axis=1)))
+    if metric == "cosine":
+        stacked = np.stack(compatible).astype(np.float64, copy=False)
+        query_f = np.asarray(query, dtype=np.float64)
+        query_norm = float(np.linalg.norm(query_f))
+        ref_norms = np.linalg.norm(stacked, axis=1)
+        denominators = query_norm * ref_norms
+        dots = stacked @ query_f
+        distances = np.empty(len(compatible), dtype=np.float64)
+        tiny = denominators <= 1e-12
+        if np.any(tiny):
+            distances[tiny] = np.where(
+                np.all(np.isclose(stacked[tiny], query_f), axis=1), 0.0, 1.0
+            )
+        ok = ~tiny
+        if np.any(ok):
+            similarity = np.clip(dots[ok] / denominators[ok], -1.0, 1.0)
+            distances[ok] = 1.0 - similarity
+        return float(np.min(distances))
+    return float(min(descriptor_distance(query, item, metric) for item in compatible))
 
 
 def rank_candidates_by_uniqueness(
@@ -179,7 +204,7 @@ def rank_candidates_by_uniqueness(
     """Greedy farthest-first ranking prevents mutually duplicate admissions."""
 
     remaining = {candidate.feature_id: candidate for candidate in candidates}
-    references = [np.asarray(item).copy() for item in map_descriptors]
+    references = [np.asarray(item) for item in map_descriptors]
     ranked: list[tuple[FeatureCandidate, float]] = []
     while remaining:
         scored = [

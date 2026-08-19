@@ -8,7 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .config import PoseGateConfig
-from .geometry import intrinsic_matrix, project_points, skew
+from .geometry import intrinsic_matrix, project_points
 from .models import Camera, FIMMetrics, LiftedCorrespondence, Pose, PoseQuality
 
 
@@ -106,19 +106,31 @@ def compute_fim(
     length = max(float(characteristic_length), 1e-9)
     sigma2 = max(float(pixel_sigma) ** 2, 1e-12)
     points_c = pose.world_to_camera(points)
-    for point_c, weight in zip(points_c, point_weights, strict=True):
-        x, y, z = point_c
-        if z <= 1e-9 or weight <= 0 or not np.isfinite(weight):
-            continue
-        projection_jacobian = np.array(
-            [[fx / z, 0.0, -fx * x / (z * z)], [0.0, fy / z, -fy * y / (z * z)]],
-            dtype=np.float64,
-        )
-        motion_jacobian = np.hstack([np.eye(3), -skew(point_c)])
-        jacobian = projection_jacobian @ motion_jacobian
-        # Normalize translation coordinates as delta_t / L before conditioning analysis.
-        jacobian[:, :3] *= length
-        information += (float(weight) / sigma2) * (jacobian.T @ jacobian)
+    x = points_c[:, 0]
+    y = points_c[:, 1]
+    z = points_c[:, 2]
+    valid = (z > 1e-9) & (point_weights > 0) & np.isfinite(point_weights)
+    if np.any(valid):
+        x = x[valid]
+        y = y[valid]
+        z = z[valid]
+        scaled = point_weights[valid] / sigma2
+        inv_z = 1.0 / z
+        inv_z2 = inv_z * inv_z
+        jacobian = np.empty((len(x), 2, 6), dtype=np.float64)
+        jacobian[:, 0, 0] = (fx * inv_z) * length
+        jacobian[:, 0, 1] = 0.0
+        jacobian[:, 0, 2] = (-fx * x * inv_z2) * length
+        jacobian[:, 0, 3] = -fx * x * y * inv_z2
+        jacobian[:, 0, 4] = fx * (1.0 + x * x * inv_z2)
+        jacobian[:, 0, 5] = -fx * y * inv_z
+        jacobian[:, 1, 0] = 0.0
+        jacobian[:, 1, 1] = (fy * inv_z) * length
+        jacobian[:, 1, 2] = (-fy * y * inv_z2) * length
+        jacobian[:, 1, 3] = -fy * (1.0 + y * y * inv_z2)
+        jacobian[:, 1, 4] = fy * x * y * inv_z2
+        jacobian[:, 1, 5] = fy * x * inv_z
+        information = np.einsum("n,nij,nik->jk", scaled, jacobian, jacobian)
     symmetric = 0.5 * (information + information.T)
     eigenvalues = np.linalg.eigvalsh(symmetric)
     positive = eigenvalues[eigenvalues > regularization]

@@ -37,9 +37,13 @@ class PoseCluster:
 
 
 def _arrays(correspondences: Sequence[LiftedCorrespondence]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    points3d = np.stack([item.xyz_w for item in correspondences], axis=0).astype(np.float64)
-    points2d = np.stack([item.query_xy for item in correspondences], axis=0).astype(np.float64)
-    weights = np.asarray([max(item.confidence, 1e-6) for item in correspondences], dtype=np.float64)
+    points3d = np.stack([item.xyz_w for item in correspondences], axis=0, dtype=np.float64)
+    points2d = np.stack([item.query_xy for item in correspondences], axis=0, dtype=np.float64)
+    weights = np.fromiter(
+        (max(item.confidence, 1e-6) for item in correspondences),
+        dtype=np.float64,
+        count=len(correspondences),
+    )
     return points3d, points2d, weights
 
 

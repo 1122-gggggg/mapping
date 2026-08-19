@@ -44,6 +44,16 @@ def test_classify_feature_events_handles_duplicates_and_unmatched() -> None:
     }
 
 
+def test_classify_feature_events_ignores_ineligible_matches() -> None:
+    events = classify_feature_events(
+        eligible_feature_ids=["a"],
+        matched_feature_ids=["a", "changed"],
+        inlier_mask=[True, True],
+    )
+    assert events == {"a": FeatureEvent.CORRECT}
+    assert "changed" not in events
+
+
 def test_unmatched_is_temporal_evidence_but_has_zero_scalar_penalty() -> None:
     config = LifelongConfig(strategy="score", unmatched_penalty=0.0, exchange_fraction=0.0)
     manager = _manager(1, config)

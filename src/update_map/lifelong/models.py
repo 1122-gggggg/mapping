@@ -305,10 +305,11 @@ def classify_feature_events(
     if len(mask) != len(matched_feature_ids):
         raise ValueError("inlier_mask and matched_feature_ids must have equal length")
     feature_ids = {str(item) for item in eligible_feature_ids}
-    feature_ids.update(str(item) for item in matched_feature_ids)
     outcomes: dict[str, bool] = {}
     for feature_id, is_inlier in zip(matched_feature_ids, mask, strict=True):
         key = str(feature_id)
+        if key not in feature_ids:
+            continue
         outcomes[key] = outcomes.get(key, False) or bool(is_inlier)
     events: dict[str, FeatureEvent] = {}
     for feature_id in sorted(feature_ids):

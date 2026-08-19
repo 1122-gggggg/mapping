@@ -164,12 +164,14 @@ def read_images_binary(path: Path) -> dict[int, MapImage]:
             camera_id = int(properties[8])
             name = _read_c_string(handle)
             num_points2d = _read_bytes(handle, 8, "Q")[0]
-            xys = np.empty((num_points2d, 2), dtype=np.float64)
-            point3d_ids = np.empty(num_points2d, dtype=np.int64)
-            for idx in range(num_points2d):
-                x, y, point3d_id = _read_bytes(handle, 24, "ddq")
-                xys[idx] = (x, y)
-                point3d_ids[idx] = point3d_id
+            blob = handle.read(24 * num_points2d)
+            if len(blob) != 24 * num_points2d:
+                raise ValueError(f"Truncated 2D points for image {image_id}")
+            packed = np.frombuffer(
+                blob, dtype=np.dtype([("x", "<f8"), ("y", "<f8"), ("id", "<i8")])
+            )
+            xys = np.column_stack((packed["x"], packed["y"]))
+            point3d_ids = packed["id"].astype(np.int64, copy=False)
             images[image_id] = MapImage(
                 image_id=image_id,
                 name=name,

@@ -45,6 +45,7 @@ M = M_{core} + M_{loc}
 - Umeyama / RANSAC Sim(3) 對齊與 fixed-current anchored pose-graph optimization。
 - route-view cell、EDM front-end utility、FIM utility、K-cover 與 redundancy-aware reference selection。
 - ExMaps 類 stability history，但預設只懲罰重複幾何衝突，不因單次 unmatched 或資料年齡直接淘汰。
+- 預測／自適應 feature-map memory（arXiv:2603.12460）：sidecar 分數與 FreMEn 週期預測；gate 失敗為精確 no-op；historical-only／未驗證幾何一律隔離，不得進入 production map。
 - E0–E5 主實驗與 A1–A11 ablation protocol 定義、結果比較與 promotion gates。
 - synthetic end-to-end demo 與 invariants regression tests。
 
@@ -260,8 +261,34 @@ Ablation A1–A11 定義於 [`docs/experiment_protocol.md`](docs/experiment_prot
 11. 既有 common-success inlier non-regression gate預設維持 5%。
 12. weak/worst-decile route cells或最大連續失敗區域必須有可量測改善。
 13. 所有輸出是 sidecar/candidate bundle，不覆蓋原始 production map。
+14. 長期 memory 更新必須通過完整 quality gate；raw PnP 成功不得寫入分數、歷史、retirement 或 activation。
 
 ---
+
+## Predictive / adaptive map memory
+
+Stacked on the historical-view layer is a geometry-safe sidecar from [Predictive and Adaptive Maps](https://arxiv.org/abs/2603.12460):
+
+- Only `src/update_map/lifelong/` scores, temporal harmonics and the active-set pointer change.
+- `gate_passed=False` is an exact no-op: no score write, no temporal history, no retirement, no activation, no quarantine.
+- Historical-only or unverified candidates are `QUARANTINED` and cannot replace an active feature.
+- Default `unmatched_penalty=0`: a missing match is temporal evidence, not structural-change evidence.
+- Permanent multi-view change evidence remains authoritative over FreMEn appearance prediction.
+
+```python
+from update_map import PredictiveAdaptiveMapManager, classify_feature_events
+
+events = classify_feature_events(eligible_ids, matched_ids, pnp_inlier_mask)
+plan = manager.update_session(
+    events=events,
+    timestamp_days=timestamp_days,
+    candidates=candidates,
+    gate_passed=pose_estimate.quality.passed,
+    gate_reason=",".join(pose_estimate.quality.failed_gates),
+)
+```
+
+Config lives under `lifelong:` in [`configs/default.yaml`](configs/default.yaml). Details: [`docs/predictive_adaptive_maps.md`](docs/predictive_adaptive_maps.md).
 
 ## 文獻對應
 
