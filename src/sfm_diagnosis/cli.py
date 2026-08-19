@@ -1,0 +1,499 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import yaml
+from scipy.spatial.transform import Rotation
+
+from .diagnose import diagnose_pose, thresholds_from_dict
+from .evidence import load_build_evidence
+from .heatmap import HeatmapConfig, build_heatmap, save_heatmap
+from .io import load_gluemap, write_json
+from .logs import LocalizationHistory
+from .matchability import (
+    matchability_config_from_dict,
+    load_matchability_source,
+    save_landmark_matchability,
+)
+from .models import MapData, Pose
+from .reference_consensus import analyze_reference_hypotheses
+from .repair import suggest_capture_viewpoints
+from .report import map_health_summary
+from .route import RouteAuditConfig, audit_route, save_route_audit
+from .visibility import (
+    MeshRaycaster,
+    SunIllumination,
+    sun_light_travel_direction_from_az_el,
+)
+from .weak_regions import (
+    analyze_weak_regions,
+    save_weak_region_analysis,
+    weak_region_config_from_dict,
+)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    cfg = _load_config(args.config)
+    thresholds = thresholds_from_dict(cfg.get("thresholds", {}))
+
+    if args.command == "inspect":
+        m = load_gluemap(args.model)
+        result = map_health_summary(m)
+        _emit(result, args.output)
+        return 0
+
+    if args.command == "analyze":
+        m = load_gluemap(args.model)
+        region_cfg = dict(cfg.get("weak_regions", {}))
+        for key, value in {
+            "cluster_radius": args.cluster_radius,
+            "anchor_radius": args.anchor_radius,
+            "max_report_regions": args.max_regions,
+        }.items():
+            if value is not None:
+                region_cfg[key] = value
+        evidence = load_build_evidence(
+            m,
+            database=args.database,
+            pairs=args.pairs,
+            images_manifest=args.images_manifest,
+            images_dir=args.images_dir,
+        )
+        analysis = analyze_weak_regions(
+            m,
+            evidence=evidence,
+            config=weak_region_config_from_dict(region_cfg),
+        )
+        save_weak_region_analysis(args.output, analysis)
+        print(
+            json.dumps(
+                {
+                    "output": str(Path(args.output).resolve()),
+                    "diagnostic_mode": analysis.summary["diagnostic_mode"],
+                    "weak_images": analysis.summary["num_weak_images"],
+                    "weak_regions": analysis.summary["num_weak_regions"],
+                    "cause_counts": analysis.summary["cause_counts"],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if args.command == "consensus":
+        results = analyze_reference_hypotheses(
+            args.hypotheses,
+            student_t_nu=args.student_t_nu,
+            covariance_floor_m=args.covariance_floor,
+            sigma_inflation=args.sigma_inflation,
+            max_dispersion_m=args.max_dispersion,
+            max_consensus_sigma_m=args.max_consensus_sigma,
+            max_rotation_dispersion_deg=args.max_rotation_dispersion,
+            min_covariance_eligible_ratio=args.min_covariance_eligible_ratio,
+        )
+        payload = {
+            "queries": results,
+            "num_queries": len(results),
+            "source": str(Path(args.hypotheses)),
+            "interpretation": (
+                "sigma_disp measures cross-reference disagreement; sigma_cons measures "
+                "information/covariance weakness. Keep them separate when diagnosing aliasing "
+                "versus poor geometric observability."
+            ),
+        }
+        _emit(payload, args.output)
+        return 0
+
+    if args.command == "route":
+        route_cfg = dict(cfg.get("route", {}))
+        for key, value in {
+            "sample_spacing_m": args.sample_spacing,
+            "max_heatmap_distance_m": args.max_heatmap_distance,
+            "smoothness_weight": args.smoothness_weight,
+            "task_forward_weight": args.task_forward_weight,
+            "weak_direction_weight": args.weak_direction_weight,
+            "max_turn_deg_per_m": args.max_turn_deg_per_m,
+            "enter_risk": args.enter_risk,
+            "exit_risk": args.exit_risk,
+            "min_segment_length_m": args.min_segment_length,
+            "calibration_min_samples": args.calibration_min_samples,
+        }.items():
+            if value is not None:
+                route_cfg[key] = value
+        if args.no_turn_limit:
+            route_cfg["max_turn_deg_per_m"] = None
+        result = audit_route(
+            args.heatmap,
+            args.route,
+            config=RouteAuditConfig(**route_cfg),
+            calibration=args.calibration,
+        )
+        save_route_audit(args.output, result)
+        print(
+            json.dumps(
+                {
+                    "output": str(Path(args.output).resolve()),
+                    "route_samples": result.summary["route_samples"],
+                    "weak_segments": result.summary["num_weak_segments"],
+                    "weak_length_m": result.summary["weak_length_m"],
+                    "supported_fraction_by_length": result.summary[
+                        "supported_fraction_by_length"
+                    ],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    if args.command == "matchability":
+        m = load_gluemap(args.model)
+        match_cfg = matchability_config_from_dict(cfg.get("matchability", {}))
+        table = load_matchability_source(args.events, m, config=match_cfg)
+        path = save_landmark_matchability(args.output, table)
+        print(
+            json.dumps(
+                {
+                    "output": str(path.resolve()),
+                    "landmarks": len(table.point_ids),
+                    "reweight_fim": match_cfg.reweight_fim,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+
+    m = load_gluemap(args.model)
+    history = LocalizationHistory.load(args.logs) if getattr(args, "logs", None) else None
+    occlusion, illumination = _environment(args)
+    match_cfg = matchability_config_from_dict(cfg.get("matchability", {}))
+    match_table = None
+    if getattr(args, "matchability", None):
+        match_table = load_matchability_source(args.matchability, m, config=match_cfg)
+
+    if args.command == "pose":
+        pose, intr = _resolve_pose(m, args)
+        result = diagnose_pose(
+            m,
+            pose,
+            intrinsics=intr,
+            thresholds=thresholds,
+            history=history,
+            illumination=illumination,
+            occlusion=occlusion,
+            matchability=match_table,
+            matchability_config=match_cfg,
+        )
+        payload = {
+            "pose": {"center_w": pose.center_w.tolist(), "R_wc": pose.R_wc.tolist()},
+            "diagnosis": result.as_dict(include_point_indices=args.include_points),
+        }
+        _emit(payload, args.output)
+        return 0
+
+    if args.command == "heatmap":
+        hcfg_dict = dict(cfg.get("heatmap", {}))
+        for key, value in {
+            "spacing_m": args.spacing,
+            "orientation_mode": args.orientation_mode,
+            "orientations_per_position": args.orientations_per_position,
+            "yaw_step_deg": args.yaw_step,
+        }.items():
+            if value is not None:
+                hcfg_dict[key] = value
+        if args.pitches:
+            hcfg_dict["pitches_deg"] = tuple(args.pitches)
+        hcfg = HeatmapConfig(**hcfg_dict)
+        bounds = None
+        if args.bounds:
+            b = np.asarray(args.bounds, dtype=float)
+            bounds = (b[:3], b[3:])
+        detailed, aggregate = build_heatmap(
+            m,
+            config=hcfg,
+            thresholds=thresholds,
+            history=history,
+            illumination=illumination,
+            occlusion=occlusion,
+            matchability=match_table,
+            bounds=bounds,
+        )
+        save_heatmap(args.output, detailed, aggregate)
+        print(
+            json.dumps(
+                {
+                    "output": str(Path(args.output).resolve()),
+                    "pose_samples": len(detailed),
+                    "position_samples": len(aggregate),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.command == "repair":
+        pose, _ = _resolve_pose(m, args)
+        diagnosis = diagnose_pose(
+            m,
+            pose,
+            thresholds=thresholds,
+            history=history,
+            illumination=illumination,
+            occlusion=occlusion,
+        )
+        candidates = suggest_capture_viewpoints(
+            m,
+            pose,
+            top_k=args.top_k,
+            thresholds=thresholds,
+        )
+        payload = {
+            "weak_pose_diagnosis": diagnosis.as_dict(),
+            "capture_candidates": [c.as_dict() for c in candidates],
+            "caveat": (
+                "Candidates optimize overlap/viewpoint-diversity proxies over existing landmarks; "
+                "they do not predict unseen geometry or flight feasibility. Apply "
+                "geofence/collision checks separately."
+            ),
+        }
+        _emit(payload, args.output)
+        return 0
+
+    parser.error("unknown command")
+    return 2
+
+
+def _parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="sfm-diagnosis",
+        description="GlueMap-first diagnostics for SfM localizability and map repair.",
+    )
+    p.add_argument("--config", help="YAML config; defaults are built in")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    inspect = sub.add_parser(
+        "inspect",
+        help="Audit global GlueMap/COLMAP reconstruction health",
+    )
+    inspect.add_argument("model")
+    inspect.add_argument("--output", help="write JSON instead of stdout")
+
+    analyze = sub.add_parser(
+        "analyze",
+        help="Locate weak SfM regions, explain root causes, and generate a repair plan",
+    )
+    analyze.add_argument("model")
+    analyze.add_argument("--output", required=True, help="output directory")
+    analyze.add_argument(
+        "--database",
+        help="optional COLMAP/GlueMap database.db for pair match/inlier evidence",
+    )
+    analyze.add_argument(
+        "--pairs",
+        help=(
+            "optional CSV/JSON/JSONL retrieval/pair table; preserve unselected candidates "
+            "to diagnose retrieval gaps"
+        ),
+    )
+    analyze.add_argument(
+        "--images-manifest",
+        help="optional CSV/JSON/JSONL image metadata/quality/route table",
+    )
+    analyze.add_argument(
+        "--images-dir",
+        help="optional source image root; computes blur/texture/exposure diagnostics",
+    )
+    analyze.add_argument(
+        "--cluster-radius",
+        type=float,
+        help="weak-image clustering radius in map units; default is map-adaptive",
+    )
+    analyze.add_argument(
+        "--anchor-radius",
+        type=float,
+        help="healthy-anchor search radius in map units; default derives from cluster radius",
+    )
+    analyze.add_argument("--max-regions", type=int, help="maximum regions to report")
+
+    consensus = sub.add_parser(
+        "consensus",
+        help=(
+            "Diagnose per-reference pose hypotheses using RIC-Loc-style robust consensus "
+            "and covariance fusion"
+        ),
+    )
+    consensus.add_argument("hypotheses", help="CSV/JSON/JSONL per-reference hypothesis table")
+    consensus.add_argument("--output", help="write JSON instead of stdout")
+    consensus.add_argument("--student-t-nu", type=float, default=5.0)
+    consensus.add_argument("--covariance-floor", type=float, default=1e-3)
+    consensus.add_argument(
+        "--sigma-inflation",
+        type=float,
+        default=1.0,
+        help="held-out calibration factor for correlated/shared-model covariance",
+    )
+    consensus.add_argument("--max-dispersion", type=float, default=0.5)
+    consensus.add_argument("--max-consensus-sigma", type=float, default=0.5)
+    consensus.add_argument("--max-rotation-dispersion", type=float, default=5.0)
+    consensus.add_argument("--min-covariance-eligible-ratio", type=float, default=0.5)
+
+    route = sub.add_parser(
+        "route",
+        help="Audit a deployment route and choose a smooth sequence of localizable viewpoints",
+    )
+    route.add_argument("route", help="CSV/JSON/JSONL waypoint table with x,y,z")
+    route.add_argument(
+        "--heatmap",
+        required=True,
+        help="detailed pose_health.csv produced by `sfm-diagnosis heatmap`",
+    )
+    route.add_argument("--output", required=True, help="output directory")
+    route.add_argument(
+        "--calibration",
+        help="optional held-out table with health_score and binary success",
+    )
+    route.add_argument("--sample-spacing", type=float)
+    route.add_argument("--max-heatmap-distance", type=float)
+    route.add_argument("--smoothness-weight", type=float)
+    route.add_argument("--task-forward-weight", type=float)
+    route.add_argument("--weak-direction-weight", type=float)
+    route.add_argument("--max-turn-deg-per-m", type=float)
+    route.add_argument(
+        "--no-turn-limit",
+        action="store_true",
+        help="disable the soft camera turn-rate limit",
+    )
+    route.add_argument("--enter-risk", type=float)
+    route.add_argument("--exit-risk", type=float)
+    route.add_argument("--min-segment-length", type=float)
+    route.add_argument("--calibration-min-samples", type=int)
+    matchability = sub.add_parser(
+        "matchability",
+        help="Build a per-landmark historical matchability table from correspondence events",
+    )
+    matchability.add_argument("events", help="CSV/JSON/JSONL query-landmark events")
+    matchability.add_argument("--model", required=True, help="GlueMap/COLMAP model")
+    matchability.add_argument("--output", required=True, help="output directory")
+
+
+    pose = sub.add_parser("pose", help="Diagnose one camera pose")
+    _add_model_pose_args(pose)
+    _add_history_environment_args(pose)
+    pose.add_argument("--include-points", action="store_true")
+    pose.add_argument(
+        "--matchability",
+        help="correspondence events or landmark_matchability.csv",
+    )
+    pose.add_argument("--output")
+
+    heat = sub.add_parser("heatmap", help="Build position/view localizability heatmaps")
+    heat.add_argument("model")
+    heat.add_argument("--output", required=True, help="output directory")
+    heat.add_argument("--logs")
+    heat.add_argument("--spacing", type=float)
+    heat.add_argument(
+        "--bounds",
+        nargs=6,
+        type=float,
+        metavar=("X0", "Y0", "Z0", "X1", "Y1", "Z1"),
+    )
+    heat.add_argument("--orientation-mode", choices=["map", "yaw_pitch"])
+    heat.add_argument("--orientations-per-position", type=int)
+    heat.add_argument("--yaw-step", type=float)
+    heat.add_argument("--pitches", nargs="+", type=float)
+    heat.add_argument(
+        "--matchability",
+        help="correspondence events or landmark_matchability.csv",
+    )
+    _add_environment_args(heat)
+
+    repair = sub.add_parser(
+        "repair",
+        help="Suggest capture viewpoints for a diagnosed weak pose",
+    )
+    _add_model_pose_args(repair)
+    _add_history_environment_args(repair)
+    repair.add_argument("--top-k", type=int, default=8)
+    repair.add_argument("--output")
+    return p
+
+
+def _add_model_pose_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("model")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--image-id", type=int, help="use a registered GlueMap image pose")
+    g.add_argument(
+        "--pose",
+        nargs=7,
+        type=float,
+        metavar=("X", "Y", "Z", "QX", "QY", "QZ", "QW"),
+        help="camera center + camera-to-world quaternion (xyzw)",
+    )
+
+
+def _add_history_environment_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--logs", help="CSV/JSONL actual localization logs")
+    _add_environment_args(p)
+
+
+def _add_environment_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--mesh", help="triangle mesh for camera/sun ray-casting")
+    p.add_argument("--sun-azimuth", type=float, help="Z-up map azimuth from +X, degrees")
+    p.add_argument("--sun-elevation", type=float, help="Z-up map elevation, degrees")
+
+
+def _resolve_pose(map_data: MapData, args) -> tuple[Pose, object | None]:
+    if args.image_id is not None:
+        matches = np.flatnonzero(map_data.image_ids == int(args.image_id))
+        if not len(matches):
+            raise ValueError(f"image id {args.image_id} is not a registered map image")
+        i = int(matches[0])
+        pose = Pose(map_data.image_centers[i], map_data.image_R_wc[i])
+        intr = map_data.cameras.get(int(map_data.image_camera_ids[i]))
+        return pose, intr
+    values = np.asarray(args.pose, dtype=float)
+    center = values[:3]
+    R_wc = Rotation.from_quat(values[3:]).as_matrix()
+    return Pose(center, R_wc), None
+
+
+def _environment(args):
+    mesh = getattr(args, "mesh", None)
+    raycaster = MeshRaycaster(mesh) if mesh else None
+    az = getattr(args, "sun_azimuth", None)
+    el = getattr(args, "sun_elevation", None)
+    if (az is None) ^ (el is None):
+        raise ValueError("--sun-azimuth and --sun-elevation must be provided together")
+    illumination = None
+    if az is not None and el is not None:
+        direction = sun_light_travel_direction_from_az_el(az, el)
+        illumination = SunIllumination(direction, raycaster)
+    return raycaster, illumination
+
+
+def _load_config(path: str | None) -> dict:
+    if path is None:
+        return {}
+    with Path(path).open(encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise TypeError("config root must be a mapping")
+    return data
+
+
+def _emit(payload: dict, output: str | None) -> None:
+    if output:
+        write_json(output, payload)
+        print(str(Path(output).resolve()))
+    else:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

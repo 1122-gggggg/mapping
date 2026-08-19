@@ -1,0 +1,3 @@
+image_id,image_name,registered,x,y,z,route_id,timestamp,texture_score
+101,routeA_001.jpg,1,0.0,0.0,1.5,routeA,0.000,0.82
+102,routeA_002.jpg,0,0.8,0.0,1.5,routeA,1.000,0.21

@@ -1,0 +1,40 @@
+{
+  "thresholds": {
+    "min_attempt_count": 8,
+    "min_holdout_coverage": 0.75,
+    "healthy_success_rate": 0.95,
+    "weak_success_rate": 0.60,
+    "navigation_best_health": 0.75,
+    "navigation_mean_gap": 0.25,
+    "min_visible_landmarks": 80,
+    "min_effective_landmarks": 50.0,
+    "min_hull_coverage": 0.15,
+    "min_grid_occupancy": 6,
+    "min_positive_depth_ratio": 1.0,
+    "min_fim_rank": 6,
+    "min_fim_effective_rank": 4.5,
+    "max_fim_condition_number": 1000.0,
+    "min_triangulation_angle_p10_deg": 1.0,
+    "min_view_direction_entropy": 0.35,
+    "max_reprojection_p90_px": 3.0,
+    "min_track_length_p50": 3.0,
+    "min_backend_stage_survival": 0.55,
+    "min_backend_association_ratio": 0.45,
+    "min_condition_match_score": 0.45,
+    "min_illumination_ratio": 0.35,
+    "min_existing_data_repairability": 0.55,
+    "weak_structural_health": 0.52,
+    "healthy_structural_health": 0.68,
+    "max_alias_risk": 0.45
+  },
+  "capture": {
+    "anchor_extension": 2.0,
+    "path_half_length": 3.0,
+    "sample_step": 1.0,
+    "lateral_offset": 2.0,
+    "height_offset": 1.5,
+    "max_passes": 6,
+    "expected_overlap": 0.70,
+    "map_units": "map_units"
+  }
+}

@@ -1,0 +1,331 @@
+"""One-command map screening and localization attribution."""
+
+from __future__ import annotations
+
+import json
+import math
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from mapdoctor.adapters import get_adapter
+from mapdoctor.benchmark import load_localization_results, summarize_benchmark
+from mapdoctor.config import load_settings
+from mapdoctor.diagnostics.graph import analyze_covisibility_fragility
+from mapdoctor.metrics import analyze as analyze_map_metrics
+from mapdoctor.model import MapModel
+from mapdoctor.scoring import score
+from sfm_diagnosis.diagnose import DiagnosisCode, diagnose_pose
+from sfm_diagnosis.logs import LocalizationHistory
+from sfm_diagnosis.models import MapData, Pose
+from sfm_diagnosis.report import map_health_summary
+from sfm_diagnosis.evidence import load_build_evidence
+from sfm_diagnosis.weak_regions import analyze_weak_regions
+
+from .bridge import map_model_to_map_data, mapdoctor_rows_to_history_rows, nearest_mapping_rotation
+
+MAP_LIMITED_CODES = {
+    DiagnosisCode.DATA_SPARSE.value,
+    DiagnosisCode.GEOMETRY_WEAK.value,
+    DiagnosisCode.QUERY_PARALLAX_WEAK.value,
+    DiagnosisCode.OBSERVATION_SCALE_WEAK.value,
+    DiagnosisCode.VIEW_COVERAGE_WEAK.value,
+}
+LOCALIZER_CODES = {
+    DiagnosisCode.RETRIEVAL_WEAK.value,
+    DiagnosisCode.MATCHING_WEAK.value,
+    DiagnosisCode.LANDMARK_MATCHABILITY_WEAK.value,
+}
+ALIAS_CODES = {
+    DiagnosisCode.REFERENCE_DISAGREEMENT.value,
+    DiagnosisCode.PERCEPTUAL_ALIASING_SUSPECTED.value,
+    DiagnosisCode.REFERENCE_OBSERVABILITY_WEAK.value,
+    DiagnosisCode.REFERENCE_EVIDENCE_INSUFFICIENT.value,
+}
+
+_PASS_STATUSES = frozenset({"READY", "MAP_SCREENED_LOCALIZATION_UNCHECKED"})
+
+
+def jsonable(value: Any) -> Any:
+    """Convert numpy / path / enum values so ``json.dumps`` can emit the report."""
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    if isinstance(value, np.generic):
+        return jsonable(value.item())
+    if isinstance(value, np.ndarray):
+        return jsonable(value.tolist())
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [jsonable(item) for item in value]
+    return value
+
+
+def attribute_query(strict_pass: bool, diagnosis_primary: str | None) -> str:
+    """Map a gate result plus optional pose-diagnosis primary code onto one label."""
+    if strict_pass:
+        return "OK"
+    if diagnosis_primary is None:
+        return "UNATTRIBUTED"
+    if diagnosis_primary in MAP_LIMITED_CODES:
+        return "MAP_LIMITED"
+    if diagnosis_primary in ALIAS_CODES or diagnosis_primary == DiagnosisCode.PNP_DEGENERATE.value:
+        return "ALIAS_OR_PNP"
+    if diagnosis_primary in LOCALIZER_CODES or diagnosis_primary == DiagnosisCode.HEALTHY.value:
+        return "LOCALIZER_LIMITED"
+    return "UNATTRIBUTED"
+
+
+def _load_model(model_path: str | Path, backend: str, model: MapModel | None) -> MapModel:
+    if model is not None:
+        return model
+    return get_adapter(backend).load(model_path)
+
+
+def _bounded_health(metrics_dict: dict) -> dict:
+    health = dict(metrics_dict)
+    weak = list(health.get("weak_images") or [])
+    health["weak_images_count"] = len(weak)
+    health["weak_images"] = weak[:20]
+    health["recapture_suggestions"] = list(health.get("recapture_suggestions") or [])[:20]
+    return health
+
+
+def _has_finite_xyz(result) -> bool:
+    return (
+        result.x is not None
+        and result.y is not None
+        and result.z is not None
+        and math.isfinite(result.x)
+        and math.isfinite(result.y)
+        and math.isfinite(result.z)
+    )
+
+
+def check_map(
+    model_path: str | Path,
+    *,
+    backend: str,
+    config_path: str | Path | None = None,
+    model: MapModel | None = None,
+    map_data: MapData | None = None,
+    database: str | Path | None = None,
+    pairs: str | Path | None = None,
+    images_manifest: str | Path | None = None,
+    images_dir: str | Path | None = None,
+) -> dict:
+    """Screen reconstruction health with MapDoctor and sfm-diagnosis map-only tools."""
+    settings = load_settings(config_path)
+    model = _load_model(model_path, backend, model)
+    if map_data is None:
+        map_data = map_model_to_map_data(model)
+    metrics = analyze_map_metrics(model, settings.health)
+    readiness = score(metrics, settings.health)
+    fragility = analyze_covisibility_fragility(model)
+    health_summary = map_health_summary(map_data)
+    evidence = None
+    if any(item is not None for item in (database, pairs, images_manifest, images_dir)):
+        evidence = load_build_evidence(
+            map_data,
+            database=database,
+            pairs=pairs,
+            images_manifest=images_manifest,
+            images_dir=images_dir,
+        )
+    weak = analyze_weak_regions(map_data, evidence=evidence)
+    map_ok = all(check["pass"] for check in readiness.checks.values())
+    map_status = "PASS" if map_ok else "FAIL"
+    weak_summary = weak.summary
+    return jsonable(
+        {
+            "backend": backend,
+            "source": model.source,
+            "format": model.format,
+            "readiness": {
+                "score": readiness.score,
+                "grade": readiness.grade,
+                "checks": readiness.checks,
+                "map_ok": map_ok,
+                "map_status": map_status,
+            },
+            "health": _bounded_health(metrics.to_dict()),
+            "graph": fragility.to_dict(),
+            "reconstruction": {
+                "map_health": health_summary,
+                "diagnostic_mode": weak_summary.get("diagnostic_mode"),
+                "num_weak_images": weak_summary.get("num_weak_images"),
+                "num_weak_regions": weak_summary.get("num_weak_regions"),
+                "cause_counts": weak_summary.get("cause_counts", {}),
+                "regions": list(weak.as_dict().get("regions") or [])[:20],
+            },
+        }
+    )
+
+
+def check_localize(
+    model_path: str | Path,
+    logs_path: str | Path,
+    *,
+    backend: str,
+    config_path: str | Path | None = None,
+    map_data: MapData | None = None,
+    model: MapModel | None = None,
+) -> dict:
+    """Score localization logs and attribute failures to map vs localizer vs viewpoint."""
+    settings = load_settings(config_path)
+    if map_data is None:
+        map_data = map_model_to_map_data(_load_model(model_path, backend, model))
+    results = load_localization_results(logs_path)
+    summary = summarize_benchmark(results, settings.localization)
+    history_rows = mapdoctor_rows_to_history_rows(results)
+    history = LocalizationHistory(history_rows) if history_rows else None
+
+    queries = []
+    for result in results:
+        strict_pass = result.passes(settings.localization)
+        gate_failures = result.failures(settings.localization)
+        diagnosis_primary = None
+        diagnosis_codes: list[str] = []
+        if _has_finite_xyz(result):
+            center = (float(result.x), float(result.y), float(result.z))
+            pose = Pose(center, nearest_mapping_rotation(map_data, center))
+            diagnosis = diagnose_pose(map_data, pose, history=history)
+            diagnosis_primary = diagnosis.primary.value
+            diagnosis_codes = [code.value for code in diagnosis.codes]
+        attribution = attribute_query(strict_pass, diagnosis_primary)
+        queries.append(
+            {
+                "query": result.query,
+                "strict_pass": strict_pass,
+                "gate_failures": gate_failures,
+                "attribution": attribution,
+                "diagnosis_primary": diagnosis_primary,
+                "diagnosis_codes": diagnosis_codes,
+            }
+        )
+
+    localization_ok = bool(queries) and all(row["strict_pass"] for row in queries)
+    counts = Counter(row["attribution"] for row in queries)
+    return jsonable(
+        {
+            "total": summary.total_queries,
+            "strict_success_rate": summary.strict_success_rate,
+            "localization_ok": localization_ok,
+            "localization_status": "PASS" if localization_ok else "FAIL",
+            "attribution_counts": dict(sorted(counts.items())),
+            "queries": queries,
+        }
+    )
+
+
+def _overall_status(map_ok: bool, loc: dict | None) -> str:
+    if loc is None:
+        return "MAP_SCREENED_LOCALIZATION_UNCHECKED" if map_ok else "MAP_SCREENING_FAILED"
+    loc_ok = bool(loc["localization_ok"])
+    if map_ok and loc_ok:
+        return "READY"
+    if map_ok and not loc_ok:
+        return "LOCALIZATION_FAILED"
+    if not map_ok and loc_ok:
+        return "MAP_SCREENING_FAILED"
+    return "BOTH_FAILED"
+
+
+def analyze(
+    model_path: str | Path,
+    *,
+    backend: str,
+    logs_path: str | Path | None = None,
+    config_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    database: str | Path | None = None,
+    pairs: str | Path | None = None,
+    images_manifest: str | Path | None = None,
+    images_dir: str | Path | None = None,
+) -> dict:
+    """Diagnose the map first, then optionally attribute localization logs."""
+    model = get_adapter(backend).load(model_path)
+    map_data = map_model_to_map_data(model)
+    map_report = check_map(
+        model_path,
+        backend=backend,
+        config_path=config_path,
+        model=model,
+        map_data=map_data,
+        database=database,
+        pairs=pairs,
+        images_manifest=images_manifest,
+        images_dir=images_dir,
+    )
+    loc_report = None
+    if logs_path is not None:
+        loc_report = check_localize(
+            model_path,
+            logs_path,
+            backend=backend,
+            config_path=config_path,
+            map_data=map_data,
+            model=model,
+        )
+    payload = jsonable(
+        {
+            "overall_status": _overall_status(map_report["readiness"]["map_ok"], loc_report),
+            "map": map_report,
+            "localization": loc_report,
+        }
+    )
+    if output_dir is not None:
+        out = Path(output_dir)
+        map_dir = out / "map"
+        map_dir.mkdir(parents=True, exist_ok=True)
+        (map_dir / "report.json").write_text(
+            json.dumps(map_report, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        if loc_report is not None:
+            sfm_dir = out / "sfm"
+            sfm_dir.mkdir(parents=True, exist_ok=True)
+            (sfm_dir / "report.json").write_text(
+                json.dumps(loc_report, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        (out / "report.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    return payload
+
+
+def check(
+    model_path: str | Path,
+    *,
+    backend: str,
+    logs_path: str | Path | None = None,
+    config_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    database: str | Path | None = None,
+    pairs: str | Path | None = None,
+    images_manifest: str | Path | None = None,
+    images_dir: str | Path | None = None,
+) -> dict:
+    """Compatibility alias for ``analyze``."""
+    return analyze(
+        model_path,
+        backend=backend,
+        logs_path=logs_path,
+        config_path=config_path,
+        output_dir=output_dir,
+        database=database,
+        pairs=pairs,
+        images_manifest=images_manifest,
+        images_dir=images_dir,
+    )
+
+
+def is_success_status(overall_status: str) -> bool:
+    return overall_status in _PASS_STATUSES

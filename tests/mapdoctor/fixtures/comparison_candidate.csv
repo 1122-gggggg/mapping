@@ -1,0 +1,5 @@
+query,success,inliers,inlier_ratio,reproj_p90_px,hull_coverage,grid4_occupancy,positive_depth_ratio,pose_consensus
+q1.jpg,true,58,0.58,1.3,0.34,10,1.0,0.90
+q2.jpg,true,20,0.20,2.4,0.20,6,1.0,0.80
+q3.jpg,true,42,0.42,2.1,0.25,8,1.0,0.85
+q4.jpg,true,35,0.35,2.0,0.22,7,1.0,0.80

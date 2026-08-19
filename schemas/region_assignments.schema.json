@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1122-gggggg/diagnosis_map/schemas/region_assignments.schema.json",
+  "title": "MapDoctor query-to-region assignments",
+  "oneOf": [
+    {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query", "region"],
+        "properties": {
+          "query": {"type": "string", "minLength": 1},
+          "region": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  ]
+}

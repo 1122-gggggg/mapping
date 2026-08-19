@@ -1,0 +1,3 @@
+x,y,z,qx,qy,qz,qw,success,registration_confidence,retrieval_score,matches,unique_tracks,reference_count,pnp_inliers,inlier_ratio,reproj_p90,grid_occupancy,hull_coverage,positive_depth_ratio,pose_consensus_translation_m,pose_consensus_rotation_deg
+0.0,0.0,0.0,0,0,0,1,1,0.95,0.81,140,82,5,82,0.71,1.2,12,0.42,1.0,0.03,0.4
+1.0,0.0,0.0,0,0,0,1,0,0.88,0.77,102,18,3,13,0.16,4.6,4,0.09,1.0,0.08,1.2
