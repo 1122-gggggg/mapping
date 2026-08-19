@@ -1,0 +1,60 @@
+# All numeric gates are labeled heuristic. They are conservative engineering
+# defaults, not fitted site parameters. Missing metric → fail-closed (never invent STRONG).
+# Do not treat these as empirical score cutoffs. No site video IDs or map paths.
+
+selection:
+  max_base_sessions: null
+  max_total_tracks: null
+  max_total_observations: null
+  max_tracks_per_session: null
+  min_information_gain: 0.02   # heuristic
+  min_coverage_gain: 0.02      # heuristic
+  min_independent_bridges_for_strong_edge: 2  # heuristic; fail-closed independent support
+  min_redundant_usable_edges_for_cycle: 1     # heuristic
+  weights:
+    coverage: 1.0        # heuristic
+    quality: 1.0         # heuristic
+    connectivity: 1.0    # heuristic
+    redundancy: 1.0      # heuristic
+    information: 1.0     # heuristic
+    view_diversity: 0.5  # heuristic
+    track_cost: 0.5      # heuristic
+    risk: 1.5            # heuristic; prefer fail-closed over track-greedy merge
+
+internal_status:
+  # heuristic gates; missing metric → fail toward WEAK/REJECT, never invent STRONG
+  reject_registered_ratio_below: 0.5     # heuristic
+  reject_positive_depth_below: 0.9       # heuristic
+  weak_parallax_p10_deg: 1.0             # heuristic
+  inconsistent_cycle_error_deg: 5.0      # heuristic
+  reject_sharpness_p10_below: 15.0       # heuristic; Laplacian variance
+  usable_registered_ratio_below: 0.8     # heuristic
+  strong_requires_reprojection: true     # heuristic fail-closed
+  strong_requires_parallax: true         # heuristic fail-closed
+  contaminated_map_max_status: WEAK      # heuristic fail-closed
+
+edge:
+  # VPR / retrieval is NEVER a geometric edge. Candidates only.
+  min_cross_tracks_for_verified: 30      # heuristic
+  min_verified_pairs_for_usable: 8       # heuristic
+  max_rotation_consensus_deg: 5.0        # heuristic
+  max_translation_dir_consensus_deg: 15.0  # heuristic
+  max_scale_consensus_rel: 0.15          # heuristic
+  max_cross_reproj_px: 5.0               # heuristic
+  query_frame_separation: 30             # heuristic
+  reference_center_separation: 2.0       # heuristic scene units
+  holdout_fraction: 0.2                  # heuristic explicit 80/20; never fit+validate on same points
+  max_relative_sim3_residual: 0.05       # heuristic
+
+image_qa:
+  sharpness_sample_limit: 32             # heuristic
+  underexposure_mean: 20.0               # heuristic 8-bit mean
+  overexposure_mean: 235.0               # heuristic 8-bit mean
+  near_duplicate_hist_corr: 0.995        # heuristic consecutive-frame correlation
+  blur_variance_reject: 25.0             # heuristic Laplacian variance
+
+influence:
+  # Offline contrast only. Do not treat this as a live leave-one-out authority.
+  high_reproj_delta: 1.0                 # heuristic px
+  high_became_high_reproj: 10            # heuristic image count
+  high_influence_requires_evidence: true

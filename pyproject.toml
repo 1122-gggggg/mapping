@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 colmap = ["pycolmap>=3.11"]
 viz = ["plotly>=5.18"]
+video = ["opencv-python-headless>=4.8"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
@@ -32,6 +33,9 @@ Issues = "https://github.com/1122-gggggg/sfm_map_diagnosis/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"sfm_qa.session_select" = ["defaults.yaml"]
 
 
 [tool.pytest.ini_options]

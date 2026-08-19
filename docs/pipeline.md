@@ -1,10 +1,35 @@
 # Pipeline
 
-Primary command: `sfm-qa analyze`.
+Primary commands: `sfm-qa select-sessions` (Stage 0) and `sfm-qa analyze` (Stage 1–2).
+
+## Stage 0: multi-session selection
+
+Runs from videos, before any initial SfM.
+
+```
+ALL VIDEOS
+  → per-session QA
+  → cross-session graph (VPR = candidates only; geometry = edges)
+  → greedy Base-core (maximize U(S); timestamp never ranks)
+  → remainder roles
+  → only BASE_CORE + needed BASE_SUPPORT enter initial SfM
+  → leftovers localize vs the frozen base
+  → APPEARANCE_REF / fringe / NEW_SUBMAP / QUARANTINE
+```
+
+Fail-closed: uncertain → `QUARANTINE`; no reliable geometric edge → `NEW_SUBMAP`;
+never force-merge on one critical or `AMBIGUOUS` bridge.
+
+```bash
+sfm-qa select-sessions --videos DIR --output DIR [--maps DIR] [--config PATH]
+```
+
+Selection is advisory: reports are written and the process exits 0. See
+`docs/session_selection.md`, `docs/frozen_core.md`, and `docs/method_lessons.md`.
 
 ## Stage 1: map diagnosis
 
-Always runs.
+Always runs for `sfm-qa analyze` (and `check` / `check-map` / `check-localize`).
 
 1. Load the reconstruction through the requested MapDoctor adapter (`colmap`, `glomap`, or `gluemap`).
 2. Score MapDoctor readiness / health / covisibility fragility.
@@ -26,8 +51,11 @@ This stage does not run a localizer. The CSV is an already-computed result log.
 
 If `--logs` is omitted, Stage 2 is skipped and `overall_status` is `MAP_SCREENED_LOCALIZATION_UNCHECKED` (or `MAP_SCREENING_FAILED`).
 
+Attribute leftover / recapture queries against the **frozen** Stage 0 base, not a just-hung N+1 reconstruction.
+
 ## Combined report
 
 `DIR/report.json` contains `overall_status`, `map`, and `localization` (`null` when Stage 2 is skipped).
 
 Exit 0 only for `READY` and `MAP_SCREENED_LOCALIZATION_UNCHECKED`.
+(`select-sessions` is outside this table and always exits 0 after writing.)

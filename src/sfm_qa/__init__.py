@@ -21,3 +21,10 @@ __all__ = [
     "nearest_mapping_rotation",
     "rotation_from_viewing_direction",
 ]
+
+try:
+    from .session_select.run import select_sessions
+except ImportError:
+    pass
+else:
+    __all__ = [*__all__, "select_sessions"]

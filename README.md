@@ -4,7 +4,7 @@ MapDoctor (`mapdoctor`) and sfm-diagnosis (`sfm_diagnosis`) now live in this rep
 
 本仓库用一条主命令先诊断地图，再诊断后续视觉定位。
 
-Pipeline: **Stage 1 map diagnosis → Stage 2 SfM localization**.
+Pipeline: **Stage 0 session selection → Stage 1 map diagnosis → Stage 2 SfM localization**.
 
 This tool does **not** run a localizer. `--logs` is a MapDoctor-schema localization CSV.
 
@@ -14,7 +14,18 @@ This tool does **not** run a localizer. `--logs` is a MapDoctor-schema localizat
 pip install -e '.[dev]'
 ```
 
-Optional extras: `[colmap]` (`pycolmap`), `[viz]` (`plotly`).
+Optional extras: `[colmap]` (`pycolmap`), `[viz]` (`plotly`), `[video]` (`opencv-python-headless`, Stage 0 ingest).
+
+## Stage 0: select sessions
+
+Assign roles before the first SfM. Advisory: writes reports and exits 0.
+
+```bash
+sfm-qa select-sessions --videos /path/to/videos --output ./qa-select
+# optional: --maps /path/to/maps --config config/session_select.yaml
+```
+
+See `docs/session_selection.md`, `docs/frozen_core.md`, and `docs/method_lessons.md`.
 
 ## Analyze
 
@@ -72,4 +83,4 @@ python examples/reproducible_demo/generate_demo.py --output /tmp/mapdoctor-demo
 sfm-qa analyze /tmp/mapdoctor-demo/sparse/0 --backend gluemap --output /tmp/qa-out
 ```
 
-See `docs/pipeline.md` for the two-stage contract.
+See `docs/pipeline.md` for the Stage 0–2 contract.
