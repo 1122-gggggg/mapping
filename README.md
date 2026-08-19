@@ -46,6 +46,48 @@ Exit code 0 only when `overall_status` is `READY` or `MAP_SCREENED_LOCALIZATION_
 
 `--output DIR` writes `DIR/map/report.json`, `DIR/sfm/report.json` (if `--logs`), and combined `DIR/report.json`.
 
+## Calibrated failure risk
+
+Raw health/risk scores are ranking signals until validated against held-out localization
+outcomes. Cross-fit calibration by independent flight/session whenever possible:
+
+```bash
+mapdoctor calibrate-risk loc.csv raw_risk.json \
+  --groups session_groups.json --folds 5 \
+  --output calibration.json \
+  --scores-output calibrated_oof_risk.json
+
+mapdoctor risk-coverage loc.csv calibrated_oof_risk.json \
+  --ece-binning equal_mass --confidence 0.95 \
+  --target-failure-rate 0.01 0.02 0.05
+```
+
+`calibrated_oof_risk.json` is the correct file for evaluating the current dataset. The
+`final_calibrator` in `calibration.json` is for future untouched queries:
+
+```bash
+mapdoctor apply-risk-calibrator calibration.json future_raw_risk.json \
+  --output future_calibrated_risk.json
+```
+
+Final deployment threshold selection requires a separate certification set; adjacent
+video frames must not be treated as independent trials.
+
+## Graph fragility
+
+```bash
+mapdoctor graph-fragility /path/to/sparse/0 --backend gluemap \
+  --minimum-shared-landmarks 15 --output graph.json
+```
+
+In addition to exact articulation images and bridge edges, the report includes weighted
+normalized-Laplacian `lambda2` for soft bottlenecks and a threshold-sensitivity profile.
+Shared-landmark counts are computed by sparse incidence multiplication rather than Python
+pair expansion over every track.
+
+See [`docs/diagnostic_reliability.md`](docs/diagnostic_reliability.md) for the mathematics,
+validation protocol, assumptions, literature basis, and stronger alternatives.
+
 ## Upstream CLIs
 
 The original entry points still work:
