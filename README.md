@@ -82,8 +82,8 @@ mapdoctor graph-fragility /path/to/sparse/0 --backend gluemap \
 
 In addition to exact articulation images and bridge edges, the report includes weighted
 normalized-Laplacian `lambda2` for soft bottlenecks and a threshold-sensitivity profile.
-Shared-landmark counts are computed by sparse incidence multiplication rather than Python
-pair expansion over every track.
+Shared-landmark counts are computed by blockwise sparse incidence multiplication rather
+than Python pair expansion over every track.
 
 See [`docs/diagnostic_reliability.md`](docs/diagnostic_reliability.md) for the mathematics,
 validation protocol, assumptions, literature basis, and stronger alternatives.
