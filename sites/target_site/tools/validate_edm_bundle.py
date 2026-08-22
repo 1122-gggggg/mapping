@@ -2,6 +2,7 @@
 """Validate the final EDM bundle against its model and river baseline."""
 
 from __future__ import annotations
+import sys
 
 import argparse
 import gc
@@ -10,6 +11,14 @@ from pathlib import Path
 
 import numpy as np
 
+
+_CORE = Path(__file__).resolve().parents[3] / "map_update" / "core"
+if str(_CORE) not in sys.path:
+    sys.path.insert(0, str(_CORE))
+from edm_cells import cell_identity_ok  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ts_common import hash_artifact  # noqa: E402
 
 def anchored_counts(refs: dict) -> dict[str, int]:
     return {
@@ -81,6 +90,7 @@ def main() -> None:
         "G8.1": cameras_ok and edm_shape_ok,
         "G8.2": target_median >= baseline_median,
         "G8.3": reference_payload_ok,
+        "G8.R": cell_identity_ok(refs) if isinstance(refs, dict) else False,
     }
     result = {
         "stage": "S8_edm_bundle",
@@ -95,6 +105,17 @@ def main() -> None:
         "target_median_3d_anchored_per_ref": target_median,
         "river_baseline_median_3d_anchored_per_ref": baseline_median,
         "minimum_3d_anchored_cells_per_ref": min(counts.values()) if counts else 0,
+        "provenance": {
+            "script": hash_artifact(Path(__file__)),
+            "sources": {},
+            "input_artifacts": {
+                "edm_bundle": hash_artifact(args.bundle),
+                "tracking_bundle": hash_artifact(args.tracking_bundle),
+                "baseline_bundle": hash_artifact(args.baseline_bundle),
+                "final_model": hash_artifact(args.model),
+            },
+            "predecessor_gates": {},
+        },
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(

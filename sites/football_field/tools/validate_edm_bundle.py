@@ -2,6 +2,7 @@
 """Validate the final EDM bundle against its model and river baseline."""
 
 from __future__ import annotations
+import sys
 
 import argparse
 import gc
@@ -9,6 +10,12 @@ import json
 from pathlib import Path
 
 import numpy as np
+
+
+_CORE = Path(__file__).resolve().parents[3] / "map_update" / "core"
+if str(_CORE) not in sys.path:
+    sys.path.insert(0, str(_CORE))
+from edm_cells import cell_identity_ok  # noqa: E402
 
 
 def anchored_counts(refs: dict) -> dict[str, int]:
@@ -81,6 +88,7 @@ def main() -> None:
         "G8.1": cameras_ok and edm_shape_ok,
         "G8.2": target_median >= baseline_median,
         "G8.3": reference_payload_ok,
+        "G8.R": cell_identity_ok(refs) if isinstance(refs, dict) else False,
     }
     result = {
         "stage": "S8_edm_bundle",

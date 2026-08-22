@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from argparse import Namespace
 from pathlib import Path
 
@@ -14,6 +16,8 @@ from update_pipeline import (
     build_validation_command,
     inspect_flight_bundle,
     inspect_update_summary,
+    should_run_sparsify,
+    update_requires_sparsify,
     write_quality_report,
 )
 
@@ -136,3 +140,34 @@ def test_inspect_update_summary_rejects_unimplemented_changed_route(tmp_path: Pa
 
     assert detail["summary_exists"]
     assert any("tile replacement is not implemented" in reason for reason in reasons)
+
+
+def _write_summary(out_dir: Path, rows: list[dict]) -> None:
+    (out_dir / "update_summary.json").write_text(
+        json.dumps({"version": 1, "rows": rows}),
+        encoding="utf-8",
+    )
+
+
+def test_register_route_with_keyframes_requires_sparsify(tmp_path: Path):
+    _write_summary(tmp_path, [{"seq": "P1", "route": "register", "keyframes_added": 4, "points_added": 0}])
+    assert update_requires_sparsify(tmp_path) is True
+
+
+def test_skip_and_observation_routes_do_not_sparsify(tmp_path: Path):
+    _write_summary(
+        tmp_path,
+        [
+            {"seq": "P1", "route": "skip_high_overlap", "status": "qa_only", "keyframes_added": 0},
+            {"seq": "P2", "route": "R0", "keyframes_added": 0},
+            {"seq": "P3", "route": "observation-only", "keyframes_added": 0},
+        ],
+    )
+    assert update_requires_sparsify(tmp_path) is False
+
+
+def test_no_sparsify_flag_wins_over_register_summary(tmp_path: Path):
+    _write_summary(tmp_path, [{"seq": "P1", "route": "register", "keyframes_added": 3}])
+    args = Namespace(sparsify=True, no_sparsify=True)
+    assert should_run_sparsify(args, tmp_path) is False
+

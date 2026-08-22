@@ -15,6 +15,9 @@ from validate_edm_bundle import (
     EXPECTED_BASELINE_SHA256,
 )
 
+SITE_SCALE_SCHEMA = "site_scale/1"
+GRAVITY_ALIGN_SCHEMA = "T_align_gravity/1"
+
 
 GATE_FILENAMES = (
     "S0_S3_release.json",
@@ -54,12 +57,41 @@ def release_artifact_paths(run_dir: Path, package_dir: Path) -> dict[str, Path]:
         "final_model": run_dir / "final_model",
         "tracking_bundle": run_dir / "edm" / tracking_bundle_name,
         "edm_bundle": run_dir / "edm" / edm_bundle_name,
+        "site_scale": run_dir / "site_scale.json",
+        "T_align_gravity": run_dir / "T_align_gravity.json",
         "anchor_density_baseline": EXPECTED_BASELINE_PATH,
         "package_config": package_dir / "config.json",
         "package_manifest": package_dir / "MANIFEST.sha256",
         "package_ref_poses": package_dir / "maps" / "fuhe_bridge_ref_poses.json",
         "package_bundle": package_dir / "bundles" / edm_bundle_name,
     }
+
+
+def localization_deliverables_ok(run_dir: Path) -> tuple[bool, dict[str, str | None]]:
+    specs = {
+        "site_scale": (run_dir / "site_scale.json", SITE_SCALE_SCHEMA),
+        "T_align_gravity": (run_dir / "T_align_gravity.json", GRAVITY_ALIGN_SCHEMA),
+    }
+    evidence: dict[str, str | None] = {}
+    ok = True
+    for name, (path, schema) in specs.items():
+        if not path.is_file():
+            evidence[name] = "missing"
+            ok = False
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as error:
+            evidence[name] = f"invalid json: {error}"
+            ok = False
+            continue
+        if payload.get("schema") != schema:
+            evidence[name] = f"schema {payload.get('schema')!r} != {schema!r}"
+            ok = False
+            continue
+        evidence[name] = "ok"
+    return ok, evidence
+
 
 
 def _gate_input_sha256(payload: dict, label: str) -> str | None:
@@ -224,6 +256,8 @@ def main() -> None:
         s9_gate=s9_gate,
     )
     manifest_ok, manifest_error = package_manifest_is_fresh(args.package_dir)
+    deliverable_ok, deliverable_evidence = localization_deliverables_ok(args.run_dir)
+
 
     output = args.out or gate_dir / "final_release.json"
     gate = Gate(
@@ -235,6 +269,7 @@ def main() -> None:
             "release/artifacts",
             "release/lineage",
             "release/package_manifest",
+            "release/localization_deliverables",
         },
         script_path=__file__,
         source_files=[
@@ -290,6 +325,12 @@ def main() -> None:
         manifest_ok,
         "every package manifest entry still matches its file bytes",
         error=manifest_error,
+    )
+    gate.check(
+        "release/localization_deliverables",
+        deliverable_ok,
+        "site_scale/1 and T_align_gravity/1 are present valid JSON",
+        evidence=deliverable_evidence,
     )
     gate.write(args.run_dir, output_path=output)
 

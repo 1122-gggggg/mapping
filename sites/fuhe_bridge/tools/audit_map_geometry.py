@@ -20,6 +20,9 @@ from resource_guard import required_cli_path, run_global_heavy_job
 from ts_common import Gate, read_fresh_gate_stage_metrics, required_check_ids
 
 
+# Official G6.1 scored pairs: P109/P110 ↔ P111.
+# docs/FUHE_BRIDGE_LOCALIZATION_EXPERIMENT_QUEUE.md P114↔P110/P112 notes are
+# frozen research (STOPPED 2026-07-23) and do not supersede this gate.
 REQUIRED_GHOST_SEQUENCE_PAIRS = frozenset(
     {
         ("P1090109_002", "P1110111"),
@@ -30,6 +33,31 @@ MIN_REQUIRED_ROUTE_SUPPORTED_POINTS_PER_SIDE = 500
 MIN_REQUIRED_SUPPORTED_CELLS = 5
 MIN_REQUIRED_ROUTE_SUPPORT_COVERAGE = 0.10
 MAX_GHOST_P90_OVER_SPAN = 0.040
+
+
+
+def official_g61_edges() -> frozenset[tuple[str, str]]:
+    return frozenset(tuple(sorted(edge)) for edge in REQUIRED_GHOST_SEQUENCE_PAIRS)
+
+
+def official_g61_hotspot_defaults() -> tuple[str, tuple[str, ...]]:
+    """CLI source/target defaults for the official G6.1 pair set."""
+    counts: dict[str, int] = {}
+    for left, right in official_g61_edges():
+        counts[left] = counts.get(left, 0) + 1
+        counts[right] = counts.get(right, 0) + 1
+    source = max(sorted(counts), key=counts.__getitem__)
+    targets = tuple(sorted(name for name in counts if name != source))
+    return source, targets
+
+
+def apply_official_hotspot_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    source, targets = official_g61_hotspot_defaults()
+    if not getattr(args, "source_sequence", None):
+        args.source_sequence = source
+    if not getattr(args, "target_sequence", None):
+        args.target_sequence = list(targets)
+    return args
 
 
 def _required_ghost_thresholds(maximum_p90_over_span: float) -> dict[str, float | int]:

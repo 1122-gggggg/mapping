@@ -26,6 +26,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_model(model: Path) -> Path:
+    if (model / "cameras.bin").exists() or (model / "cameras.txt").exists():
+        return model
+    nested = model / "0"
+    if (nested / "cameras.bin").exists() or (nested / "cameras.txt").exists():
+        return nested
+    raise SystemExit(
+        f"No COLMAP cameras.bin or cameras.txt found in {model} or {nested}."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -36,7 +47,9 @@ def main(argv: list[str] | None = None) -> int:
             "https://github.com/1122-gggggg/diagnosis_map) before running this optional QA hook."
         ) from exc
 
-    mapdoctor_args = [args.backend, str(args.model), "--output", str(args.output)]
+    model = resolve_model(args.model)
+    args.output.mkdir(parents=True, exist_ok=True)
+    mapdoctor_args = [args.backend, str(model), "--output", str(args.output)]
     if args.config is not None:
         mapdoctor_args.extend(["--config", str(args.config)])
     return int(mapdoctor_main(mapdoctor_args))

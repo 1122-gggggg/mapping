@@ -38,6 +38,8 @@ NOTE ON THE DESCRIPTOR
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import pickle
 import sys
 from pathlib import Path
@@ -46,22 +48,88 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ts_common import BUILD, RUNS, log, read_json, write_json  # noqa: E402
+from ts_common import BUILD, RUNS, Gate, log, read_json, sha256, write_json  # noqa: E402
 import s1_motion_scan as s1  # noqa: E402
 
 TOPK = 5
-CACHE = Path("/tmp/claude-1000/-home-cihcilab/3fd611d2-d089-48b6-aa46-06dcdc84a329/scratchpad/ts_megaloc.pkl")
+
+
+def retrieval_verdict(cross_frac: float, total_mutual: int) -> str:
+    if total_mutual == 0:
+        return "FORCE REQUIRED: zero mutual cross-direction candidates"
+    if cross_frac < 0.10:
+        return (
+            "FORCE REQUIRED: retrieval proposes cross-direction "
+            "pairs too rarely to rely on"
+        )
+    return "NATURAL RETRIEVAL MAY SUFFICE: cross-direction pairs are proposed often"
+
+
+def cache_paths(run_dir: Path) -> tuple[Path, Path]:
+    root = Path(run_dir).resolve() / "cache" / "s1b"
+    return root / "megaloc_descriptors.pkl", root / "megaloc_descriptors.meta.json"
+
+
+def _material_digest(paths: list[Path], config: dict) -> str:
+    material = {
+        "inputs": [
+            {"path": str(path.resolve()), "sha256": sha256(path)}
+            for path in sorted((Path(path) for path in paths), key=lambda item: str(item.resolve()))
+        ],
+        "config": config,
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def write_cache_metadata(
+    metadata_path: Path,
+    cache_path: Path,
+    material_paths: list[Path],
+    config: dict,
+) -> None:
+    write_json(
+        metadata_path,
+        {
+            "schema_version": "run-local-cache-v1",
+            "cache_path": str(cache_path.resolve()),
+            "cache_sha256": sha256(cache_path) if cache_path.is_file() else None,
+            "material_sha256": _material_digest(material_paths, config),
+            "config": config,
+        },
+    )
+
+
+def cache_is_fresh(
+    metadata_path: Path, material_paths: list[Path], config: dict
+) -> bool:
+    try:
+        metadata = read_json(metadata_path)
+        cache_path = Path(metadata["cache_path"])
+        return (
+            metadata.get("schema_version") == "run-local-cache-v1"
+            and metadata.get("material_sha256") == _material_digest(material_paths, config)
+            and cache_path.is_file()
+            and metadata.get("cache_sha256") == sha256(cache_path)
+        )
+    except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
+        return False
 
 
 def descriptors(run_dir: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    if CACHE.exists():
-        return pickle.loads(CACHE.read_bytes())
+    cache, metadata = cache_paths(run_dir)
+    inputs = [run_dir / "motion_manifest.json", Path(s1.__file__).resolve()]
+    config = {"topk": TOPK, "sequences": [video.seq for video in BUILD]}
+    if cache_is_fresh(metadata, inputs, config):
+        return pickle.loads(cache.read_bytes())
     out = {}
     for v in BUILD:
         log(f"MegaLoc {v.seq} ...")
         out[v.seq] = s1.megaloc_descriptors(v)
-    CACHE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE.write_bytes(pickle.dumps(out))
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(pickle.dumps(out))
+    write_cache_metadata(metadata, cache, inputs, config)
     return out
 
 
@@ -166,15 +234,7 @@ def main() -> None:
     strong = sum(1 for v in bridges.values() for c in v["top"] if c["sim"] > 0.35)
     cross_frac = float(np.mean([v["frac"] for v in natural.values()]))
 
-    log("\n" + "=" * 72)
-    if cross_frac < 0.02:
-        verdict = ("FORCE REQUIRED: retrieval essentially never proposes a "
-                   "cross-direction pair on its own")
-    elif cross_frac < 0.10:
-        verdict = ("FORCE STRONGLY ADVISED: retrieval proposes cross-direction "
-                   "pairs too rarely to rely on")
-    else:
-        verdict = "NATURAL RETRIEVAL MAY SUFFICE: cross-direction pairs are proposed often"
+    verdict = retrieval_verdict(cross_frac, total_mutual)
     log(f"VERDICT: {verdict}")
     log(f"  natural cross-direction retrieval : {cross_frac * 100:.2f}% of top-{TOPK} neighbours")
     log(f"  mutual fwd x rev candidates       : {total_mutual} across {len(bridges)} video pairs")
@@ -196,6 +256,27 @@ def main() -> None:
         "verdict": verdict,
     })
     log(f"\nwrote {run_dir / 'bridge_feasibility.json'}")
+    g = Gate(
+        "S1b_bridge_feasibility",
+        {"G1b.1"},
+        script_path=Path(__file__),
+        input_artifacts={"motion_manifest": run_dir / "motion_manifest.json"},
+        source_files=[Path(__file__).with_name("ts_common.py")],
+    )
+    g.record_predecessor_gate(
+        "S1_motion",
+        run_dir / "gates" / "S1_motion.json",
+        expected_stage="S1_motion",
+    )
+    g.check(
+        "G1b.1",
+        total_mutual > 0,
+        "at least one mutual fwd x rev candidate exists",
+        total_mutual=total_mutual,
+        cross_frac=cross_frac,
+        verdict=verdict,
+    )
+    g.write(run_dir)
 
 
 if __name__ == "__main__":

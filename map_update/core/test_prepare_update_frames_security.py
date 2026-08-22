@@ -403,3 +403,83 @@ def test_main_rejects_escape_before_overwrite_deletion(
 
     assert sentinel.read_text(encoding="utf-8") == "preserve"
     assert not output.exists()
+
+
+def test_corpus_hash_hit_is_r0_noop_and_does_not_extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    build_video = tmp_path / "build.mp4"
+    test_video = tmp_path / "test.mp4"
+    new_video = tmp_path / "new.mp4"
+    build_video.write_bytes(b"build-bytes-aaa")
+    test_video.write_bytes(b"test-bytes-bbb")
+    new_video.write_bytes(b"fresh-bytes-ccc")
+    build_digest = target.sha256_file(build_video)
+    test_digest = target.sha256_file(test_video)
+    new_digest = target.sha256_file(new_video)
+    assert len({build_digest, test_digest, new_digest}) == 3
+
+    manifest = tmp_path / "corpus_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "build": [{"seq": "S01", "rel": "build.mp4", "sha256": build_digest}],
+                "test": [
+                    {
+                        "seq": "T01",
+                        "rel": "test.mp4",
+                        "source_sha256": test_digest,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    hashes = target.corpus_content_hashes(target.load_corpus_manifest(manifest))
+    assert target.lookup_corpus_hit(build_video, hashes)["split"] == "build"
+    assert target.lookup_corpus_hit(test_video, hashes)["split"] == "test"
+    assert target.lookup_corpus_hit(new_video, hashes) is None
+
+    output = tmp_path / "output"
+    output.mkdir()
+    extracted = []
+
+    def boom(*_args, **_kwargs):
+        extracted.append(True)
+        raise AssertionError("corpus hit must not extract")
+
+    monkeypatch.setattr(target, "extract_manifest", boom)
+    monkeypatch.setattr(target, "extract_fps_flow", boom)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare_update_frames.py",
+            "--out-root",
+            str(output),
+            "--video",
+            f"BUILDSEQ={build_video}",
+            "--video",
+            f"TESTSEQ={test_video}",
+            "--corpus-manifest",
+            str(manifest),
+        ],
+    )
+
+    target.main()
+
+    report = json.loads((output / "frame_selection_report.json").read_text())
+    assert extracted == []
+    assert [row["mode"] for row in report] == ["corpus_noop", "corpus_noop"]
+    assert all(row["route"] == "R0" for row in report)
+    assert all(row["last_seen_updated"] is False for row in report)
+    assert all(row["saved"] == 0 for row in report)
+    assert not (output / "BUILDSEQ").exists()
+    assert not (output / "TESTSEQ").exists()
+
+
+def test_omitted_corpus_manifest_does_not_invent_a_site(tmp_path: Path):
+    video = tmp_path / "same.mp4"
+    video.write_bytes(b"payload")
+    assert target.lookup_corpus_hit(video, {}) is None
+

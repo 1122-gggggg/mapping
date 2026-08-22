@@ -11,11 +11,13 @@ TARGET_SITE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TARGET_SITE / "tools"))
 
 from ts_common import (  # noqa: E402
+    BUILD,
     Gate,
     GateDefinitionError,
     GateFreshnessError,
     assert_gate_fresh,
     required_check_ids,
+    stage_material_artifacts,
     verify_predecessor_chain,
 )
 
@@ -108,15 +110,7 @@ def test_complete_exact_set_passes(tmp_path: Path) -> None:
 
 
 def test_release_stage_required_id_sets_are_exact() -> None:
-    sequences = {
-        "S01_ABrot",
-        "S02_BA",
-        "S03_BA2",
-        "S04_ab",
-        "S05_P1220122",
-        "S06_P1240124",
-        "S07_P1250125",
-    }
+    sequences = {video.seq for video in BUILD}
 
     assert required_check_ids("S0_corpus") == {
         "G0.1a",
@@ -141,11 +135,14 @@ def test_release_stage_required_id_sets_are_exact() -> None:
     )
     assert required_check_ids("S2b_intrinsics") == {
         "G2.7/results_complete",
-        "G2.7/1920x1080",
         "G2.7/2688x1512",
-        "G2.7/3840x2160",
         "G2.8",
     }
+    s2b_material = stage_material_artifacts("S2b_intrinsics", Path("/tmp/run"))
+    solve_keys = {key for key in s2b_material if key.startswith("solve/")}
+    assert all(key.startswith("solve/2688x1512/") for key in solve_keys)
+    assert not any("1920x1080" in key or "3840x2160" in key for key in s2b_material)
+
     assert required_check_ids("S3_pairs") == {
         "G0.2",
         "G3.0",

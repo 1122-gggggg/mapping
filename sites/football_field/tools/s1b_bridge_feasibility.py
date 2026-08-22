@@ -38,6 +38,8 @@ NOTE ON THE DESCRIPTOR
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import pickle
 import sys
 from pathlib import Path
@@ -46,22 +48,77 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ts_common import BUILD, RUNS, log, read_json, write_json  # noqa: E402
+from ts_common import BUILD, RUNS, log, read_json, sha256, write_json  # noqa: E402
 import s1_motion_scan as s1  # noqa: E402
 
 TOPK = 5
-CACHE = Path("/tmp/claude-1000/-home-cihcilab/3fd611d2-d089-48b6-aa46-06dcdc84a329/scratchpad/ts_megaloc.pkl")
+
+
+def cache_paths(run_dir: Path) -> tuple[Path, Path]:
+    root = Path(run_dir).resolve() / "cache" / "s1b"
+    return root / "megaloc_descriptors.pkl", root / "megaloc_descriptors.meta.json"
+
+
+def _material_digest(paths: list[Path], config: dict) -> str:
+    material = {
+        "inputs": [
+            {"path": str(path.resolve()), "sha256": sha256(path)}
+            for path in sorted((Path(path) for path in paths), key=lambda item: str(item.resolve()))
+        ],
+        "config": config,
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def write_cache_metadata(
+    metadata_path: Path,
+    cache_path: Path,
+    material_paths: list[Path],
+    config: dict,
+) -> None:
+    write_json(
+        metadata_path,
+        {
+            "schema_version": "run-local-cache-v1",
+            "cache_path": str(cache_path.resolve()),
+            "cache_sha256": sha256(cache_path) if cache_path.is_file() else None,
+            "material_sha256": _material_digest(material_paths, config),
+            "config": config,
+        },
+    )
+
+
+def cache_is_fresh(
+    metadata_path: Path, material_paths: list[Path], config: dict
+) -> bool:
+    try:
+        metadata = read_json(metadata_path)
+        cache_path = Path(metadata["cache_path"])
+        return (
+            metadata.get("schema_version") == "run-local-cache-v1"
+            and metadata.get("material_sha256") == _material_digest(material_paths, config)
+            and cache_path.is_file()
+            and metadata.get("cache_sha256") == sha256(cache_path)
+        )
+    except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
+        return False
 
 
 def descriptors(run_dir: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    if CACHE.exists():
-        return pickle.loads(CACHE.read_bytes())
+    cache, metadata = cache_paths(run_dir)
+    inputs = [run_dir / "motion_manifest.json", Path(s1.__file__).resolve()]
+    config = {"topk": TOPK, "sequences": [video.seq for video in BUILD]}
+    if cache_is_fresh(metadata, inputs, config):
+        return pickle.loads(cache.read_bytes())
     out = {}
     for v in BUILD:
         log(f"MegaLoc {v.seq} ...")
         out[v.seq] = s1.megaloc_descriptors(v)
-    CACHE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE.write_bytes(pickle.dumps(out))
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(pickle.dumps(out))
+    write_cache_metadata(metadata, cache, inputs, config)
     return out
 
 

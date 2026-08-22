@@ -95,7 +95,7 @@ def test_stage_material_contract_covers_every_required_output_class(
         "intrinsics_seed_manifest",
         "intrinsics_seed",
     }
-    for shape in ("1920x1080", "2688x1512", "3840x2160"):
+    for shape in ("2688x1512",):
         for seed in ("official69", "charuco"):
             prefix = f"solve/{shape}/{seed}"
             assert set(s2b) >= {
@@ -143,11 +143,11 @@ def test_production_gate_binds_the_exact_material_contract(
 MATERIAL_CLASS_CASES = [
     ("S2_extract", "images"),
     ("S2b_intrinsics", "intrinsics_bakeoff"),
-    ("S2b_intrinsics", "solve/1920x1080/official69/status"),
-    ("S2b_intrinsics", "solve/1920x1080/official69/result"),
-    ("S2b_intrinsics", "solve/1920x1080/official69/config"),
-    ("S2b_intrinsics", "solve/1920x1080/official69/seed"),
-    ("S2b_intrinsics", "solve/1920x1080/official69/model"),
+    ("S2b_intrinsics", "solve/2688x1512/official69/status"),
+    ("S2b_intrinsics", "solve/2688x1512/official69/result"),
+    ("S2b_intrinsics", "solve/2688x1512/official69/config"),
+    ("S2b_intrinsics", "solve/2688x1512/official69/seed"),
+    ("S2b_intrinsics", "solve/2688x1512/official69/model"),
     ("S3_pairs", "forced_bridges_manifest"),
     ("S3_pairs", "forced_bridges_text"),
     ("S3_pairs", "s3_loader_probe"),
