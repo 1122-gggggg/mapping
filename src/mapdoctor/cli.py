@@ -17,33 +17,71 @@ from mapdoctor.scoring import score
 
 
 def _add_map_args(parser: argparse.ArgumentParser, include_backend: bool) -> None:
-    parser.add_argument("model", type=Path, help="Sparse model directory, e.g. sparse/0 or sparse")
+    parser.add_argument(
+        "model",
+        type=Path,
+        help="Sparse model directory, e.g. sparse/0 or sparse",
+    )
     if include_backend:
-        parser.add_argument("--backend", choices=list_adapters(), required=True, help="Map producer interface")
-    parser.add_argument("--config", type=Path, default=None, help="Optional MapDoctor JSON configuration")
-    parser.add_argument("--output", type=Path, default=Path("mapdoctor-report"), help="Output directory")
+        parser.add_argument(
+            "--backend",
+            choices=list_adapters(),
+            required=True,
+            help="Map producer interface",
+        )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional MapDoctor JSON configuration",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("mapdoctor-report"),
+        help="Output directory",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mapdoctor",
-        description="Diagnose, benchmark, and regression-test COLMAP/GLOMAP/GLUEMAP localization maps.",
+        description=(
+            "Diagnose, benchmark, and regression-test COLMAP/GLOMAP/GLUEMAP "
+            "localization maps."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    analyze_parser = sub.add_parser("analyze", help="Analyze a map through an explicit backend interface")
+    analyze_parser = sub.add_parser(
+        "analyze",
+        help="Analyze a map through an explicit backend interface",
+    )
     _add_map_args(analyze_parser, include_backend=True)
     for backend in list_adapters():
-        backend_parser = sub.add_parser(backend, help=f"Analyze a map through the {backend.upper()} interface")
+        backend_parser = sub.add_parser(
+            backend,
+            help=f"Analyze a map through the {backend.upper()} interface",
+        )
         _add_map_args(backend_parser, include_backend=False)
         backend_parser.set_defaults(backend=backend)
 
-    benchmark_parser = sub.add_parser("benchmark", help="Evaluate held-out localization query results")
+    benchmark_parser = sub.add_parser(
+        "benchmark",
+        help="Evaluate held-out localization query results",
+    )
     benchmark_parser.add_argument("results", type=Path)
     benchmark_parser.add_argument("--config", type=Path, default=None)
-    benchmark_parser.add_argument("--output", type=Path, default=Path("mapdoctor-benchmark"))
+    benchmark_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("mapdoctor-benchmark"),
+    )
 
-    compare_parser = sub.add_parser("compare", help="Regression-test a candidate map against a base")
+    compare_parser = sub.add_parser(
+        "compare",
+        help="Regression-test a candidate map against a base",
+    )
     compare_parser.add_argument("base", type=Path)
     compare_parser.add_argument("candidate", type=Path)
     compare_parser.add_argument("--config", type=Path, default=None)
@@ -53,7 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Immutable JSON/text query universe; missing candidate rows fail closed",
     )
-    compare_parser.add_argument("--output", type=Path, default=Path("mapdoctor-comparison"))
+    compare_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("mapdoctor-comparison"),
+    )
 
     regions_parser = sub.add_parser(
         "diagnose-regions",
@@ -89,6 +131,18 @@ def build_parser() -> argparse.ArgumentParser:
     risk_parser.add_argument("--config", type=Path, default=None)
     risk_parser.add_argument("--ece-bins", type=int, default=10)
     risk_parser.add_argument(
+        "--ece-binning",
+        choices=("equal_width", "equal_mass"),
+        default="equal_width",
+        help="Calibration-bin construction; equal_mass is more stable for sparse scores",
+    )
+    risk_parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="Family-wise confidence for simultaneous safe operating-point bounds",
+    )
+    risk_parser.add_argument(
         "--target-failure-rate",
         type=float,
         nargs="+",
@@ -100,13 +154,78 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("mapdoctor-risk-coverage.json"),
     )
 
+    calibrate_parser = sub.add_parser(
+        "calibrate-risk",
+        help=(
+            "Cross-fit failure probabilities without leaking adjacent sessions "
+            "or spatial blocks"
+        ),
+    )
+    calibrate_parser.add_argument("results", type=Path)
+    calibrate_parser.add_argument("risk_scores", type=Path)
+    calibrate_parser.add_argument("--config", type=Path, default=None)
+    group_source = calibrate_parser.add_mutually_exclusive_group()
+    group_source.add_argument(
+        "--groups",
+        type=Path,
+        default=None,
+        help="JSON query-to-session/block mapping; uses the region-assignment schema",
+    )
+    group_source.add_argument(
+        "--spatial-block-size",
+        type=float,
+        default=None,
+        help="Build leakage-resistant groups from query x,y,z coordinates",
+    )
+    calibrate_parser.add_argument("--folds", type=int, default=5)
+    calibrate_parser.add_argument("--seed", type=int, default=0)
+    calibrate_parser.add_argument("--min-samples", type=int, default=20)
+    calibrate_parser.add_argument("--ece-bins", type=int, default=10)
+    calibrate_parser.add_argument(
+        "--method",
+        choices=("auto", "identity", "isotonic", "beta"),
+        default="auto",
+        help="auto chooses the lowest out-of-fold Brier score",
+    )
+    calibrate_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("mapdoctor-risk-calibration.json"),
+    )
+    calibrate_parser.add_argument(
+        "--scores-output",
+        type=Path,
+        default=Path("mapdoctor-calibrated-oof-risk-scores.json"),
+        help="Out-of-fold calibrated scores for unbiased risk-coverage evaluation",
+    )
+
+    apply_parser = sub.add_parser(
+        "apply-risk-calibrator",
+        help="Apply a serialized final calibrator to future untouched risk scores",
+    )
+    apply_parser.add_argument("calibration", type=Path)
+    apply_parser.add_argument("risk_scores", type=Path)
+    apply_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("mapdoctor-calibrated-risk-scores.json"),
+    )
+
     graph_parser = sub.add_parser(
         "graph-fragility",
-        help="Find articulation images and bridge edges in the covisibility graph",
+        help="Find articulation images, bridge edges, and soft spectral bottlenecks",
     )
     graph_parser.add_argument("model", type=Path)
-    graph_parser.add_argument("--backend", choices=list_adapters(), required=True)
-    graph_parser.add_argument("--minimum-shared-landmarks", type=int, default=15)
+    graph_parser.add_argument(
+        "--backend",
+        choices=list_adapters(),
+        required=True,
+    )
+    graph_parser.add_argument(
+        "--minimum-shared-landmarks",
+        type=int,
+        default=15,
+    )
     graph_parser.add_argument(
         "--route-images",
         type=Path,
@@ -124,19 +243,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Convert trusted hloc localization logs into the MapDoctor benchmark schema",
     )
     hloc_parser.add_argument("logs", type=Path, help="hloc *_logs.pkl file")
-    hloc_parser.add_argument("reference_model", type=Path, help="Reference SfM model used by hloc")
-    hloc_parser.add_argument("--queries", type=Path, default=None, help="Optional hloc query list; includes skipped queries")
-    hloc_parser.add_argument("--output", type=Path, required=True, help="Output .csv or .json benchmark file")
+    hloc_parser.add_argument(
+        "reference_model",
+        type=Path,
+        help="Reference SfM model used by hloc",
+    )
+    hloc_parser.add_argument(
+        "--queries",
+        type=Path,
+        default=None,
+        help="Optional hloc query list; includes skipped queries",
+    )
+    hloc_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Output .csv or .json benchmark file",
+    )
     hloc_parser.add_argument(
         "--trust-pickle",
         action="store_true",
-        help="Required acknowledgement that Python pickle can execute code; use only trusted hloc logs",
+        help=(
+            "Required acknowledgement that Python pickle can execute code; "
+            "use only trusted hloc logs"
+        ),
     )
     hloc_parser.add_argument(
         "--consensus-translation-fraction",
         type=float,
         default=0.01,
-        help="Pose-consensus center-distance threshold as a fraction of reference scene extent",
+        help=(
+            "Pose-consensus center-distance threshold as a fraction of "
+            "reference scene extent"
+        ),
     )
     hloc_parser.add_argument(
         "--consensus-max-rotation-deg",
@@ -171,7 +310,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "benchmark":
         settings = load_settings(args.config)
         results = load_localization_results(args.results)
-        summary = summarize_benchmark(results, settings.localization, settings.region_cell_size)
+        summary = summarize_benchmark(
+            results,
+            settings.localization,
+            settings.region_cell_size,
+        )
         paths = write_benchmark_bundle(summary, results, args.output)
         print(f"Queries: {summary.total_queries}")
         print(f"Strict success rate: {summary.strict_success_rate:.1%}")
@@ -195,14 +338,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         paths = write_comparison_bundle(result, args.output)
         print(f"Regression gate: {result.status}")
-        print(f"Query universe: {result.query_universe_source} ({result.compared_queries})")
+        print(
+            f"Query universe: {result.query_universe_source} "
+            f"({result.compared_queries})"
+        )
         if result.missing_from_candidate:
-            print(f"Missing candidate queries: {len(result.missing_from_candidate)}")
+            print(
+                f"Missing candidate queries: "
+                f"{len(result.missing_from_candidate)}"
+            )
         print(f"HTML: {paths['html']}")
         return 0 if result.status == "PASS" else 1
     if args.command == "diagnose-regions":
         from mapdoctor.diagnostics.io import load_region_assignments, write_json
-        from mapdoctor.diagnostics.regions import RegionDiagnosisConfig, diagnose_regions
+        from mapdoctor.diagnostics.regions import (
+            RegionDiagnosisConfig,
+            diagnose_regions,
+        )
 
         settings = load_settings(args.config)
         assignments = (
@@ -234,7 +386,10 @@ def main(argv: list[str] | None = None) -> int:
             region.status in {"UNCERTAIN", "INSUFFICIENT_EVIDENCE"}
             for region in report.regions
         )
-        print(f"Regions: {len(report.regions)}; weak: {weak}; uncertain: {uncertain}")
+        print(
+            f"Regions: {len(report.regions)}; weak: {weak}; "
+            f"uncertain: {uncertain}"
+        )
         print(f"JSON: {path}")
         return 0
     if args.command == "risk-coverage":
@@ -247,12 +402,91 @@ def main(argv: list[str] | None = None) -> int:
             load_risk_scores(args.risk_scores),
             settings.localization,
             ece_bins=args.ece_bins,
+            ece_binning=args.ece_binning,
             target_failure_rates=args.target_failure_rate,
+            confidence_level=args.confidence,
         )
         path = write_json(report, args.output)
-        print(f"AURC: {report.aurc:.6f}; excess AURC: {report.excess_aurc:.6f}")
-        print(f"Brier: {report.brier_score:.6f}; ECE: {report.expected_calibration_error:.6f}")
+        print(
+            f"AURC: {report.aurc:.6f}; "
+            f"excess AURC: {report.excess_aurc:.6f}"
+        )
+        print(
+            f"Brier: {report.brier_score:.6f}; "
+            f"ECE: {report.expected_calibration_error:.6f}"
+        )
+        print(
+            f"Safe bounds: {report.confidence_level:.1%} "
+            "simultaneous confidence"
+        )
         print(f"JSON: {path}")
+        return 0
+    if args.command == "calibrate-risk":
+        from mapdoctor.diagnostics.calibration import (
+            cross_fit_failure_calibration,
+            spatial_block_groups,
+        )
+        from mapdoctor.diagnostics.io import (
+            load_region_assignments,
+            load_risk_scores,
+            write_json,
+        )
+
+        settings = load_settings(args.config)
+        results = load_localization_results(args.results)
+        groups = None
+        if args.groups is not None:
+            groups = load_region_assignments(args.groups)
+        elif args.spatial_block_size is not None:
+            groups = spatial_block_groups(results, args.spatial_block_size)
+        report = cross_fit_failure_calibration(
+            results,
+            load_risk_scores(args.risk_scores),
+            settings.localization,
+            groups=groups,
+            folds=args.folds,
+            seed=args.seed,
+            method=args.method,
+            min_samples=args.min_samples,
+            ece_bins=args.ece_bins,
+        )
+        report_path = write_json(report, args.output)
+        scores_path = write_json(
+            report.out_of_fold_risks,
+            args.scores_output,
+        )
+        print(f"Selected calibrator: {report.selected_method}")
+        print(
+            f"OOF Brier: {report.raw_brier:.6f} -> "
+            f"{report.calibrated_oof_brier:.6f}"
+        )
+        print(
+            f"Groups/folds: {report.num_groups}/{report.folds} "
+            f"({report.grouping_mode})"
+        )
+        for warning in report.warnings:
+            print(f"Warning: {warning}")
+        print(f"JSON: {report_path}")
+        print(f"OOF scores: {scores_path}")
+        return 0
+    if args.command == "apply-risk-calibrator":
+        import json
+
+        from mapdoctor.diagnostics.calibration import (
+            apply_failure_calibrator,
+            failure_calibrator_from_dict,
+        )
+        from mapdoctor.diagnostics.io import load_risk_scores, write_json
+
+        payload = json.loads(args.calibration.read_text(encoding="utf-8"))
+        calibrator = failure_calibrator_from_dict(payload)
+        calibrated = apply_failure_calibrator(
+            calibrator,
+            load_risk_scores(args.risk_scores),
+        )
+        path = write_json(calibrated, args.output)
+        print(f"Calibrator: {calibrator.method}")
+        print(f"Calibrated scores: {path}")
         return 0
     if args.command == "graph-fragility":
         from mapdoctor.diagnostics.graph import analyze_covisibility_fragility
@@ -275,6 +509,11 @@ def main(argv: list[str] | None = None) -> int:
             f"articulations: {len(report.articulation_images)}; "
             f"bridges: {len(report.bridge_edges)}"
         )
+        lambda2 = report.spectral_connectivity.normalized_laplacian_lambda2
+        print(
+            "Largest-component normalized lambda2: "
+            + (f"{lambda2:.6g}" if lambda2 is not None else "unavailable")
+        )
         print(f"JSON: {path}")
         return 0
     if args.command == "export-hloc":
@@ -290,12 +529,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         path = write_hloc_results(results, args.output)
         localized = sum(result.success for result in results)
-        print(f"Exported {len(results)} queries ({localized} localized) to {path}")
+        print(
+            f"Exported {len(results)} queries "
+            f"({localized} localized) to {path}"
+        )
         return 0
     if args.command == "adapters":
         for backend in list_adapters():
             adapter = get_adapter(backend)
-            print(f"{backend}\t{adapter.__class__.__name__}\t{adapter.display_name}")
+            print(
+                f"{backend}\t{adapter.__class__.__name__}\t"
+                f"{adapter.display_name}"
+            )
         return 0
     return 2
 
