@@ -210,8 +210,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-root", type=Path, required=True)
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--source-sequence", default="P1140114")
-    parser.add_argument("--target-sequence", action="append", required=True)
+    # Official G6.1 scored pairs: P109/P110 ↔ P111 (not the frozen P114 notes).
+    parser.add_argument("--source-sequence", default="P1110111")
+    parser.add_argument("--target-sequence", action="append", default=None)
     parser.add_argument("--source-frame-min", type=int, default=29)
     parser.add_argument("--source-frame-max", type=int, default=45)
     parser.add_argument("--pairs-per-source", type=int, default=2)
@@ -228,6 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    from audit_map_geometry import apply_official_hotspot_defaults
+
+    apply_official_hotspot_defaults(args)
     if not args.model.is_dir() or not args.image_root.is_dir() or not args.weights.is_file():
         raise SystemExit("model, image root, or pinned LoFTR weights are missing")
 
@@ -436,7 +440,7 @@ def main() -> None:
             "minimum_multipair_tracks_per_edge": args.minimum_multipair_tracks_per_edge,
         },
         "pair_selection": {
-            "policy": "nearest camera centers for each P114 hotspot frame and target sequence",
+            "policy": "nearest camera centers for each official G6.1 hotspot frame and target sequence",
             "source_frame_range": [args.source_frame_min, args.source_frame_max],
             "pairs_per_source_and_target": args.pairs_per_source,
             "pair_count": len(pairs),

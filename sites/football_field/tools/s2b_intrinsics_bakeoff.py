@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """S2b -- crash-safe two-seed intrinsics identifiability bake-off.
 
-Each of the three native resolutions is solved from ``official69`` and
+Each native resolution group is solved from ``official69`` and
 ``charuco``. A solve counts only when an explicit COMPLETE marker and its result
 survive full model/probe/hash revalidation. The aggregate always covers the
-literal six-key experiment, never merely the subset selected by this invocation.
+literal required-key experiment, never merely the subset selected by this invocation.
 
 The production S3 policy remains fixed intrinsics. This diagnostic stage alone
 sets ``refine_intrinsics=True`` to measure where two deliberately different
@@ -44,6 +44,7 @@ from ts_common import (  # noqa: E402
     log,
     read_json,
     required_check_ids,
+    resolution_groups,
     sha256,
     stage_material_artifacts,
     source_sha256,
@@ -60,12 +61,9 @@ from ts_intrinsics import (  # noqa: E402
 TS_COMMON = Path(__file__).with_name("ts_common.py")
 TS_ENV = Path(__file__).with_name("ts_env.py")
 TS_INTRINSICS = Path(__file__).with_name("ts_intrinsics.py")
-
-# The cleanest video in each resolution group (highest parallax fraction, per S1).
+# One probe video per resolution group. Football is a single 2688x1512 camera.
 PROBE_VIDEO = {
-    (1920, 1080): "S02_BA",
-    (2688, 1512): "S07_P1250125",
-    (3840, 2160): "S03_BA2",
+    shape: videos[0].seq for shape, videos in resolution_groups().items()
 }
 SEEDS = ("official69", "charuco")
 REQUIRED_SHAPES = tuple(f"{w}x{h}" for w, h in PROBE_VIDEO)
@@ -614,13 +612,13 @@ def emit_aggregate_checks(
         gate.check(
             "G2.7/results_complete",
             results_complete,
-            "6/6 required solves are COMPLETE",
+            f"{len(REQUIRED_RESULT_KEYS)}/{len(REQUIRED_RESULT_KEYS)} required solves are COMPLETE",
             **key_metrics,
         )
     else:
         gate.incomplete(
             "G2.7/results_complete",
-            f"{len(actual_keys & REQUIRED_RESULT_KEYS)}/6 required solves are COMPLETE",
+            f"{len(actual_keys & REQUIRED_RESULT_KEYS)}/{len(REQUIRED_RESULT_KEYS)} required solves are COMPLETE",
             **key_metrics,
         )
 
@@ -664,7 +662,7 @@ def emit_aggregate_checks(
     if len(consensus) != len(REQUIRED_SHAPES):
         gate.incomplete(
             "G2.8",
-            "three resolution consensuses are not yet available",
+            f"{len(REQUIRED_SHAPES)} resolution consensus(es) are not yet available",
             consensus=consensus,
             missing_shapes=sorted(set(REQUIRED_SHAPES) - set(consensus)),
         )
@@ -674,7 +672,7 @@ def emit_aggregate_checks(
         gate.check(
             "G2.8",
             spread <= CROSS_RESOLUTION_TOL,
-            f"three resolution consensuses spread by {spread * 100:.3f}%",
+            f"{len(REQUIRED_SHAPES)} resolution consensus(es) spread by {spread * 100:.3f}%",
             consensus=consensus,
             spread_pct=spread * 100,
             tolerance_pct=CROSS_RESOLUTION_TOL * 100,

@@ -9,11 +9,17 @@ import hashlib
 import json
 import re
 from pathlib import Path
+import sys
 
 import numpy as np
 
 from edm_gate_contract import require_fresh_v2_gate
 from ts_common import Gate
+
+_CORE = Path(__file__).resolve().parents[3] / "map_update" / "core"
+if str(_CORE) not in sys.path:
+    sys.path.insert(0, str(_CORE))
+from edm_cells import cell_identity_ok  # noqa: E402
 
 
 EXPECTED_PAIR_TOPK = 30
@@ -132,7 +138,7 @@ def main() -> None:
 
     gate = Gate(
         "S8_edm_bundle",
-        {"G8.0", "G8.1", "G8.2", "G8.3", "G8.4"},
+        {"G8.0", "G8.1", "G8.2", "G8.3", "G8.4", "G8.R"},
         script_path=__file__,
         source_files=[Path(__file__).with_name("edm_gate_contract.py")],
         input_artifacts={
@@ -267,6 +273,12 @@ def main() -> None:
         minimum_3d_anchored_cells_per_ref=(
             min(counts.values()) if counts else 0
         ),
+    )
+    gate.check(
+        "G8.R",
+        cell_identity_ok(refs) if isinstance(refs, dict) else False,
+        "finite xyz_by_cell rows use EDM cell_keys identity (GRID_W=128, N_CELLS=9216)",
+        n_refs=len(refs) if isinstance(refs, dict) else 0,
     )
     gate.write(args.out.parent.parent, output_path=args.out)
 

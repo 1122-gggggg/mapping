@@ -10,6 +10,7 @@ magnitude alone cannot distinguish translation baseline from pure rotation.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -213,6 +214,79 @@ def write_json_report(path: Path, report: list[dict]) -> None:
     finally:
         os.close(directory_fd)
 
+
+
+def sha256_file(path: Path, chunk: int = 1 << 22) -> str:
+    """Match sites/*/tools/ts_common.sha256 without importing site DATA paths."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(chunk):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def corpus_content_hashes(manifest: dict) -> dict[str, dict]:
+    hits: dict[str, dict] = {}
+    for split in ("build", "test"):
+        rows = manifest.get(split, [])
+        if not isinstance(rows, list):
+            continue
+        for record in rows:
+            if not isinstance(record, dict):
+                continue
+            digest = record.get("sha256") or record.get("source_sha256")
+            if isinstance(digest, str) and len(digest) == 64:
+                hits[digest] = {
+                    "seq": record.get("seq"),
+                    "split": split,
+                    "rel": record.get("rel") or record.get("source_rel"),
+                    "sha256": digest,
+                }
+    return hits
+
+
+def load_corpus_manifest(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"cannot load --corpus-manifest {path}: {exc}") from None
+    if not isinstance(payload, dict):
+        raise SystemExit(f"--corpus-manifest must be a JSON object: {path}")
+    return payload
+
+
+def iter_input_hash_targets(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        return sorted(child for child in path.rglob("*") if child.is_file())
+    return []
+
+
+def lookup_corpus_hit(path: Path, corpus_hashes: dict[str, dict]) -> dict | None:
+    if not path.exists():
+        raise SystemExit(f"input missing: {path}")
+    for target in iter_input_hash_targets(path):
+        digest = sha256_file(target)
+        hit = corpus_hashes.get(digest)
+        if hit is not None:
+            return {**hit, "path": str(target), "input_sha256": digest}
+    return None
+
+
+def corpus_noop_record(seq: str, hit: dict) -> dict:
+    return {
+        "seq": seq,
+        "mode": "corpus_noop",
+        "route": "R0",
+        "status": "noop",
+        "saved": 0,
+        "sha256": hit.get("sha256"),
+        "corpus_seq": hit.get("seq"),
+        "corpus_split": hit.get("split"),
+        "last_seen_updated": False,
+        "reason": "exact content-hash match against corpus build/test",
+    }
 
 def parse_video(items: list[str] | None) -> dict[str, Path]:
     if not items:
@@ -451,6 +525,11 @@ def main() -> None:
     ap.add_argument("--split-classes", action="store_true",
                     help="Write geometry frames to OUT/geometry/SEQ and connector rotation frames to OUT/connector/SEQ.")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument(
+        "--corpus-manifest",
+        default="",
+        help="Optional corpus_manifest.json from s0_corpus_lock. Exact sha256 hits are R0 no-ops.",
+    )
     args = ap.parse_args()
 
     out_root = Path(args.out_root)
@@ -459,6 +538,11 @@ def main() -> None:
     resolved_out_root = out_root.resolve(strict=True)
     manifest = json.loads(Path(args.manifest).read_text()) if args.manifest else {}
     report = []
+    corpus_hashes = (
+        corpus_content_hashes(load_corpus_manifest(Path(args.corpus_manifest)))
+        if args.corpus_manifest
+        else None
+    )
     try:
         anchor_fd = os.open(resolved_out_root, DIRECTORY_OPEN_FLAGS)
     except OSError as exc:
@@ -476,6 +560,12 @@ def main() -> None:
             raise SystemExit(str(exc)) from None
 
         for seq, video in videos.items():
+            if corpus_hashes is not None:
+                hit = lookup_corpus_hit(video, corpus_hashes)
+                if hit is not None:
+                    report.append(corpus_noop_record(seq, hit))
+                    continue
+
             out_fd: int | None = None
             connector_fd: int | None = None
             try:

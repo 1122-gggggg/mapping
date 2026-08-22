@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed reachability audit before any P114 hotspot match injection."""
+"""Fail-closed reachability audit before official G6.1 hotspot match injection."""
 
 from __future__ import annotations
 
@@ -92,8 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--geometry-gate", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--source-sequence", default="P1140114")
-    parser.add_argument("--target-sequence", action="append", required=True)
+    # Official G6.1 scored pairs: P109/P110 ↔ P111 (not the frozen P114 notes).
+    parser.add_argument("--source-sequence", default="P1110111")
+    parser.add_argument("--target-sequence", action="append", default=None)
     parser.add_argument("--maximum-p90-over-span", type=float, default=0.04)
     parser.add_argument("--route-support-radius-over-span", type=float, default=0.10)
     parser.add_argument("--max-points-per-cell", type=int, default=8)
@@ -103,6 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    from audit_map_geometry import apply_official_hotspot_defaults
+
+    apply_official_hotspot_defaults(args)
     if not args.model.is_dir() or not args.geometry_gate.is_file():
         raise SystemExit("model or geometry gate is missing")
     if args.maximum_p90_over_span <= 0 or args.route_support_radius_over_span <= 0:

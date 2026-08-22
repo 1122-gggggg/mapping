@@ -28,11 +28,13 @@ from ts_common import (  # noqa: E402
     GLUEMAP_PY,
     GLUEMAP_REPO,
     RUNS,
+    RUN_ID,
     SUBFOLDER_REGEX,
     Gate,
     log,
     read_json,
     required_check_ids,
+    resolution_groups,
     sha256,
     stage_material_artifacts,
     write_json,
@@ -50,10 +52,11 @@ FWD_STRIDE = 16
 REV_STRIDE = 12
 ENDPOINT_FRAC = 0.08
 ENDPOINT_STRIDE = 3
-EXPECTED_FORCED_PAIRS = 6000
-EXPECTED_SEQUENCE_PAIRS = 12
-EXPECTED_IMAGES = 1414
-EXPECTED_CAMERAS = 3
+EXPECTED_FORCED_PAIRS = 0
+EXPECTED_SEQUENCE_PAIRS = sum(v.direction == "fwd" for v in BUILD) * sum(
+    v.direction == "rev" for v in BUILD
+)
+EXPECTED_CAMERAS = len(resolution_groups())
 MIN_PAIR_DENSITY = 4.0
 
 
@@ -289,7 +292,9 @@ def source_lineage_evidence(
     }
 
 
-def _emit_probe_checks(gate: Gate, payload: dict | None, error: str) -> None:
+def _emit_probe_checks(
+    gate: Gate, payload: dict | None, error: str, *, expected_images: int
+) -> None:
     if payload is None:
         for gid in ("G3.1", "G3.2", "G3.3", "G3.4", "G3.5d"):
             gate.incomplete(gid, error)
@@ -306,15 +311,16 @@ def _emit_probe_checks(gate: Gate, payload: dict | None, error: str) -> None:
     )
     gate.check(
         "G3.2",
-        payload["n_images"] == EXPECTED_IMAGES
-        and payload["n_unique_images"] == EXPECTED_IMAGES
-        and payload["n_dimension_matches"] == EXPECTED_IMAGES
+        payload["n_images"] == expected_images
+        and payload["n_unique_images"] == expected_images
+        and payload["n_dimension_matches"] == expected_images
         and not payload["missing_seed_names"]
         and not payload["dimension_mismatches"],
         f"seed/disk dimensions match {payload['n_dimension_matches']}/"
         f"{payload['n_images']} real-loader images",
         n_images=payload["n_images"],
         n_unique_images=payload["n_unique_images"],
+        expected_images=expected_images,
         missing_seed_names=payload["missing_seed_names"],
         dimension_mismatches=payload["dimension_mismatches"],
     )
@@ -370,7 +376,7 @@ def stage_gate(run_dir: Path) -> Gate:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-name", default="football_field_v1")
+    parser.add_argument("--run-name", default=RUN_ID)
     parser.add_argument("--candidate", default="official69")
     parser.add_argument("--max-pairs", type=int, default=12000)
     parser.add_argument("--internal-loader-probe", action="store_true", help=argparse.SUPPRESS)
@@ -502,7 +508,7 @@ def main() -> None:
     gate.check(
         "G0.2",
         lineage_ok,
-        "exact seven locked source rel/hash pairs; no P071/P123/P126 lineage"
+        f"exact {len(BUILD)} locked source rel/hash pairs"
         if lineage_ok else "frame source lineage is not the exact S0 build lock",
         **lineage_metrics,
     )
@@ -514,19 +520,24 @@ def main() -> None:
         "pinned pycolmap runtime fingerprint verified",
         runtime_fingerprint=runtime,
     )
-    _emit_probe_checks(gate, probe, probe_detail)
+    _emit_probe_checks(
+        gate,
+        probe,
+        probe_detail,
+        expected_images=len(frame_manifest.get("frames", [])),
+    )
 
-    expected_sequences = {video.seq for video in BUILD}
+    unknown_only = all(video.direction == "unknown" for video in BUILD)
+    invented = bool(fwd) or bool(rev)
     gate.check(
         "G3.5a",
-        set(fwd) | set(rev) == expected_sequences
-        and set(fwd).isdisjoint(rev)
-        and len(fwd) == 4
-        and len(rev) == 3,
-        f"all seven directions resolved exactly once: {len(fwd)} fwd/{len(rev)} rev",
+        unknown_only and not invented,
+        "all BUILD directions unknown, no invented fwd/rev"
+        if unknown_only and not invented
+        else f"invented or leftover direction labels: fwd={fwd} rev={rev}",
         fwd=fwd,
         rev=rev,
-        expected=sorted(expected_sequences),
+        build_directions={video.seq: video.direction for video in BUILD},
     )
     gate.check(
         "G3.5b",

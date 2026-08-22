@@ -55,10 +55,15 @@ from typing import Any, Sequence
 
 import numpy as np
 
-EDM_CELL = 8            # coarse stride; edm_matcher.COARSE_STRIDE
-EDM_W, EDM_H = 1024, 576  # edm_matcher.EDM_W / EDM_H
-GRID_W, GRID_H = EDM_W // EDM_CELL, EDM_H // EDM_CELL   # 128 x 72
-N_CELLS = GRID_W * GRID_H                               # 9216
+from edm_cells import (  # noqa: F401
+    EDM_CELL,
+    EDM_H,
+    EDM_W,
+    GRID_H,
+    GRID_W,
+    N_CELLS,
+    cell_keys,
+)
 
 
 @dataclass
@@ -149,12 +154,6 @@ def dedup_anchored(rows: Sequence[RefMatch]) -> AnchoredResult:
     )
 
 
-def cell_keys(points: np.ndarray, cell: int = EDM_CELL) -> np.ndarray:
-    """round(kpt / cell) -- EDM's image-intrinsic keypoint identity."""
-    pts = np.asarray(points, dtype=np.float64)
-    if pts.size == 0:
-        return np.zeros((0, 2), dtype=np.int64)
-    return np.rint(pts / float(cell)).astype(np.int64)
 
 
 def _add_to_path(directory: Path | None) -> None:

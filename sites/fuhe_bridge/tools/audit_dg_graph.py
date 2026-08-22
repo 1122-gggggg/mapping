@@ -28,6 +28,8 @@ from run_gluemap_memory_safe import (
 )
 
 
+# Official G6.1 scored pairs: P109/P110 ↔ P111.
+# Same set as REQUIRED_GHOST_SEQUENCE_PAIRS; P114 research notes do not apply.
 LOFTR_SEQUENCE_ALLOWLIST = frozenset(
     {
         tuple(sorted(("P1100110_005", "P1110111"))),

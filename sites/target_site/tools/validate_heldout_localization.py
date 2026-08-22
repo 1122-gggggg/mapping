@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ts_common import hash_artifact  # noqa: E402
 
 def evaluate_results(results: list[dict], *, reverse_sequences: set[str]) -> dict:
     evidence = []
@@ -87,6 +90,18 @@ def main() -> None:
     forced = json.loads(args.forced_manifest.read_text(encoding="utf-8"))
     report = evaluate_results(results, reverse_sequences=set(forced["rev"]))
     report["status"] = "PASS" if all(report["checks"].values()) else "FAIL"
+    report["provenance"] = {
+        "script": hash_artifact(Path(__file__)),
+        "sources": {},
+        "input_artifacts": {
+            **{
+                f"benchmark_result_{index}": hash_artifact(path)
+                for index, path in enumerate(args.result)
+            },
+            "forced_manifest": hash_artifact(args.forced_manifest),
+        },
+        "predecessor_gates": {},
+    }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

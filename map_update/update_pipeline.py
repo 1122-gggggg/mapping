@@ -20,7 +20,7 @@ SYSTEM_ROOT = UPDATE_ROOT.parent
 LOC_ROOT = SYSTEM_ROOT / "定位"
 DEPLOY = LOC_ROOT / "deploy_code" / "sfm_glomap_deploy"
 SCRIPTS = LOC_ROOT / "source" / "sfm_glomap" / "scripts"
-CORE_DIR = UPDATE_ROOT / "pipeline" / "update_pipeline_core"
+CORE_DIR = Path(__file__).resolve().parent / "core"
 PREPARE = CORE_DIR / "prepare_update_frames.py"
 UPDATE_TOOL = CORE_DIR / "map_update_tool.py"
 SPARSIFY = CORE_DIR / "sparsify_reloc_bundle.py"
@@ -34,6 +34,86 @@ DEFAULT_FPS = 3.0
 DEFAULT_MIN_FLOW_PX = 0.8
 DEFAULT_MAX_FLOW_PX = 180.0
 DEFAULT_KEEP_ROTATION_EVERY = 8
+
+_NO_SPARSIFY_ROUTES = {
+    "skip_high_overlap",
+    "changed-region",
+    "R0",
+    "observation",
+    "observation-only",
+}
+_NO_SPARSIFY_STATUSES = {"qa_only", "needs_tile_replace"}
+
+
+def required_inrepo_scripts() -> dict[str, Path]:
+    return {
+        "prepare_update_frames": PREPARE,
+        "map_update_tool": UPDATE_TOOL,
+        "sparsify_reloc_bundle": SPARSIFY,
+    }
+
+
+def preflight_required_scripts() -> dict[str, dict[str, object]]:
+    checks = {
+        name: {"path": str(path), "exists": path.is_file()}
+        for name, path in required_inrepo_scripts().items()
+    }
+    passed = all(item["exists"] for item in checks.values())
+    if not passed:
+        missing = [str(item["path"]) for item in checks.values() if not item["exists"]]
+        raise SystemExit(
+            "update_pipeline preflight failed; missing in-repo scripts: "
+            + ", ".join(missing)
+        )
+    return checks
+
+
+def require_explicit_if_default_missing(
+    flag: str, provided: str | None, default: Path
+) -> str:
+    if provided:
+        return provided
+    if not default.exists():
+        raise SystemExit(
+            f"{flag} default is missing ({default}); pass {flag} explicitly"
+        )
+    return str(default)
+
+
+def update_requires_sparsify(out_dir: Path) -> bool:
+    summary = out_dir / "update_summary.json"
+    if not summary.is_file():
+        return False
+    try:
+        data = json.loads(summary.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    rows = data.get("rows", [])
+    if not isinstance(rows, list):
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        route = str(row.get("route", ""))
+        status = str(row.get("status", ""))
+        if route in _NO_SPARSIFY_ROUTES or status in _NO_SPARSIFY_STATUSES:
+            continue
+        try:
+            keyframes_added = int(row.get("keyframes_added") or 0)
+        except (TypeError, ValueError):
+            continue
+        if keyframes_added > 0:
+            return True
+    return False
+
+
+def should_run_sparsify(args: argparse.Namespace, out_dir: Path) -> bool:
+    if getattr(args, "no_sparsify", False):
+        return False
+    if getattr(args, "sparsify", False):
+        return True
+    return update_requires_sparsify(out_dir)
+
 
 
 def timestamp() -> str:
@@ -290,10 +370,26 @@ def main() -> None:
     parser.add_argument("--connector-root", default="", help="Prepared connector frames root.")
     parser.add_argument("--work-dir", default="")
     parser.add_argument("--out-dir", default="")
-    parser.add_argument("--base-bundle", default=str(DEFAULT_BASE))
-    parser.add_argument("--base-model", default=str(DEFAULT_MODEL))
-    parser.add_argument("--base-images", default=str(DEFAULT_IMAGES))
-    parser.add_argument("--base-megaloc-cache", default=str(DEFAULT_BASE_CACHE))
+    parser.add_argument(
+        "--base-bundle",
+        default=None,
+        help=f"Base reloc bundle (default: {DEFAULT_BASE} if that machine-local path exists).",
+    )
+    parser.add_argument(
+        "--base-model",
+        default=None,
+        help=f"Base sparse model (default: {DEFAULT_MODEL} if that machine-local path exists).",
+    )
+    parser.add_argument(
+        "--base-images",
+        default=None,
+        help=f"Base images (default: {DEFAULT_IMAGES} if that machine-local path exists).",
+    )
+    parser.add_argument(
+        "--base-megaloc-cache",
+        default=None,
+        help=f"Base MegaLoc cache (default: {DEFAULT_BASE_CACHE} if that machine-local path exists).",
+    )
     parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
     parser.add_argument("--motion-filter", choices=["none", "flow", "parallax"], default="parallax")
     parser.add_argument("--min-flow-px", type=float, default=DEFAULT_MIN_FLOW_PX)
@@ -310,8 +406,16 @@ def main() -> None:
     parser.add_argument("--disable-stage-gates", action="store_true")
     parser.add_argument("--gate-min-geometry-frames", type=int, default=4)
     parser.add_argument("--gate-min-connector-frames", type=int, default=0)
-    parser.add_argument("--sparsify", action="store_true",
-                        help="Create and gate a separate slim deployment bundle after update.")
+    parser.add_argument(
+        "--sparsify",
+        action="store_true",
+        help="Force slim-bundle sparsify after update (default: auto when register/R1 added keyframes).",
+    )
+    parser.add_argument(
+        "--no-sparsify",
+        action="store_true",
+        help="Skip post-update sparsify even if the update added keyframes.",
+    )
     parser.add_argument("--sparsify-target-fraction", type=float, default=0.85)
     parser.add_argument("--sparsify-min-per-prefix", type=int, default=40)
     parser.add_argument("--sparsify-keep-prefix", action="append", default=[])
@@ -320,6 +424,20 @@ def main() -> None:
 
     if not args.video and not args.frames_root:
         raise SystemExit("provide --video or --frames-root")
+    preflight_required_scripts()
+    args.base_bundle = require_explicit_if_default_missing(
+        "--base-bundle", args.base_bundle, DEFAULT_BASE
+    )
+    args.base_model = require_explicit_if_default_missing(
+        "--base-model", args.base_model, DEFAULT_MODEL
+    )
+    args.base_images = require_explicit_if_default_missing(
+        "--base-images", args.base_images, DEFAULT_IMAGES
+    )
+    args.base_megaloc_cache = require_explicit_if_default_missing(
+        "--base-megaloc-cache", args.base_megaloc_cache, DEFAULT_BASE_CACHE
+    )
+
 
     stamp = timestamp()
     work_dir = Path(args.work_dir) if args.work_dir else UPDATE_ROOT / "workspaces" / f"update_{stamp}"
@@ -380,7 +498,7 @@ def main() -> None:
         validate_update_outputs(out_dir, require_ply="--no-ply" not in passthrough)
 
     slim_bundle = None
-    if args.sparsify:
+    if should_run_sparsify(args, out_dir):
         input_bundle = out_dir / "reloc_map_updated.pt"
         slim_bundle = Path(args.slim_out) if args.slim_out else out_dir / "reloc_map_updated_slim.pt"
         run(build_sparsify_command(args, input_bundle, slim_bundle, out_dir / "observation_stats.json"))

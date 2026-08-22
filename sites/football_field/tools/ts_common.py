@@ -30,6 +30,7 @@ from typing import Any, Iterable, Literal, Mapping, Sequence
 DATA = Path("/media/cihcilab/新增磁碟區/足球場")
 BUILD_ROOT = Path("/media/cihcilab/新增磁碟區/sfm_system/建圖/football_field")
 RUNS = BUILD_ROOT / "runs"
+RUN_ID = "football_field_v1"
 
 GLUEMAP_REPO = Path("/media/cihcilab/新增磁碟區/河濱場域/gluemap_build/tools/gluemap")
 GLUEMAP_ENV = Path("/home/cihcilab/micromamba/envs/target-site-gluemap-run")
@@ -173,9 +174,7 @@ REQUIRED_GATE_IDS: dict[str, frozenset[str]] = {
     "S2b_intrinsics": frozenset(
         {
             "G2.7/results_complete",
-            "G2.7/1920x1080",
             "G2.7/2688x1512",
-            "G2.7/3840x2160",
             "G2.8",
         }
     ),
@@ -243,7 +242,7 @@ def stage_material_artifacts(stage: str, run_dir: Path | str) -> dict[str, Path]
         return s2
     if stage == "S2b_intrinsics":
         artifacts = {**s2, "intrinsics_bakeoff": root / "intrinsics_bakeoff.json"}
-        for shape in ("1920x1080", "2688x1512", "3840x2160"):
+        for shape in (f"{w}x{h}" for w, h in resolution_groups()):
             for seed in ("official69", "charuco"):
                 prefix = f"solve/{shape}/{seed}"
                 work = root / "intrinsics_bakeoff" / f"{shape}__{seed}"

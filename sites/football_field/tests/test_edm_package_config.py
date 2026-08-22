@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 
 SFMSYSTEM = Path(__file__).resolve().parents[3]
 PACKAGE_SCRIPT = SFMSYSTEM / "EDM定位測試/build/make_transfer_package.py"
+TOOLS = Path(__file__).resolve().parents[1] / "tools"
+sys.path.insert(0, str(TOOLS))
+
+from ts_common import RUN_ID  # noqa: E402
+from verify_final_release import release_artifact_paths  # noqa: E402
 
 
 def load_package_module():
@@ -20,26 +27,17 @@ def load_package_module():
     return module
 
 
-def test_target_site_query_camera_is_scaled_fixed_pinhole() -> None:
-    site = load_package_module().SITES["target_site"]
-    camera = site["pnp_camera"]
-    expected_focal = 1955.532134535766 * 1280 / 2688
+def test_football_package_points_to_run_id_outputs(tmp_path: Path) -> None:
+    paths = release_artifact_paths(tmp_path / "run", tmp_path / "package")
 
-    assert camera["model"] == "PINHOLE"
-    assert camera["width"] == 1280
-    assert camera["height"] == 720
-    assert np.allclose(
-        camera["params"], [expected_focal, expected_focal, 640.0, 360.0], atol=1e-12
-    )
+    assert RUN_ID == "football_field_v1"
+    assert paths["edm_bundle"].name == f"{RUN_ID}_reloc_map_edm.pt"
+    assert paths["package_bundle"].name == f"{RUN_ID}_reloc_map_edm.pt"
+    assert "target_site" not in paths["edm_bundle"].name
+    assert "target_site" not in paths["package_bundle"].name
 
 
-def test_target_site_package_points_to_v1_outputs() -> None:
-    site = load_package_module().SITES["target_site"]
-
-    assert site["model"].name == "final_model"
-    assert site["bundle"].name == "target_site_v1_reloc_map_edm.pt"
-
-
+@pytest.mark.skipif(not PACKAGE_SCRIPT.is_file(), reason="shared package script is absent")
 def test_export_ref_poses_excludes_deregistered_images(
     tmp_path: Path, monkeypatch
 ) -> None:

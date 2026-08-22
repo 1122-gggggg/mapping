@@ -15,12 +15,8 @@ from ts_common import Gate, write_json  # noqa: E402
 
 LITERAL_KEYS = frozenset(
     {
-        ("1920x1080", "official69"),
-        ("1920x1080", "charuco"),
         ("2688x1512", "official69"),
         ("2688x1512", "charuco"),
-        ("3840x2160", "official69"),
-        ("3840x2160", "charuco"),
     }
 )
 
@@ -62,20 +58,21 @@ def _write_complete_marker(root: Path, shape: str, seed: str) -> None:
     )
 
 
-def test_required_result_keys_are_the_literal_six_key_experiment() -> None:
+def test_required_result_keys_are_the_literal_two_key_experiment() -> None:
     assert s2b.REQUIRED_RESULT_KEYS == LITERAL_KEYS
+    assert s2b.PROBE_VIDEO == {(2688, 1512): "P1270127"}
 
 
 def test_failed_import_preserves_the_salad_descriptor_cache(tmp_path: Path) -> None:
-    source = tmp_path / "archive" / "3840x2160__charuco"
-    target = tmp_path / "fresh" / "3840x2160__charuco"
-    cache = source / "gluemap" / "S03_BA2" / "salad_descriptors.pt"
+    source = tmp_path / "archive" / "2688x1512__charuco"
+    target = tmp_path / "fresh" / "2688x1512__charuco"
+    cache = source / "gluemap" / "P1270127" / "salad_descriptors.pt"
     cache.parent.mkdir(parents=True)
     cache.write_bytes(b"validated descriptor cache")
 
     record = s2b._copy_salad_descriptor_cache(source, target)
 
-    copied = target / "gluemap" / "S03_BA2" / "salad_descriptors.pt"
+    copied = target / "gluemap" / "P1270127" / "salad_descriptors.pt"
     assert copied.read_bytes() == cache.read_bytes()
     assert record["sha256"] == s2b.sha256(cache)
 
@@ -83,8 +80,7 @@ def test_failed_import_preserves_the_salad_descriptor_cache(tmp_path: Path) -> N
 def test_partial_results_emit_every_required_id_and_remain_incomplete(
     tmp_path: Path,
 ) -> None:
-    for seed in s2b.SEEDS:
-        _write_complete_marker(tmp_path, "1920x1080", seed)
+    _write_complete_marker(tmp_path, "2688x1512", "official69")
     results, statuses = s2b.load_result_markers(tmp_path, validate=False)
     gate = _gate()
 
@@ -96,7 +92,7 @@ def test_partial_results_emit_every_required_id_and_remain_incomplete(
     assert next(c for c in gate.checks if c["id"] == "G2.8")["state"] == "INCOMPLETE"
 
 
-def test_six_consistent_results_can_pass_every_required_check(tmp_path: Path) -> None:
+def test_two_consistent_results_can_pass_every_required_check(tmp_path: Path) -> None:
     for shape, seed in LITERAL_KEYS:
         _write_complete_marker(tmp_path, shape, seed)
     results, statuses = s2b.load_result_markers(tmp_path, validate=False)
@@ -112,15 +108,15 @@ def test_six_consistent_results_can_pass_every_required_check(tmp_path: Path) ->
 def test_noncomplete_attempt_state_invalidates_an_older_result(
     tmp_path: Path, state: str
 ) -> None:
-    work = tmp_path / "1920x1080__official69"
+    work = tmp_path / "2688x1512__official69"
     write_json(
         work / "result.json",
-        {**_result("1920x1080", "official69"), "attempt_id": "old"},
+        {**_result("2688x1512", "official69"), "attempt_id": "old"},
     )
     write_json(
         work / "status.json",
         {
-            "logical_key": "1920x1080/official69",
+            "logical_key": "2688x1512/official69",
             "state": state,
             "attempt_id": "new",
         },
@@ -129,7 +125,7 @@ def test_noncomplete_attempt_state_invalidates_an_older_result(
     results, statuses = s2b.load_result_markers(tmp_path, validate=False)
 
     assert results == {}
-    assert statuses[("1920x1080", "official69")]["state"] == state
+    assert statuses[("2688x1512", "official69")]["state"] == state
 
 
 def test_duplicate_logical_keys_are_rejected(tmp_path: Path) -> None:
@@ -137,7 +133,7 @@ def test_duplicate_logical_keys_are_rejected(tmp_path: Path) -> None:
         write_json(
             tmp_path / dirname / "status.json",
             {
-                "logical_key": "1920x1080/official69",
+                "logical_key": "2688x1512/official69",
                 "state": "NOT_RUN",
                 "attempt_id": dirname,
             },
@@ -157,7 +153,7 @@ def test_duplicate_logical_keys_are_rejected(tmp_path: Path) -> None:
     ],
 )
 def test_result_payload_rejects_invalid_measurements(update: dict, match: str) -> None:
-    payload = _result("1920x1080", "official69")
+    payload = _result("2688x1512", "official69")
     payload.update(update)
 
     with pytest.raises(ValueError, match=match):
@@ -165,14 +161,14 @@ def test_result_payload_rejects_invalid_measurements(update: dict, match: str) -
 
 
 def test_complete_result_requires_fresh_generating_provenance() -> None:
-    payload = _result("1920x1080", "official69")
+    payload = _result("2688x1512", "official69")
 
     with pytest.raises(ValueError, match="generating provenance"):
         s2b.validate_result_payload(payload, expected_probe_hash="probe-hash")
 
 
 def test_complete_result_rejects_imported_from_laundering() -> None:
-    payload = _result("1920x1080", "official69")
+    payload = _result("2688x1512", "official69")
     payload["generating_provenance"] = {
         "mode": "fresh_solve",
         "runtime_fingerprint": {"version": "4.0.4"},

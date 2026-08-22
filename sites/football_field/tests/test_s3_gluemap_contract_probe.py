@@ -1,38 +1,46 @@
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from pathlib import Path
 
-import numpy as np
-import torch
+import pytest
 import yaml
 
 
 TARGET_SITE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TARGET_SITE / "tools"))
 
-from ts_common import GLUEMAP_REPO, RUNS  # noqa: E402
-
-sys.path.insert(0, str(GLUEMAP_REPO))
-
-from gluemap.datasets import multi_sequence_twoview as multi  # noqa: E402
-from gluemap.utils.colmap import extract_gt_intrinsics  # noqa: E402
+from ts_common import BUILD, GLUEMAP_REPO, RUNS, RUN_ID  # noqa: E402
+import s3_pairs as s3  # noqa: E402
 
 
 ENGINE_REGRESSION = GLUEMAP_REPO / "tests" / "test_multi_sequence_extra_pairs.py"
+FOOTBALL_RUN = RUNS / RUN_ID
+HAS_FOOTBALL_S3 = (FOOTBALL_RUN / "gluemap_config.yaml").is_file()
+
+
+def test_s3_expected_counts_follow_football_corpus() -> None:
+    assert len(BUILD) == 2
+    assert s3.EXPECTED_CAMERAS == 1
+    assert s3.EXPECTED_SEQUENCE_PAIRS == 0
+    assert s3.EXPECTED_FORCED_PAIRS == 0
+    assert all(video.direction == "unknown" for video in BUILD)
 
 
 def test_engine_regression_does_not_bypass_the_real_constructor() -> None:
+    pytest.importorskip("torch")
+    if not ENGINE_REGRESSION.is_file():
+        pytest.skip("gluemap engine regression test is not present")
     source = ENGINE_REGRESSION.read_text(encoding="utf-8")
 
     assert "MultiSequencePairs.__new__" not in source
     assert "MultiSequencePairs(args" in source
 
 
+@pytest.mark.skipif(not HAS_FOOTBALL_S3, reason="football S3 run is not present")
 def test_production_config_and_g36_bind_literal_zero_num_workers() -> None:
-    run_dir = RUNS / "target_site_v1"
+    run_dir = FOOTBALL_RUN
     config = yaml.safe_load(
         (run_dir / "gluemap_config.yaml").read_text(encoding="utf-8")
     )
@@ -47,8 +55,9 @@ def test_production_config_and_g36_bind_literal_zero_num_workers() -> None:
     assert g36["metrics"]["num_workers"] == 0
 
 
+@pytest.mark.skipif(not HAS_FOOTBALL_S3, reason="football S3 run is not present")
 def test_production_config_binds_memory_safe_feature_budgets() -> None:
-    run_dir = RUNS / "target_site_v1"
+    run_dir = FOOTBALL_RUN
     config = yaml.safe_load(
         (run_dir / "gluemap_config.yaml").read_text(encoding="utf-8")
     )
@@ -69,10 +78,18 @@ def test_production_config_binds_memory_safe_feature_budgets() -> None:
     assert g36["metrics"]["memory_safe_launcher"] == str(launcher)
 
 
-def test_production_config_injects_exact_bridges_and_loads_three_gt_cameras(
+@pytest.mark.skipif(not HAS_FOOTBALL_S3, reason="football S3 run is not present")
+def test_production_config_injects_exact_bridges_and_loads_one_gt_camera(
     monkeypatch,
 ) -> None:
-    run_dir = RUNS / "target_site_v1"
+    argparse = pytest.importorskip("argparse")
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    sys.path.insert(0, str(GLUEMAP_REPO))
+    from gluemap.datasets import multi_sequence_twoview as multi
+    from gluemap.utils.colmap import extract_gt_intrinsics
+
+    run_dir = FOOTBALL_RUN
     config = yaml.safe_load(
         (run_dir / "gluemap_config.yaml").read_text(encoding="utf-8")
     )
@@ -115,7 +132,7 @@ def test_production_config_injects_exact_bridges_and_loads_three_gt_cameras(
     )
 
     assert Path(args.images_path).is_absolute()
-    assert len(expected_pairs) == 6000
+    assert len(expected_pairs) == s3.EXPECTED_FORCED_PAIRS
     assert loaded_pairs == expected_pairs
-    assert len(gt_intrinsics) == 3
-    assert sum(item is not None for item in gt_intrinsics) == 3
+    assert len(gt_intrinsics) == s3.EXPECTED_CAMERAS
+    assert sum(item is not None for item in gt_intrinsics) == s3.EXPECTED_CAMERAS

@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ts_common import (  # noqa: E402
-    ASPECT, BUILD, DROPPED, EXCLUDED_DIRS, RUNS, SUBFOLDER_REGEX, TEST,
+    ASPECT, BUILD, DROPPED, EXCLUDED_DIRS, RUNS, RUN_ID, SUBFOLDER_REGEX, TEST,
     Gate, ffprobe, log, required_check_ids, resolution_groups, sha256,
     stage_material_artifacts, write_json,
 )
@@ -62,7 +62,7 @@ def probe_all(videos, *, want_hash: bool) -> list[dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--run-name", default="football_field_v1")
+    ap.add_argument("--run-name", default=RUN_ID)
     ap.add_argument("--no-hash", action="store_true",
                     help="skip sha256 (10 GB of reads); for iterating only")
     args = ap.parse_args()
@@ -87,8 +87,8 @@ def main() -> None:
         r["rel"] for r in build
         if (r["probed"]["width"], r["probed"]["height"]) != (r["declared"]["width"], r["declared"]["height"])
     ]
-    g.check("G0.1a", len(build) == 7 and not mismatched,
-            "7 build videos, all probing at their declared resolution"
+    g.check("G0.1a", len(build) == len(BUILD) and not mismatched,
+            f"{len(BUILD)} build videos, all probing at their declared resolution"
             if not mismatched else f"resolution mismatch: {mismatched}",
             n_build=len(build), mismatched=mismatched)
 
@@ -100,7 +100,7 @@ def main() -> None:
     else:
         g.incomplete(
             "G0.1b",
-            "--no-hash is diagnostic only; release corpus requires all nine hashes",
+            "--no-hash is diagnostic only; release corpus requires every declared hash",
             n_hashed=sum(bool(h) for h in hashes),
             n_required=len(build) + len(test),
         )
@@ -112,20 +112,20 @@ def main() -> None:
     bh = {r["sha256"] for r in build if r.get("sha256")}
     th = {r["sha256"] for r in test if r.get("sha256")}
     g.check("G0.2a", not overlap,
-            "test video paths are disjoint from the seven build paths"
+            "held-out video paths are disjoint from all declared build paths"
             if not overlap else f"PATH LEAK: {sorted(overlap)}",
             build_paths=sorted(build_rels), test_paths=sorted(test_rels),
             path_overlap=sorted(overlap))
     if all(hashes):
         g.check("G0.2b", not (bh & th),
-                "all nine hashes are present and build/test content is disjoint"
+                "all declared hashes are present and build/test content is disjoint"
                 if not (bh & th) else f"CONTENT LEAK: {sorted(bh & th)}",
                 n_build_hashes=len(bh), n_test_hashes=len(th),
                 hash_overlap=sorted(bh & th))
     else:
         g.incomplete(
             "G0.2b",
-            "build/test content separation cannot be proved without all nine hashes",
+            "build/test content separation cannot be proved without every declared hash",
             n_build_hashes=len(bh), n_test_hashes=len(th),
         )
 
@@ -143,38 +143,23 @@ def main() -> None:
             if not non_parrot else f"non-Parrot in build set: {non_parrot}",
             dropped=list(DROPPED))
 
-    # G0.5 -- positive proof that P071 is outside every enumerated source root
-    # and absent from every source-lineage record written by this stage.
-    declared_inputs = [v.path.resolve() for v in [*BUILD, *TEST]]
-    declared_roots = sorted({p.parent for p in declared_inputs}, key=str)
-    excluded = [d.resolve() for d in EXCLUDED_DIRS]
-    excluded_under_input_roots = [
-        str(d) for d in excluded
-        if any(d == root or root in d.parents for root in declared_roots)
-    ]
-    declared_under_excluded = [
-        str(p) for p in declared_inputs
-        if any(p == d or d in p.parents for d in excluded)
-    ]
-    manifest_rels = {r.get("source_rel", r["rel"]) for r in build + test}
-    p071_lineage = sorted(rel for rel in manifest_rels if "P0710071" in rel)
-    excluded_ok = (
-        all(d.is_dir() for d in excluded)
-        and all(p.is_file() for p in declared_inputs)
-        and not excluded_under_input_roots
-        and not declared_under_excluded
-        and not p071_lineage
+    # G0.5 -- heldout defence is derived from TEST, not a previous site's names.
+    heldout_sequences = {video.seq for video in TEST}
+    heldout_rels = {video.rel for video in TEST}
+    build_sequences = {record["seq"] for record in build}
+    build_lineage = {record.get("source_rel", record["rel"]) for record in build}
+    excluded_ok = not (heldout_sequences & build_sequences) and not (
+        heldout_rels & build_lineage
     )
     g.check(
         "G0.5",
         excluded_ok,
-        "P071 is outside every enumerated input root and absent from output lineage"
-        if excluded_ok else "P071 exclusion proof failed",
-        excluded=[str(d) for d in excluded],
-        enumerated_input_roots=[str(p) for p in declared_roots],
-        excluded_under_input_roots=excluded_under_input_roots,
-        declared_inputs_under_excluded=declared_under_excluded,
-        p071_lineage=p071_lineage,
+        "declared TEST sequences and paths are absent from BUILD lineage"
+        if excluded_ok else "held-out source leaked into BUILD lineage",
+        heldout_sequences=sorted(heldout_sequences),
+        heldout_paths=sorted(heldout_rels),
+        sequence_overlap=sorted(heldout_sequences & build_sequences),
+        path_overlap=sorted(heldout_rels & build_lineage),
     )
 
     # G0.6 -- sequence names must match gluemap's subfolder_regex, or its
@@ -183,21 +168,23 @@ def main() -> None:
     rx = re.compile(SUBFOLDER_REGEX)
     unmatched = [v.seq for v in BUILD if not rx.match(v.seq)]
     g.check("G0.6", not unmatched,
-            f"all 7 sequence names match subfolder_regex {SUBFOLDER_REGEX!r}"
+            f"all {len(BUILD)} sequence names match subfolder_regex {SUBFOLDER_REGEX!r}"
             if not unmatched else f"would be SILENTLY DROPPED by gluemap: {unmatched}",
             regex=SUBFOLDER_REGEX)
 
     # G0.7 -- resolution groups -> one camera each
     groups = resolution_groups()
-    g.check("G0.7", len(groups) == 3,
-            f"{len(groups)} resolution groups -> {len(groups)} PINHOLE cameras: "
+    g.check("G0.7", len(groups) == 1 and (2688, 1512) in groups,
+            f"one 2688x1512 group -> one PINHOLE camera: "
             + ", ".join(f"{w}x{h}({len(v)})" for (w, h), v in groups.items()),
             groups={f"{w}x{h}": [x.seq for x in v] for (w, h), v in groups.items()})
 
-    # G0.8 -- both directions present, or forward<->reverse fusion is moot
+    # G0.8 -- football is orbital/area survey; do not invent fwd/rev.
     dirs = {v.direction for v in BUILD}
-    g.check("G0.8", "fwd" in dirs and "rev" in dirs,
-            f"directions present: {sorted(dirs)} (unknown ones resolved by S1)",
+    unknown_only = dirs == {"unknown"}
+    g.check("G0.8", unknown_only,
+            "all BUILD directions unknown; no invented fwd/rev"
+            if unknown_only else f"unexpected declared directions: {sorted(dirs)}",
             directions={v.seq: v.direction for v in BUILD},
             unknown=[v.seq for v in BUILD if v.direction == "unknown"])
 
