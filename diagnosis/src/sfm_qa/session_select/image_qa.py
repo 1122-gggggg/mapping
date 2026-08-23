@@ -101,8 +101,20 @@ def _sample_video_frames(path: Path, sample_limit: int) -> list[np.ndarray]:
     return frames
 
 
-def evaluate_video(path: str | Path, sample_limit: int = 24) -> dict[str, Any]:
-    """Sample frames from a video. Missing OpenCV → nulls + ``missing_opencv``."""
+def evaluate_video(
+    path: str | Path,
+    sample_limit: int = 24,
+    *,
+    underexposure_mean: float = 20.0,
+    overexposure_mean: float = 235.0,
+    near_duplicate_hist_corr: float = 0.995,
+    blur_variance_reject: float = 25.0,
+) -> dict[str, Any]:
+    """Sample frames from a video with explicitly supplied heuristic gates.
+
+    The caller is responsible for passing the values from ``defaults.yaml`` so
+    the documented configuration and the executed QA cannot drift apart.
+    """
 
     video = Path(path)
     if cv2 is None:
@@ -111,9 +123,10 @@ def evaluate_video(path: str | Path, sample_limit: int = 24) -> dict[str, Any]:
         return _null_result("missing_video")
 
     limit = int(sample_limit) if sample_limit else 24
-    under = 20.0
-    over = 235.0
-    dup_thr = 0.995
+    under = float(underexposure_mean)
+    over = float(overexposure_mean)
+    dup_thr = float(near_duplicate_hist_corr)
+    blur_thr = float(blur_variance_reject)
     frames = _sample_video_frames(video, limit)
     if not frames:
         return _null_result("unreadable_video")
@@ -142,8 +155,8 @@ def evaluate_video(path: str | Path, sample_limit: int = 24) -> dict[str, Any]:
     mean_array = np.asarray(means, dtype=float)
     reasons: list[str] = []
     p10 = float(np.percentile(array, 10))
-    if p10 < 25.0:
-        reasons.append("low_sharpness_p10_heuristic")
+    if p10 < blur_thr:
+        reasons.append(f"low_sharpness_p10_heuristic_{blur_thr:g}")
     return {
         "sharpness_median": float(np.median(array)),
         "sharpness_p10": p10,
@@ -153,7 +166,13 @@ def evaluate_video(path: str | Path, sample_limit: int = 24) -> dict[str, Any]:
         "sampled": len(sharp),
         "exposure_mean": float(np.mean(mean_array)),
         "reasons": tuple(reasons),
-        "threshold_provenance": "heuristic",
+        "thresholds": {
+            "underexposure_mean": under,
+            "overexposure_mean": over,
+            "near_duplicate_hist_corr": dup_thr,
+            "blur_variance_reject": blur_thr,
+        },
+        "threshold_provenance": "heuristic_config",
     }
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from itertools import combinations
 from typing import Any
 
 from .config import lookup
@@ -121,6 +122,52 @@ def _normalize(value: float | None, scale: float) -> float:
     return max(0.0, min(1.0, float(value) / scale))
 
 
+def _unit_grid_coverage(value: float | None) -> float:
+    """Normalize either a [0,1] fraction or a 0..16 occupied-cell count."""
+
+    if value is None:
+        return 0.0
+    number = max(0.0, float(value))
+    if number <= 1.0:
+        return number
+    if number <= 16.0:
+        return number / 16.0
+    return 1.0
+
+
+def _motion_profile(row: SessionQuality) -> tuple[float, ...] | None:
+    values = (
+        row.parallax_ratio,
+        row.low_parallax_ratio,
+        row.hover_ratio,
+        row.pure_rotation_ratio,
+        row.fast_motion_ratio,
+        row.unproven_ratio,
+    )
+    if all(value is None for value in values):
+        return None
+    vector = [max(0.0, float(value or 0.0)) for value in values]
+    total = sum(vector)
+    if total <= 0.0:
+        return None
+    return tuple(value / total for value in vector)
+
+
+def _view_diversity(rows: Sequence[SessionQuality]) -> float:
+    """Measured motion-profile diversity; timestamp is intentionally excluded."""
+
+    profiles = [profile for row in rows if (profile := _motion_profile(row)) is not None]
+    if len(profiles) >= 2:
+        distances = [
+            0.5 * sum(abs(a - b) for a, b in zip(left, right))
+            for left, right in combinations(profiles, 2)
+        ]
+        return max(0.0, min(1.0, sum(distances) / len(distances)))
+    # Legacy map-only rows may not carry motion histograms. Keep a weak
+    # cardinality prior but never let capture time act as view diversity.
+    return min(1.0, 0.15 * len(rows))
+
+
 def compute_objective_terms(
     sessions: Iterable[SessionQuality],
     edges: Iterable[SessionEdgeQuality | Mapping[str, Any]],
@@ -147,21 +194,25 @@ def compute_objective_terms(
             "observations": 0.0,
         }
 
-    coverages = [_finite(quality_by_id[sid].convex_hull_coverage) for sid in chosen]
-    grids = [_finite(quality_by_id[sid].grid_occupancy_4x4) for sid in chosen]
-    qualities = [quality_by_id[sid].internal_quality_score for sid in chosen]
+    selected_rows = [quality_by_id[sid] for sid in chosen]
+    coverages = [
+        max(
+            0.0,
+            min(1.0, _finite(row.convex_hull_coverage)),
+            _unit_grid_coverage(row.grid_occupancy_4x4),
+        )
+        for row in selected_rows
+    ]
+    qualities = [row.internal_quality_score for row in selected_rows]
     infos = []
-    for sid in chosen:
-        row = quality_by_id[sid]
+    for row in selected_rows:
         if row.fim_logdet is not None:
             infos.append(max(0.0, float(row.fim_logdet)))
         else:
             infos.append(_normalize(row.num_tracks, 50_000.0) * 4.0)
-    tracks = sum(_finite(quality_by_id[sid].num_tracks) for sid in chosen)
-    observations = sum(_finite(quality_by_id[sid].num_observations) for sid in chosen)
-    keyframes = sum(quality_by_id[sid].num_keyframes for sid in chosen)
-    # Timestamps may describe appearance diversity; they never rank Base.
-    timestamps = {quality_by_id[sid].timestamp for sid in chosen if quality_by_id[sid].timestamp}
+    tracks = sum(_finite(row.num_tracks) for row in selected_rows)
+    observations = sum(_finite(row.num_observations) for row in selected_rows)
+    keyframes = sum(row.num_keyframes for row in selected_rows)
 
     inner = _incident(edge_rows, set(chosen))
     diagnostics = session_graph_diagnostics(chosen, inner)
@@ -178,13 +229,15 @@ def compute_objective_terms(
     risk = 0.25 * weak_count + 0.5 * critical + 1.0 * ambiguous
 
     terms = {
-        "coverage": float(max(coverages + grids) if (coverages or grids) else _normalize(keyframes, 400.0)),
+        "coverage": float(max(coverages) if coverages else _normalize(keyframes, 400.0)),
         "quality": float(sum(qualities) / len(qualities)),
         "connectivity": float(connectivity),
         "redundancy": float(cycle_bonus),
         "information": float(sum(infos) / max(len(infos), 1)),
-        "view_diversity": float(min(1.0, len(timestamps) / max(n, 1) + 0.15 * n)),
-        "track_cost": float(_normalize(tracks, 400_000.0) + _normalize(observations, 2_000_000.0)),
+        "view_diversity": float(_view_diversity(selected_rows)),
+        "track_cost": float(
+            _normalize(tracks, 400_000.0) + _normalize(observations, 2_000_000.0)
+        ),
         "risk": float(risk),
         "tracks": float(tracks),
         "observations": float(observations),

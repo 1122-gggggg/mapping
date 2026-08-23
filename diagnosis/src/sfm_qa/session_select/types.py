@@ -30,6 +30,20 @@ class SessionQuality:
     registered_ratio: float | None = None
     sharpness_median: float | None = None
     sharpness_p10: float | None = None
+    underexposed_ratio: float | None = None
+    overexposed_ratio: float | None = None
+    near_duplicate_ratio: float | None = None
+    exposure_mean: float | None = None
+    parallax_ratio: float | None = None
+    low_parallax_ratio: float | None = None
+    hover_ratio: float | None = None
+    pure_rotation_ratio: float | None = None
+    fast_motion_ratio: float | None = None
+    unproven_ratio: float | None = None
+    epipolar_outlier_ratio_median: float | None = None
+    essential_inlier_ratio_median: float | None = None
+    flow_median_px: float | None = None
+    motion_parallax_median_px: float | None = None
     num_tracks: int | None = None
     num_observations: int | None = None
     median_track_length: float | None = None
@@ -131,5 +145,3 @@ def edge_is_vpr_only(edge: SessionEdgeQuality) -> bool:
     no_verified = not edge.num_verified_pairs
     no_bridges = not edge.independent_bridge_groups
     return bool(edge.num_candidate_pairs) and no_tracks and no_verified and no_bridges
-
-

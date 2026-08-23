@@ -2,6 +2,44 @@
 # defaults, not fitted site parameters. Missing metric → fail-closed (never invent STRONG).
 # Do not treat these as empirical score cutoffs. No site video IDs or map paths.
 
+# Phase A: video/retrieval signals may PROPOSE where to spend geometry.
+# Nothing in this section authorizes an SfM merge.
+prebuild:
+  motion_interval_seconds: 0.5
+  min_video_score: 0.35                 # heuristic proposal floor
+  min_marginal_gain: 0.15               # heuristic diminishing-return stop
+  min_base_sessions: 2                  # heuristic when >=2 usable videos exist
+  max_sessions: null                    # optional hard proposal budget
+  max_no_graph_sessions: 3              # heuristic cap when no retrieval graph exists
+  validation_candidates: 1              # reserve untouched candidates when possible
+  allow_weak_video_candidates: false    # fail closed by default
+  sharpness_reference: 100.0            # heuristic normalization only
+  min_parallax_ratio_for_usable: 0.20   # includes discounted low-parallax support below
+  low_parallax_credit: 0.35             # low parallax is evidence, but weaker than parallax
+  max_degenerate_ratio_for_usable: 0.70
+  max_fast_motion_ratio_for_usable: 0.45
+  max_near_duplicate_ratio_for_usable: 0.75
+  max_bad_exposure_ratio_for_usable: 0.75
+  max_epipolar_outlier_ratio_for_usable: 0.75
+  video_weights:
+    internal_quality: 0.20
+    parallax: 0.25
+    sharpness: 0.15
+    motion_evidence: 0.10
+    non_duplicate: 0.10
+    exposure: 0.10
+    epipolar_consistency: 0.10
+  weights:
+    video_quality: 0.45
+    bridgeability: 0.25
+    graph_coverage: 0.15
+    motion_diversity: 0.10
+    triplet_support: 0.10
+    multi_link: 0.10
+    risk: 0.20
+    frame_cost: 0.05
+
+# Phase B: only geometrically verified edges can enter the actual Base.
 selection:
   max_base_sessions: null
   max_total_tracks: null

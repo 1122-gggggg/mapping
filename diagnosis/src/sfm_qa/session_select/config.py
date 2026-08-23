@@ -11,6 +11,12 @@ import yaml
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("defaults.yaml")
 
 HEURISTIC_NOTES: dict[str, str] = {
+    "prebuild.min_video_score": "heuristic proposal floor; not geometric merge authority",
+    "prebuild.min_marginal_gain": "heuristic diminishing-return stop for proposal set",
+    "prebuild.max_no_graph_sessions": "heuristic cap when retrieval graph is unavailable",
+    "prebuild.weights": "heuristic proposal objective weights; VPR remains candidate-only",
+    "prebuild.video_weights": "heuristic video-admission weights; not a fitted classifier",
+    "prebuild.min_parallax_ratio_for_usable": "heuristic motion-quality gate before geometry",
     "selection.min_information_gain": "heuristic stop gate on Δinformation",
     "selection.min_coverage_gain": "heuristic stop gate on Δcoverage",
     "selection.min_independent_bridges_for_strong_edge": "heuristic fail-closed independent support",

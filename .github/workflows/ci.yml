@@ -1,0 +1,47 @@
+name: Core CI
+
+on:
+  push:
+    branches: [main, system-opt-20260823]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  session-selection-and-diagnosis:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+      - name: Lint optimized core
+        run: |
+          ruff check \
+            diagnosis/src/sfm_qa/cli.py \
+            diagnosis/src/sfm_qa/session_select \
+            diagnosis/tests/sfm_qa/test_prebuild_selection.py \
+            map_update/core/point_evidence_ledger.py \
+            map_update/core/test_point_evidence_recency.py \
+            tools
+      - name: Test session selection and diagnosis contracts
+        run: |
+          pytest -q diagnosis/tests/sfm_qa tools/test_diagnose_map.py tools/test_diagnosis_layout.py
+      - name: Test point-evidence maintenance
+        run: |
+          PYTHONPATH=map_update/core pytest -q \
+            map_update/core/test_point_evidence_ledger.py \
+            map_update/core/test_point_evidence_recency.py
