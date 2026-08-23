@@ -7,7 +7,7 @@ from itertools import combinations
 from typing import Any
 
 from .config import lookup
-from .critical_bridges import fiedler_value, session_graph_diagnostics
+from .critical_bridges import session_graph_diagnostics
 from .types import SessionEdgeQuality, SessionQuality
 
 _CORE_OK = frozenset({"STRONG", "USABLE"})
@@ -241,7 +241,7 @@ def compute_objective_terms(
         "risk": float(risk),
         "tracks": float(tracks),
         "observations": float(observations),
-        "fiedler_value": float(fiedler_value(chosen, inner)),
+        "fiedler_value": float(diagnostics["fiedler_value"]),
         "usable_edges": float(len(usable_inner)),
     }
     weights = None if config is None else lookup(dict(config), "selection.weights")

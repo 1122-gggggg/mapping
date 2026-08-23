@@ -12,6 +12,7 @@ from sfm_qa.session_select import (
     load_config,
     propose_prebuild_set,
 )
+from sfm_qa.session_select import critical_bridges
 
 
 def _session(session_id: str, **overrides) -> SessionQuality:
@@ -288,3 +289,24 @@ def test_objective_normalizes_grid_cell_count_and_ignores_timestamp_as_view_prox
     same_terms = compute_objective_terms([first, same_time], [], ["A", "B"], cfg)
     assert same_terms["view_diversity"] == pytest.approx(terms["view_diversity"])
     assert same_terms["utility"] == pytest.approx(terms["utility"])
+
+
+def test_objective_computes_laplacian_spectrum_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    original = critical_bridges.np.linalg.eigvalsh
+
+    def counting_eigvalsh(matrix):
+        nonlocal calls
+        calls += 1
+        return original(matrix)
+
+    monkeypatch.setattr(critical_bridges.np.linalg, "eigvalsh", counting_eigvalsh)
+
+    compute_objective_terms(
+        [_session("A"), _session("B")],
+        [],
+        ["A", "B"],
+        load_config(),
+    )
+
+    assert calls == 1

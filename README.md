@@ -15,6 +15,26 @@
 pip install -e '.[dev]'
 ```
 
+### 驗證矩陣
+
+根目錄的輕量核心由 `.github/workflows/ci.yml` 驗證。各 site 的 `tools/` 保留歷史上的
+同名裸模組（例如 `ts_common`、`audit_dg_graph`），而且部分測試需要場域資料、GPU 或
+選用依賴；因此目前不能把整庫 `pytest` 單一程序視為有效契約。請依邊界分開執行：
+
+```bash
+python3 -m pytest diagnosis/tests tools/test_diagnose_map.py tools/test_diagnosis_layout.py
+PYTHONPATH=map_update/core python3 -m pytest map_update/core/test_point_evidence_ledger.py map_update/core/test_point_evidence_recency.py
+PYTHONPATH=map_update/lifelong/src python3 -m pytest map_update/lifelong/tests
+PYTHONPATH=pipeline python3 -m pytest pipeline/test_build_localizable_map_core.py::PairGraphPerformanceTests
+
+# 只有在該場域的選用依賴與外部 fixtures 都存在時執行。
+PYTHONPATH=sites/<site> python3 -m pytest sites/<site>/tests
+```
+
+site 測試必須各自在新程序執行，避免 Python 模組快取把另一個 site 的同名工具誤當成
+本場域實作。要支援真正的 root-wide suite，需先把三套 site tools 遷移成命名空間套件，
+並為 `torch`、`pycolmap`、`lmdb`、`h5py` 與外部資料建立明確的 extras／skip 契約。
+
 ---
 
 ## 現行建圖入口
@@ -86,7 +106,8 @@ Stage 0 預設採 cohort-relative portfolio：品質門檻只作風險參考，�
 仍不能當幾何邊。Stage 2 會輸出 query-relative risk–coverage；對由部署方 immutable
 manifest 證明為 held-out 的 log，以 strict success rate（預設 95%）判定。品質欄位只在
 存在時啟用 gate；部署方可用 `localization.required_metrics` 強制指定必填證據。完整論文與設計依據見
-`docs/RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md`。
+`docs/RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md`；逐項區分規格修正、理論移植、
+場域政策與 experiment-only 方法的後續稽核見 `docs/THEORY_EVIDENCE_AUDIT_20260823.md`。
 
 內建 map adapter 有 `colmap`、`glomap`、`gluemap`；其他格式可直接傳
 `--map-adapter package.module:AdapterClass`，不用改診斷核心。定位結果的 `localizer` 是任意

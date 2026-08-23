@@ -7,6 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
+
+import numpy as np
 
 
 MODULE_PATH = Path(__file__).with_name("build_localizable_map_core.py")
@@ -69,6 +72,136 @@ class MotionClassificationTests(unittest.TestCase):
             self.assertIn("defaults/m3dv2-large", text)
             self.assertIn("matcher: roma_outdoor", text)
             self.assertIn("matches_mode: sparse+dense", text)
+
+
+class PairGraphPerformanceTests(unittest.TestCase):
+    def test_default_directional_mode_skips_full_similarity_matrix(self) -> None:
+        class NoMatmulArray(np.ndarray):
+            def __matmul__(self, other):
+                raise AssertionError("directional mode built an unused full similarity matrix")
+
+        class FakeH5File:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def create_group(self, _name):
+                return self
+
+            def create_dataset(self, _name, **_kwargs):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SimpleNamespace(
+                work_dir=tmp,
+                template_repo=tmp,
+                device="cpu",
+                pair_graph_mode="directional",
+                same_direction_topk=0,
+                num_matched=1,
+                seq_window=1,
+                cross_topk=0,
+                cross_grid=0,
+                agg_pair_degree_cap=0,
+                agg_intra_degree_cap=0,
+                agg_cross_direction_degree_cap=0,
+                direction_overrides_json="",
+                use_rotation_bridges=False,
+            )
+            paths = core.cfg_paths(cfg)
+            sequence = paths.images / "seq"
+            sequence.mkdir(parents=True)
+            (sequence / "000001.jpg").touch()
+            (sequence / "000002.jpg").touch()
+            descriptors = np.ones((2, 3), dtype=np.float32).view(NoMatmulArray)
+            megaloc = SimpleNamespace(extract=lambda *_args, **_kwargs: descriptors)
+            torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+            h5py = SimpleNamespace(File=lambda *_args, **_kwargs: FakeH5File())
+
+            with mock.patch.dict(
+                "sys.modules",
+                {"h5py": h5py, "megaloc_lib": megaloc, "torch": torch},
+            ):
+                core.stage_pairs(cfg)
+
+            self.assertEqual(
+                core.read_pairs(paths.pairs),
+                [("seq/000001.jpg", "seq/000002.jpg")],
+            )
+
+    def test_directional_cross_topk_uses_block_similarity_without_full_matrix(self) -> None:
+        class BlockOnlyMatmulArray(np.ndarray):
+            full_matrix_built = False
+
+            def __matmul__(self, other):
+                other = np.asarray(other)
+                if self.shape == (4, 3) and other.shape == (3, 4):
+                    type(self).full_matrix_built = True
+                    raise AssertionError("directional mode built a full descriptor matrix")
+                return np.ndarray.__matmul__(self, other)
+
+        class FakeH5File:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def create_group(self, _name):
+                return self
+
+            def create_dataset(self, _name, **_kwargs):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SimpleNamespace(
+                work_dir=tmp,
+                template_repo=tmp,
+                device="cpu",
+                pair_graph_mode="directional",
+                same_direction_topk=0,
+                num_matched=1,
+                seq_window=1,
+                cross_topk=1,
+                cross_grid=0,
+                agg_pair_degree_cap=0,
+                agg_intra_degree_cap=0,
+                agg_cross_direction_degree_cap=0,
+                direction_overrides_json="",
+                use_rotation_bridges=False,
+            )
+            paths = core.cfg_paths(cfg)
+            for folder in ("forward", "reverse"):
+                sequence = paths.images / folder
+                sequence.mkdir(parents=True)
+                (sequence / "000001.jpg").touch()
+                (sequence / "000002.jpg").touch()
+            descriptors = np.array(
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+                dtype=np.float32,
+            ).view(BlockOnlyMatmulArray)
+            megaloc = SimpleNamespace(extract=lambda *_args, **_kwargs: descriptors)
+            torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+            h5py = SimpleNamespace(File=lambda *_args, **_kwargs: FakeH5File())
+
+            with mock.patch.dict(
+                "sys.modules",
+                {"h5py": h5py, "megaloc_lib": megaloc, "torch": torch},
+            ):
+                core.stage_pairs(cfg)
+
+            self.assertEqual(
+                core.read_pairs(paths.pairs),
+                [
+                    ("forward/000001.jpg", "forward/000002.jpg"),
+                    ("reverse/000001.jpg", "reverse/000002.jpg"),
+                    ("forward/000001.jpg", "reverse/000002.jpg"),
+                    ("forward/000002.jpg", "reverse/000001.jpg"),
+                ],
+            )
+            self.assertFalse(BlockOnlyMatmulArray.full_matrix_built)
 
 
 class StrictGateTests(unittest.TestCase):

@@ -9,12 +9,39 @@ from scipy.spatial.transform import Rotation
 from .models import Camera, Pose, Sim3
 
 
+_COLMAP_CAMERA_PARAM_COUNTS = {
+    "SIMPLE_PINHOLE": 3,
+    "PINHOLE": 4,
+    "SIMPLE_RADIAL": 4,
+    "RADIAL": 5,
+    "OPENCV": 8,
+    "OPENCV_FISHEYE": 8,
+    "FULL_OPENCV": 12,
+    "FOV": 5,
+    "SIMPLE_RADIAL_FISHEYE": 4,
+    "RADIAL_FISHEYE": 5,
+    "THIN_PRISM_FISHEYE": 12,
+    "RAD_TAN_THIN_PRISM_FISHEYE": 16,
+}
+
+
+def _validate_camera_params(camera: Camera, model: str | None = None) -> str:
+    model = camera.model.upper() if model is None else model
+    required = _COLMAP_CAMERA_PARAM_COUNTS.get(model)
+    if required is None:
+        raise ValueError(f"Unsupported camera model: {camera.model}")
+    if len(camera.params) < required:
+        raise ValueError(
+            f"Camera {camera.camera_id} model {camera.model} needs "
+            f"{required} params, got {len(camera.params)}"
+        )
+    return model
+
+
 def intrinsic_matrix(camera: Camera) -> NDArray[np.float64]:
-    model = camera.model.upper()
+    model = _validate_camera_params(camera)
     p = camera.params
     if model in {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE"}:
-        if len(p) < 3:
-            raise ValueError(f"Camera {camera.camera_id} has insufficient parameters")
         f, cx, cy = p[:3]
         fx = fy = f
     elif model in {
@@ -26,8 +53,6 @@ def intrinsic_matrix(camera: Camera) -> NDArray[np.float64]:
         "THIN_PRISM_FISHEYE",
         "RAD_TAN_THIN_PRISM_FISHEYE",
     }:
-        if len(p) < 4:
-            raise ValueError(f"Camera {camera.camera_id} has insufficient parameters")
         fx, fy, cx, cy = p[:4]
     else:
         raise ValueError(f"Unsupported camera model: {camera.model}")
@@ -35,7 +60,7 @@ def intrinsic_matrix(camera: Camera) -> NDArray[np.float64]:
 
 
 def opencv_distortion(camera: Camera) -> NDArray[np.float64]:
-    model = camera.model.upper()
+    model = _validate_camera_params(camera)
     p = camera.params
     if model in {"SIMPLE_PINHOLE", "PINHOLE"}:
         return np.zeros(5, dtype=np.float64)
@@ -63,12 +88,32 @@ def project_points(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     points = np.asarray(points_w, dtype=np.float64).reshape(-1, 3)
     points_c = pose.world_to_camera(points)
-    k = intrinsic_matrix(camera)
-    homogeneous = (k @ points_c.T).T
     depth = points_c[:, 2]
-    xy = np.full((len(points), 2), np.nan, dtype=np.float64)
-    valid = np.abs(depth) > 1e-12
-    xy[valid] = homogeneous[valid, :2] / depth[valid, None]
+    model = camera.model.upper()
+    if model not in {
+        "SIMPLE_PINHOLE",
+        "PINHOLE",
+        "SIMPLE_RADIAL",
+        "RADIAL",
+        "OPENCV",
+        "FULL_OPENCV",
+    }:
+        raise ValueError(
+            f"Projection for camera model {camera.model} requires a dedicated model"
+        )
+    _validate_camera_params(camera, model)
+    if len(points) == 0:
+        return np.empty((0, 2), dtype=np.float64), depth
+    rvec, tvec = rvec_tvec_from_pose(pose)
+    projected, _ = cv2.projectPoints(
+        points,
+        rvec.reshape(3, 1),
+        tvec.reshape(3, 1),
+        intrinsic_matrix(camera),
+        opencv_distortion(camera),
+    )
+    xy = projected.reshape(-1, 2)
+    xy[np.abs(depth) <= 1e-12] = np.nan
     return xy, depth
 
 

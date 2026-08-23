@@ -5947,10 +5947,16 @@ def stage_pairs(cfg: SimpleNamespace) -> None:
             ),
         )
 
-    sim = desc @ desc.T
-    np.fill_diagonal(sim, -1.0)
+    sim = None
+    if (
+        cfg.pair_graph_mode == "legacy"
+        or int(getattr(cfg, "same_direction_topk", 0)) > 0
+    ):
+        sim = desc @ desc.T
+        np.fill_diagonal(sim, -1.0)
 
     if cfg.pair_graph_mode == "legacy":
+        assert sim is not None
         for i, name in enumerate(names):
             for j in np.argsort(-sim[i])[:cfg.num_matched]:
                 add_pair(name, names[int(j)], "retrieval", float(sim[i, int(j)]))
@@ -5964,6 +5970,7 @@ def stage_pairs(cfg: SimpleNamespace) -> None:
     n_temporal = len(pair_meta) - n_retrieval
 
     if cfg.pair_graph_mode == "directional" and int(getattr(cfg, "same_direction_topk", 0)) > 0:
+        assert sim is not None
         for i, name in enumerate(names):
             f0 = folder_of.get(name, "")
             d0 = directions.get(f0, "unknown")

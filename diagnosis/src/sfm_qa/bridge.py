@@ -13,6 +13,22 @@ if TYPE_CHECKING:
     from mapdoctor.model import Camera, MapModel
 
 
+_COLMAP_CAMERA_PARAM_COUNTS = {
+    "SIMPLE_PINHOLE": 3,
+    "PINHOLE": 4,
+    "SIMPLE_RADIAL": 4,
+    "RADIAL": 5,
+    "OPENCV": 8,
+    "OPENCV_FISHEYE": 8,
+    "FULL_OPENCV": 12,
+    "FOV": 5,
+    "SIMPLE_RADIAL_FISHEYE": 4,
+    "RADIAL_FISHEYE": 5,
+    "THIN_PRISM_FISHEYE": 12,
+    "RAD_TAN_THIN_PRISM_FISHEYE": 16,
+}
+
+
 def rotation_from_viewing_direction(direction) -> np.ndarray:
     """Build camera-to-world R_wc whose +Z column matches ``direction``."""
     forward = np.asarray(direction, dtype=float).reshape(3)
@@ -31,13 +47,20 @@ def rotation_from_viewing_direction(direction) -> np.ndarray:
 def _camera_intrinsics(camera: Camera) -> CameraIntrinsics:
     params = tuple(float(v) for v in camera.params)
     model = camera.model.upper()
+    required = _COLMAP_CAMERA_PARAM_COUNTS.get(model)
+    if required is not None and len(params) < required:
+        raise ValueError(
+            f"{model} camera {camera.id} needs {required} params, got {len(params)}"
+        )
     if model == "PINHOLE":
-        if len(params) < 4:
-            raise ValueError(f"PINHOLE camera {camera.id} needs 4 params, got {len(params)}")
         fx, fy, cx, cy = params[:4]
-    elif model == "SIMPLE_PINHOLE":
-        if len(params) < 3:
-            raise ValueError(f"SIMPLE_PINHOLE camera {camera.id} needs 3 params, got {len(params)}")
+    elif model in {
+        "SIMPLE_PINHOLE",
+        "SIMPLE_RADIAL",
+        "RADIAL",
+        "SIMPLE_RADIAL_FISHEYE",
+        "RADIAL_FISHEYE",
+    }:
         fx = fy = params[0]
         cx, cy = params[1], params[2]
     elif len(params) >= 4:

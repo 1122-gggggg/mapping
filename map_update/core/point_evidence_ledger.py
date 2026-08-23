@@ -85,10 +85,17 @@ class PointEvidenceLedger:
         index = {session_id: i for i, session_id in enumerate(self.sessions)}
         current = len(self.sessions) - 1
         for record in self.points.values():
+            matched_sessions = set(record.get("matched_sessions", ()))
+            unmatched_sessions = [
+                session_id
+                for session_id in record.get("unmatched_visible_sessions", ())
+                if session_id not in matched_sessions
+            ]
+            record["unmatched_visible_sessions"] = unmatched_sessions
+            record["positive_weight"] = float(len(matched_sessions))
+            record["negative_weight"] = float(len(unmatched_sessions))
             positive = _decayed_sum(record.get("matched_sessions", ()), index, current)
-            negative = _decayed_sum(
-                record.get("unmatched_visible_sessions", ()), index, current
-            )
+            negative = _decayed_sum(unmatched_sessions, index, current)
             record["positive_recency"] = positive
             record["negative_recency"] = negative
             denominator = positive + negative
@@ -99,6 +106,37 @@ class PointEvidenceLedger:
             # an old isolated observation decays. Repeated recent observations
             # saturate at 1 rather than growing without bound.
             record["stability"] = float(min(1.0, positive))
+            visible_sessions = set(record.get("visible_sessions", ()))
+            record["last_seen_session"] = next(
+                (
+                    session_id
+                    for session_id in reversed(self.sessions)
+                    if session_id in matched_sessions
+                ),
+                None,
+            )
+            record["last_observation_session"] = next(
+                (
+                    session_id
+                    for session_id in reversed(self.sessions)
+                    if session_id in visible_sessions
+                ),
+                None,
+            )
+            unmatched_set = set(unmatched_sessions)
+            streak = 0
+            for session_id in reversed(self.sessions):
+                if session_id in matched_sessions:
+                    break
+                if session_id in unmatched_set:
+                    streak += 1
+            record["unmatched_streak"] = streak
+            if streak >= RETIRE_UNMATCHED_SESSIONS:
+                record["state"] = "retired"
+            elif streak > 0:
+                record["state"] = "suspected_stale"
+            else:
+                record["state"] = "active"
 
     def record_session(self, session_id: str, observations: Iterable[dict]) -> None:
         is_new_session = session_id not in self.sessions
@@ -124,31 +162,33 @@ class PointEvidenceLedger:
             if not visible and not matched:
                 continue
 
-            record["last_observation_session"] = session_id
             if visible and session_id not in record["visible_sessions"]:
                 record["visible_sessions"].append(session_id)
 
             if matched:
+                # Re-processing may discover a match after this session was
+                # first recorded as visible-but-unmatched.  One session is one
+                # evidence event, so the successful match supersedes the
+                # provisional negative observation instead of counting both.
+                if session_id in record["unmatched_visible_sessions"]:
+                    record["unmatched_visible_sessions"].remove(session_id)
+                    record["negative_weight"] = float(
+                        len(record["unmatched_visible_sessions"])
+                    )
                 if session_id not in record["matched_sessions"]:
                     record["matched_sessions"].append(session_id)
                     record["positive_weight"] += 1.0
-                record["last_seen_session"] = session_id
-                record["unmatched_streak"] = 0
-                record["state"] = "active"
                 continue
 
             # Visible and unmatched: caller explicitly says the point should have
             # been observable but failed to match. Count once per session.
+            # A successful match from an earlier pass is stronger evidence for
+            # the same session and must remain order-independent.
+            if session_id in record["matched_sessions"]:
+                continue
             if session_id not in record["unmatched_visible_sessions"]:
                 record["unmatched_visible_sessions"].append(session_id)
                 record["negative_weight"] += 1.0
-                # Increment only for a new session; repeated processing of the
-                # same session must be idempotent.
-                record["unmatched_streak"] = int(record.get("unmatched_streak", 0)) + 1
-            if int(record.get("unmatched_streak", 0)) >= RETIRE_UNMATCHED_SESSIONS:
-                record["state"] = "retired"
-            elif record["state"] == "active":
-                record["state"] = "suspected_stale"
 
         # Even points not observed this session lose recency; do this once the
         # session is present in the global timeline.

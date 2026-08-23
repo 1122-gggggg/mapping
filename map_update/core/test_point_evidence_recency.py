@@ -47,6 +47,73 @@ def test_same_session_reprocessing_is_idempotent() -> None:
     assert record["unmatched_visible_sessions"] == ["s1"]
 
 
+def test_late_match_supersedes_same_session_unmatched_evidence() -> None:
+    ledger = PointEvidenceLedger()
+    point_id = make_point_id(colmap_pid=5)
+    ledger.record_session(
+        "s1", [{"point_id": point_id, "visible": True, "matched": False}]
+    )
+    ledger.record_session(
+        "s1", [{"point_id": point_id, "visible": True, "matched": True}]
+    )
+
+    record = ledger.points[point_id]
+    assert record["matched_sessions"] == ["s1"]
+    assert record["unmatched_visible_sessions"] == []
+    assert record["negative_weight"] == pytest.approx(0.0)
+    assert record["negative_recency"] == pytest.approx(0.0)
+    assert record["evidence_consistency"] == pytest.approx(1.0)
+    assert record["unmatched_streak"] == 0
+    assert record["state"] == "active"
+
+
+def test_late_unmatched_does_not_override_same_session_match() -> None:
+    ledger = PointEvidenceLedger()
+    point_id = make_point_id(colmap_pid=5)
+    ledger.record_session(
+        "s1", [{"point_id": point_id, "visible": True, "matched": True}]
+    )
+    ledger.record_session(
+        "s1", [{"point_id": point_id, "visible": True, "matched": False}]
+    )
+
+    record = ledger.points[point_id]
+    assert record["matched_sessions"] == ["s1"]
+    assert record["unmatched_visible_sessions"] == []
+    assert record["positive_weight"] == pytest.approx(1.0)
+    assert record["negative_weight"] == pytest.approx(0.0)
+    assert record["positive_recency"] == pytest.approx(1.0)
+    assert record["negative_recency"] == pytest.approx(0.0)
+    assert record["evidence_consistency"] == pytest.approx(1.0)
+    assert record["unmatched_streak"] == 0
+    assert record["state"] == "active"
+
+
+def test_late_match_preserves_newer_unmatched_streak() -> None:
+    ledger = PointEvidenceLedger()
+    point_id = make_point_id(colmap_pid=6)
+    ledger.record_session(
+        "s1", [{"point_id": point_id, "visible": True, "matched": False}]
+    )
+    ledger.record_session(
+        "s2", [{"point_id": point_id, "visible": True, "matched": False}]
+    )
+    ledger.record_session(
+        "s1", [{"point_id": point_id, "visible": True, "matched": True}]
+    )
+
+    record = ledger.points[point_id]
+    assert record["matched_sessions"] == ["s1"]
+    assert record["unmatched_visible_sessions"] == ["s2"]
+    assert record["last_seen_session"] == "s1"
+    assert record["last_observation_session"] == "s2"
+    assert record["positive_recency"] == pytest.approx(0.5)
+    assert record["negative_recency"] == pytest.approx(1.0)
+    assert record["evidence_consistency"] == pytest.approx(1.0 / 3.0)
+    assert record["unmatched_streak"] == 1
+    assert record["state"] == "suspected_stale"
+
+
 def test_consistency_separates_positive_and_negative_recency() -> None:
     ledger = PointEvidenceLedger()
     point_id = make_point_id(colmap_pid=4)

@@ -85,7 +85,9 @@ route:
 weak_regions:
   # View-graph edge = at least this many shared reconstructed landmarks.
   covisibility_min_shared: 15
-  max_track_for_pair_expansion: 20
+  # null => exact sparse-incidence support. An integer explicitly selects the
+  # legacy approximation and omits longer tracks from pair support.
+  max_track_for_pair_expansion: null
 
   # Relative anomaly detection. Compare each map against its own median/MAD
   # distribution before applying the absolute guardrails below.

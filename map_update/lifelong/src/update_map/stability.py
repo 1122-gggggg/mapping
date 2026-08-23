@@ -65,7 +65,9 @@ class StabilityRecord:
         if self.last_timestamp_days is None:
             self.last_timestamp_days = timestamp_days
             return
-        delta = max(timestamp_days - self.last_timestamp_days, 0.0)
+        if timestamp_days <= self.last_timestamp_days:
+            return
+        delta = timestamp_days - self.last_timestamp_days
         self.geometry_currentness *= config.decay_per_day**delta
         self.last_timestamp_days = timestamp_days
         self._clamp()

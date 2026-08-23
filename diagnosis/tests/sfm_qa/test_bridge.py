@@ -4,7 +4,9 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 from mapdoctor.adapters import get_adapter
+from mapdoctor.model import Camera, MapModel
 
 from sfm_qa.bridge import map_model_to_map_data
 
@@ -42,3 +44,47 @@ def test_map_model_to_map_data_preserves_demo_geometry(tmp_path):
         assert np.allclose(R_wc.T @ R_wc, np.eye(3), atol=1e-8)
         assert np.isclose(np.linalg.det(R_wc), 1.0, atol=1e-8)
         assert np.allclose(R_wc[:, 2], image.viewing_direction, atol=1e-8)
+
+
+def test_map_model_to_map_data_parses_colmap_radial_intrinsics() -> None:
+    model = MapModel(
+        source="synthetic",
+        format="memory",
+        cameras={
+            7: Camera(
+                id=7,
+                model="RADIAL",
+                width=640,
+                height=480,
+                params=(500.0, 320.0, 240.0, 0.08, -0.02),
+            )
+        },
+    )
+
+    camera = map_model_to_map_data(model).cameras[7]
+
+    assert camera.fx == 500.0
+    assert camera.fy == 500.0
+    assert camera.cx == 320.0
+    assert camera.cy == 240.0
+
+
+@pytest.mark.parametrize(
+    ("model", "params", "required"),
+    [
+        ("SIMPLE_RADIAL", (500.0, 320.0, 240.0), 4),
+        ("RADIAL", (500.0, 320.0, 240.0, 0.08), 5),
+        ("OPENCV", (500.0, 500.0, 320.0, 240.0, 0.08, -0.02, 0.01), 8),
+    ],
+)
+def test_map_model_to_map_data_rejects_incomplete_camera_params(
+    model: str, params: tuple[float, ...], required: int
+) -> None:
+    map_model = MapModel(
+        source="synthetic",
+        format="memory",
+        cameras={1: Camera(id=1, model=model, width=640, height=480, params=params)},
+    )
+
+    with pytest.raises(ValueError, match=rf"needs {required} params"):
+        map_model_to_map_data(map_model)

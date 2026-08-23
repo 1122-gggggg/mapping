@@ -10,7 +10,7 @@ def map_health_summary(
     map_data: MapData,
     *,
     covisibility_min_shared: int = 15,
-    max_track_for_pair_expansion: int = 20,
+    max_track_for_pair_expansion: int | None = None,
 ) -> dict:
     """Compute reconstruction-wide health statistics and a covisibility graph audit."""
     tl = map_data.track_lengths.astype(float)
@@ -49,6 +49,9 @@ def map_health_summary(
         "mapping_camera_nearest_neighbor_distance": _percentiles(camera_spacing),
         "covisibility": {
             "min_shared_points": covisibility_min_shared,
+            "support_mode": graph.support_mode,
+            "omitted_long_track_count": graph.omitted_long_track_count,
+            "pair_counts_threshold_retained": graph.support_mode == "exact",
             "strong_edges": graph.strong_edges,
             "connected_components": len(graph.components),
             "largest_component_images": max(

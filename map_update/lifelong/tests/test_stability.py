@@ -17,3 +17,15 @@ def test_repeated_conflicts_retire_reference() -> None:
     assert record.state == ReferenceState.HIST_SUSPECT
     record.update(StabilityEvent.GEOMETRIC_CONFLICT, config)
     assert record.state == ReferenceState.HIST_RETIRED
+
+
+def test_out_of_order_timestamp_does_not_double_decay() -> None:
+    config = StabilityConfig(decay_per_day=0.5)
+    record = StabilityRecord("ref", geometry_currentness=0.8, historical_view_utility=0.8)
+
+    record.advance_time(10.0, config)
+    record.advance_time(5.0, config)
+    record.advance_time(10.0, config)
+
+    assert record.last_timestamp_days == 10.0
+    assert record.geometry_currentness == 0.8

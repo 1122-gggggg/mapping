@@ -33,7 +33,7 @@ class WeakRegionCause(str, Enum):
 @dataclass(frozen=True)
 class WeakRegionConfig:
     covisibility_min_shared: int = 15
-    max_track_for_pair_expansion: int = 20
+    max_track_for_pair_expansion: int | None = None
     robust_z_threshold: float = 2.5
     weak_image_score_threshold: float = 0.35
     cluster_radius: float | None = None
@@ -204,6 +204,12 @@ def analyze_weak_regions(
         "anchor_radius_map_units": anchor_radius,
         "cause_counts": dict(counts),
         "diagnostic_mode": _mode(ev),
+        "covisibility": {
+            "min_shared_points": cfg.covisibility_min_shared,
+            "support_mode": graph.support_mode,
+            "omitted_long_track_count": graph.omitted_long_track_count,
+            "pair_counts_threshold_retained": graph.support_mode == "exact",
+        },
     }
     baselines["pair_evidence"] = pair_baseline
     return WeakRegionAnalysis(summary, baselines, ev.availability(), rows, regions)
