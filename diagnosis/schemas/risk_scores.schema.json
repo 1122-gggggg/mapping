@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1122-gggggg/diagnosis_map/schemas/risk_scores.schema.json",
+  "title": "MapDoctor predicted strict-failure risks",
+  "oneOf": [
+    {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}
+    },
+    {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query", "risk"],
+        "properties": {
+          "query": {"type": "string", "minLength": 1},
+          "risk": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+thresholds:
+  min_visible_points: 40
+  min_effective_points: 25.0
+  min_grid_occupancy: 6
+  min_hull_coverage: 0.15
+  min_fim_rank: 6
+  min_fim_isotropy: 0.001
+  max_fim_condition: 100000000.0
+  # null => report FIM covariance as a ranking signal only. Calibrate on held-out
+  # localization queries before enabling absolute metric/angle gates.
+  max_fim_translation_sigma_m: null
+  max_fim_rotation_sigma_deg: null
+  min_track_diversity: 0.015
+  min_nearby_mapping_cameras: 3
+  mapping_camera_radius_m: 8.0
+  min_view_support_fraction: 0.10
+  min_effective_redetectable_points: 15.0
+  min_illumination_ratio: 0.45
+  min_history_success: 0.80
+  min_pnp_inliers: 25
+  min_inlier_ratio: 0.25
+  max_reproj_p90: 3.0
+  min_positive_depth_ratio: 0.999
+  min_retrieval_score: 0.20
+  min_registration_confidence: 0.50
+  min_unique_tracks: 25
+  min_reference_count: 2
+  max_pose_consensus_translation_m: 0.5
+  max_pose_consensus_rotation_deg: 5.0
+  max_reference_dispersion_m: 0.5
+  max_reference_consensus_sigma_m: 0.5
+  max_reference_rotation_dispersion_deg: 5.0
+  min_reference_covariance_eligible_ratio: 0.5
+  min_query_triangulation_angle_deg: 2.0
+  max_low_parallax_visible_fraction: 0.60
+  max_scale_ratio: 2.0
+  min_scale_extrapolated_fraction: 0.50
+  min_matchability_evidence_fraction: 0.30
+  min_mean_matchability: 0.25
+  min_effective_matchable_points: 15.0
+
+# Algorithmic settings for `sfm-diagnosis consensus`. Failure gates live under
+# `thresholds` so the standalone consensus command and pose/heatmap diagnosis use
+# one source of truth.
+reference_consensus:
+  student_t_nu: 5.0
+  covariance_floor_m: 0.001
+  sigma_inflation: 1.0
+
+matchability:
+  p_min: 0.20
+  beta_a: 1.0
+  beta_b: 1.0
+  half_life: null
+  reweight_fim: false
+
+heatmap:
+  spacing_m: 1.0
+  padding_m: 0.0
+  orientation_mode: map
+  orientations_per_position: 3
+  yaw_step_deg: 45.0
+  pitches_deg: [0.0]
+  max_positions: 25000
+  robust_threshold: 0.65
+
+# Route-conditioned localization audit. `route_risk` is a ranking score unless
+# --calibration supplies held-out health_score/success outcomes. Even then, only
+# base_failure_risk is calibrated; direction and motion terms remain planning costs.
+route:
+  sample_spacing_m: 0.5
+  max_heatmap_distance_m: 2.0
+  smoothness_weight: 0.25
+  task_forward_weight: 0.05
+  weak_direction_weight: 0.10
+  sigma_reference_m: 1.0
+  max_turn_deg_per_m: 90.0
+  turn_violation_weight: 2.0
+  enter_risk: 0.45
+  exit_risk: 0.35
+  min_segment_length_m: 1.0
+  calibration_min_samples: 20
+  no_support_risk: 1.0
+
+weak_regions:
+  # View-graph edge = at least this many shared reconstructed landmarks.
+  covisibility_min_shared: 15
+  max_track_for_pair_expansion: 20
+
+  # Relative anomaly detection. Compare each map against its own median/MAD
+  # distribution before applying the absolute guardrails below.
+  robust_z_threshold: 2.5
+  weak_image_score_threshold: 0.35
+
+  # null => infer from registered-camera nearest-neighbor spacing.
+  cluster_radius: null
+  anchor_radius: null
+  anchor_radius_multiplier: 2.5
+  min_anchor_edges: 2
+
+  # Absolute guardrails; calibrate on held-out maps/routes for production use.
+  min_track_length_p50: 3.0
+  max_two_view_fraction: 0.65
+  min_triangulation_angle_p50_deg: 2.0
+  max_reprojection_p90_px: 3.0
+
+  # Pair/matching evidence gates. Only fire when --database/--pairs is supplied.
+  min_pair_inliers: 30
+  min_pair_inlier_ratio: 0.25
+  min_pair_matches_for_ambiguity: 80
+  min_pair_candidates_for_retrieval: 4
+  min_selected_ratio: 0.25
+  min_homography_support: 0.60
+  max_essential_support: 0.30
+  max_relative_rotation_deg: 15.0
+  max_relative_direction: 0.35
+  min_planar_pair_fraction: 0.50
+  min_pose_inconsistent_fraction: 0.30
+
+
+  max_report_regions: 100

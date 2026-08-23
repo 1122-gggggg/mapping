@@ -1,0 +1,26 @@
+{
+  "health": {
+    "min_observations_per_image": 50,
+    "min_hull_coverage": 0.15,
+    "min_grid4_occupancy": 6,
+    "max_reprojection_p90_px": 3.0,
+    "min_track_length_median": 3.0,
+    "min_covisibility_component_ratio": 0.95
+  },
+  "localization": {
+    "min_inliers": 25,
+    "min_inlier_ratio": 0.25,
+    "max_reprojection_p90_px": 3.0,
+    "min_hull_coverage": 0.15,
+    "min_grid4_occupancy": 6,
+    "min_positive_depth_ratio": 1.0,
+    "min_pose_consensus": 0.67
+  },
+  "comparison": {
+    "max_success_rate_drop": 0.02,
+    "max_common_success_inlier_drop": 0.05,
+    "max_common_success_reprojection_increase_px": 0.5,
+    "max_new_failure_rate": 0.02
+  },
+  "region_cell_size": 5.0
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/1122-gggggg/diagnosis_map/blob/main/schemas/localization_result.schema.json",
+  "title": "MapDoctor localization result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "query",
+    "success",
+    "inliers",
+    "inlier_ratio",
+    "reproj_p90_px",
+    "hull_coverage",
+    "grid4_occupancy",
+    "positive_depth_ratio",
+    "pose_consensus"
+  ],
+  "properties": {
+    "query": {"type": "string", "minLength": 1},
+    "success": {"type": "boolean"},
+    "inliers": {"type": "integer", "minimum": 0},
+    "inlier_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+    "reproj_p90_px": {
+      "description": "90th-percentile inlier reprojection error in pixels; null when no pose/inlier reprojection exists",
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "hull_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+    "grid4_occupancy": {"type": "integer", "minimum": 0, "maximum": 16},
+    "positive_depth_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+    "pose_consensus": {"type": "number", "minimum": 0, "maximum": 1},
+    "x": {"type": "number"},
+    "y": {"type": "number"},
+    "z": {"type": "number"},
+    "position_error_m": {"type": "number", "minimum": 0},
+    "rotation_error_deg": {"type": "number", "minimum": 0}
+  }
+}

@@ -1,0 +1,3 @@
+image_i,image_j,retrieval_score,selected,attempted,num_matches,num_inliers,inlier_ratio,verified,essential_support,homography_support
+routeA_001.jpg,routeB_014.jpg,0.84,1,1,420,286,0.681,1,0.73,0.18
+routeA_002.jpg,routeB_015.jpg,0.78,0,0,,,,,,
