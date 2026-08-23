@@ -1,14 +1,19 @@
-# mapping — 無人機影片 → 可定位 SfM 地圖
+# mapping — 建圖 + 診斷
 
-這個 repo 是 `sfm_system` 的**建圖側**程式碼與方法文件。
+這個 repo 是 `sfm_system` 的**建圖側**與**地圖／定位診斷**。
 飛行時的即時定位（tracker / PCMD / EDM runtime）**不在這裡**，在另一個 repo。
 
-界線是這樣劃的：**產生地圖與 bundle 的東西在這裡；消費 bundle 去飛的東西不在這裡。**
-所以 `finalize_edm_model.py`（產生 EDM bundle）、`validate_heldout_localization.py`
-（用留出影片驗收地圖）都在，因為沒有它們就無法證明地圖可用。
+界線是這樣劃的：**產生地圖與 bundle 的東西在這裡；消費 bundle 去飛的東西不在這裡；
+讀完地圖之後做健康檢查與失敗歸因的東西也在這裡。**
+所以 `finalize_edm_model.py`、`validate_heldout_localization.py` 都在，
+`diagnosis/`（MapDoctor + sfm-diagnosis + `sfm-qa`）也在。
 
 原始工作目錄是 `/media/cihcilab/新增磁碟區/sfm_system/`。這裡不含任何 `runs/` 產物
 （那裡有 265 GB 的影像、database、model、log）。
+
+```bash
+pip install -e '.[dev]'
+```
 
 ---
 
@@ -78,6 +83,33 @@ sfm_system/建圖/outputs/
 - **S5 的固定內參 BA 是硬要求**。GlueMap 的 BA 會**默默漂移內參**——
   `refine_extra_params` 是那個陷阱。最終模型的相機參數必須與 seed 完全一致（實測 delta `0.0`）。
 - **S9 才是驗收**。「有輸出檔」不等於完成。
+
+## 診斷：Stage 0–2
+
+`diagnosis/` 是原本獨立的 [sfm_map_diagnosis](https://github.com/1122-gggggg/sfm_map_diagnosis)。
+建圖負責把地圖做出來並用 S9 驗收；診斷負責解釋地圖哪裡弱、定位失敗該怪地圖還是定位器。
+
+| Stage | 命令 | 對應建圖 | 硬 gate？ |
+|---|---|---|---|
+| **0** | `sfm-qa select-sessions` | 補 S0：拍之前先建議 session 角色 | 否，advisory |
+| **1** | `python tools/diagnose_map.py --model … --backend gluemap` | S5/S6 之後的靜態地圖篩檢 | 否。S6/S9 仍是 release 閘 |
+| **2** | 同上再加 `--logs loc.csv` | S9 之後的 per-query 歸因 | 否。不可用 S9 聚合列假造 CSV |
+
+```bash
+# S5/S6 之後
+python tools/diagnose_map.py \
+  --model /path/to/runs/target_site_v1/final_model \
+  --backend gluemap \
+  --output /path/to/runs/target_site_v1/sfm-qa
+
+# MapDoctor HTML 報告（target_site hook）
+python sites/target_site/tools/run_mapdoctor_qa.py \
+  --model /path/to/runs/target_site_v1/final_model \
+  --backend gluemap \
+  --output /path/to/runs/target_site_v1/mapdoctor
+```
+
+細節見 `docs/MAPDOCTOR_QA_INTEGRATION.md` 與 `diagnosis/docs/pipeline.md`。
 
 ---
 
@@ -338,6 +370,7 @@ grep -rn '/media/cihcilab\|/home/cihcilab' --include='*.py' --include='*.json' .
 | `map_update/core/` | `sfm_system/更新地圖/source/sfm_reshot25/update_pipeline/` |
 | `configs/` | `sfm_system/configs/` |
 | `docs/` | `sfm_system/docs/` |
+| `diagnosis/` | 原獨立 repo `sfm_map_diagnosis`（MapDoctor + sfm-diagnosis） |
 
 **沒有推上來的**：`runs/`（265 GB 產物與證據）、`external_tools/`（7.8 GB 第三方）、
 `定位/` 與 `EDM定位測試/`（定位側，在另一個 repo）、`LoMa建圖測試/`（另一條建圖路線的實驗）。

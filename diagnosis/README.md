@@ -1,7 +1,9 @@
 # sfm-map-diagnosis
 
-MapDoctor (`mapdoctor`) and sfm-diagnosis (`sfm_diagnosis`) now live in this repo.
+This tree now lives inside https://github.com/1122-gggggg/mapping under `diagnosis/`.
+Install from the mapping repo root: `pip install -e '.[dev]'`.
 
+MapDoctor (`mapdoctor`) and sfm-diagnosis (`sfm_diagnosis`) provide the diagnosis half.
 本仓库用一条主命令先诊断地图，再诊断后续视觉定位。
 
 Pipeline: **Stage 0 session selection → Stage 1 map diagnosis → Stage 2 SfM localization**.

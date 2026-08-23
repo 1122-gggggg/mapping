@@ -43,8 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         from mapdoctor.cli import main as mapdoctor_main
     except ImportError as exc:
         raise SystemExit(
-            "MapDoctor is not installed. Install mapdoctor-sfm (or an editable checkout of "
-            "https://github.com/1122-gggggg/diagnosis_map) before running this optional QA hook."
+            "MapDoctor is not installed. From the repo root run: pip install -e ."
         ) from exc
 
     model = resolve_model(args.model)
