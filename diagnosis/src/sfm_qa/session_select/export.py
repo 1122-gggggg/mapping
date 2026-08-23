@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,18 @@ SESSION_ROLE_COLUMNS = [
     "critical_bridge_dependency",
     "change_score",
     "role",
+    "reason",
+]
+
+PREBUILD_PAIR_COLUMNS = [
+    "session_a",
+    "session_b",
+    "candidate_pairs",
+    "proposal_strength",
+    "triplet_score",
+    "priority",
+    "forced_probe",
+    "requires_geometric_verification",
     "reason",
 ]
 
@@ -132,6 +145,52 @@ def write_role_lists(output_dir: Path, roles: Mapping[str, str]) -> None:
             path.write_text("# none\n", encoding="utf-8")
 
 
+def _write_name_list(path: Path, names: Sequence[str]) -> None:
+    if names:
+        path.write_text("\n".join(str(name) for name in names) + "\n", encoding="utf-8")
+    else:
+        path.write_text("# none\n", encoding="utf-8")
+
+
+def write_prebuild_outputs(output_dir: Path, prebuild: Mapping[str, Any] | None) -> dict[str, Path]:
+    """Write proposal-only artifacts used before expensive pair geometry."""
+
+    payload = dict(prebuild or {})
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plan_path = output_dir / "prebuild_plan.json"
+    plan_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str) + "\n",
+        encoding="utf-8",
+    )
+    base_path = output_dir / "prebuild_base_candidates.txt"
+    validation_path = output_dir / "prebuild_validation_candidates.txt"
+    rejected_path = output_dir / "prebuild_rejected_sessions.txt"
+    pairs_path = output_dir / "prebuild_verification_pairs.csv"
+
+    _write_name_list(base_path, list(payload.get("proposed_base_sessions") or ()))
+    _write_name_list(validation_path, list(payload.get("validation_candidates") or ()))
+    rejected = payload.get("rejected") or {}
+    rejected_rows = (
+        [f"{sid}\t{reason}" for sid, reason in sorted(rejected.items())]
+        if isinstance(rejected, Mapping)
+        else []
+    )
+    _write_name_list(rejected_path, rejected_rows)
+    pair_rows = [
+        dict(row)
+        for row in (payload.get("verification_pairs") or ())
+        if isinstance(row, Mapping)
+    ]
+    _write_csv(pairs_path, pair_rows, PREBUILD_PAIR_COLUMNS)
+    return {
+        "prebuild_plan.json": plan_path,
+        "prebuild_base_candidates.txt": base_path,
+        "prebuild_validation_candidates.txt": validation_path,
+        "prebuild_rejected_sessions.txt": rejected_path,
+        "prebuild_verification_pairs.csv": pairs_path,
+    }
+
+
 def _objective_terms(
     qualities: Sequence[Any],
     edges: Sequence[Any],
@@ -188,7 +247,10 @@ def build_role_rows(
             if sid in {getattr(edge, "session_a", None), getattr(edge, "session_b", None)}
         ]
         strong = sum(1 for edge in incident if getattr(edge, "status", None) == "STRONG")
-        groups = max((getattr(edge, "independent_bridge_groups", 0) or 0 for edge in incident), default=0)
+        groups = max(
+            (getattr(edge, "independent_bridge_groups", 0) or 0 for edge in incident),
+            default=0,
+        )
         critical = any(getattr(edge, "is_critical_bridge", False) for edge in incident)
         info_gain = 0.0
         cov_gain = 0.0
@@ -218,7 +280,9 @@ def build_role_rows(
                 "critical_bridge_dependency": bool(critical),
                 "change_score": change_score.get(sid, 0.0),
                 "role": roles.get(sid, "QUARANTINE"),
-                "reason": reasons.get(sid, "; ".join(getattr(row, "reasons", ()) or ())),
+                "reason": reasons.get(
+                    sid, "; ".join(getattr(row, "reasons", ()) or ())
+                ),
             }
         )
     return rows
@@ -244,9 +308,11 @@ def render_selection_report(
     reasons: Mapping[str, str],
     selection: Mapping[str, Any] | None = None,
     config: Mapping[str, Any] | None = None,
+    prebuild: Mapping[str, Any] | None = None,
 ) -> str:
     del config
     selection = dict(selection or {})
+    prebuild = dict(prebuild or {})
     by_role: dict[str, list[str]] = {role: [] for role in ROLE_FILES}
     for sid, role in roles.items():
         by_role.setdefault(role, []).append(sid)
@@ -254,14 +320,25 @@ def render_selection_report(
     lines = [
         "# Session selection report",
         "",
-        "Video-first selection. No COLMAP model is required.",
+        "Two-phase selection: proposal first, geometric admission second.",
         "Numeric gates are **heuristic**, not fitted site cutoffs.",
         "VPR / retrieval is **not** a geometric edge.",
         "Timestamp is recorded but **never** used to rank Base.",
         "Fail-closed: uncertain → QUARANTINE; no reliable edge → NEW_SUBMAP;",
         "never force-merge on one critical or AMBIGUOUS bridge.",
         "",
-        "## BASE_CORE",
+        "## Phase A — pre-build proposal",
+        "",
+        f"- Proposal confidence: `{prebuild.get('proposal_confidence', 'NONE')}`.",
+        f"- Proposed videos for geometry verification: "
+        f"{list(prebuild.get('proposed_base_sessions') or []) or '(none)'}.",
+        f"- Reserved validation candidates: "
+        f"{list(prebuild.get('validation_candidates') or []) or '(none)'}.",
+        f"- Session-pair geometry queue: {len(prebuild.get('verification_pairs') or [])}.",
+        "- **These are not BASE roles.** Every proposed cross-session pair still needs "
+        "verified geometry before it can enter the map.",
+        "",
+        "## Phase B — BASE_CORE",
         "",
     ]
     seed = selection.get("seed")
@@ -332,8 +409,9 @@ def write_selection_outputs(
     config: Mapping[str, Any] | None = None,
     extra: Mapping[str, Any] | None = None,
     selection: Mapping[str, Any] | None = None,
+    prebuild: Mapping[str, Any] | None = None,
 ) -> dict[str, Path]:
-    """Write the Stage-0 CSV / role-list / markdown artifacts."""
+    """Write the Stage-0 CSV / proposal / role-list / markdown artifacts."""
 
     dest = Path(output_dir)
     dest.mkdir(parents=True, exist_ok=True)
@@ -347,6 +425,7 @@ def write_selection_outputs(
     write_session_edges_csv(dest / "session_edges.csv", edges)
     write_session_roles_csv(dest / "session_roles.csv", role_rows)
     write_role_lists(dest, roles)
+    prebuild_written = write_prebuild_outputs(dest, prebuild)
     report = render_selection_report(
         qualities=qualities,
         edges=edges,
@@ -354,6 +433,7 @@ def write_selection_outputs(
         reasons=reasons,
         selection=selection,
         config=config,
+        prebuild=prebuild,
     )
     (dest / "selection_report.md").write_text(report, encoding="utf-8")
     written = {
@@ -361,6 +441,7 @@ def write_selection_outputs(
         "session_edges.csv": dest / "session_edges.csv",
         "session_roles.csv": dest / "session_roles.csv",
         "selection_report.md": dest / "selection_report.md",
+        **prebuild_written,
     }
     for filename in ROLE_FILES.values():
         written[filename] = dest / filename
@@ -369,9 +450,11 @@ def write_selection_outputs(
 
 __all__ = [
     "ROLE_FILES",
+    "PREBUILD_PAIR_COLUMNS",
     "SESSION_ROLE_COLUMNS",
     "build_role_rows",
     "render_selection_report",
+    "write_prebuild_outputs",
     "write_role_lists",
     "write_selection_outputs",
     "write_session_edges_csv",
