@@ -3,7 +3,7 @@ paths:
   current_images: ""
   historical_data: ""
   current_validation: ""
-  precomputed_edm: ""
+  precomputed_localizer: ""
   precomputed_change_masks: ""
   output_root: "runs"
 
@@ -88,7 +88,7 @@ selection:
   descriptor_cosine_redundancy: 0.95
   weights:
     viewpoint_gain: 1.0
-    edm_success_gain: 3.0
+    localizer_success_gain: 3.0
     pose_information_gain: 1.0
     stable_ratio: 0.5
     redundancy_penalty: 1.0
@@ -143,6 +143,8 @@ validation:
   min_failure_run_reduction: 0.0
 
 adapters:
+  map_loader: colmap
+  localizer: unspecified
   retrieval_type: precomputed
   matcher_type: precomputed
   retrieval_file: ""

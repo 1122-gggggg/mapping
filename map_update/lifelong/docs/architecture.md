@@ -2,7 +2,7 @@
 
 ## 1. Map ownership model
 
-The system treats the latest GLUEMAP reconstruction as a privileged geometry:
+The system treats the latest adapter-normalized reconstruction as a privileged geometry:
 
 \[
 M_{core}=\{K_i,T_i^{current},X_j^{current},\mathcal O_j^{current}\}
@@ -20,12 +20,13 @@ where `A_r` maps historical reference pixels to existing current `point3D_id` va
 
 | Module | Responsibility |
 |---|---|
-| `io.colmap` | Pure-Python COLMAP text/binary model reader and GLUEMAP provenance sidecars |
+| `map_adapters` | Built-in COLMAP-compatible loader plus importable `BaseMap` loaders |
+| `io.colmap` | Pure-Python implementation of the built-in text/binary loader |
 | `io.hashing` | Base-map snapshot and mutation detection |
 | `io.manifests` | Session-aware input manifests |
 | `quality` | Blur/exposure/entropy/near-duplicate filtering |
-| `adapters` | Precomputed, Python callable, or command-based retrieval/EDM integration |
-| `lifting` | EDM reference pixel to fixed current point3D lifting |
+| `adapters` | Precomputed, Python callable, or command-based localizer integration |
+| `lifting` | Matcher reference pixel to fixed current point3D lifting |
 | `pose` | Per-reference PnP, clustering, multimodality rejection, refinement |
 | `metrics` | Reprojection, spatial support, positive depth, FIM and gates |
 | `change` | Stable/changed/uncertain masks and multiview fusion |
@@ -106,10 +107,10 @@ historical_reference_sidecar/
 └── stable_masks/
 ```
 
-A deployment adapter can transform this sidecar into the format expected by the existing EDM localization service. The original base map remains independently hash-verifiable and rollback requires selecting the previous sidecar version rather than reconstructing geometry.
+A deployment adapter can transform this sidecar into the format expected by any localization service. The original base map remains independently hash-verifiable and rollback requires selecting the previous sidecar version rather than reconstructing geometry.
 
 ## Production activation layer
 
 `update_map.online.CurrentFirstLocalizer` implements the production policy: current references are tried first, selected active historical references are queried only when the current pass is weak, and a multi-modal fallback is rejected fail-closed.
 
-`update_map.bundle.CandidateBundleManager` stages versioned sidecars, verifies the frozen base-map snapshot before promotion, maintains an atomic active-bundle pointer, and supports rollback without rewriting GLUEMAP geometry.
+`update_map.bundle.CandidateBundleManager` stages versioned sidecars, verifies the frozen base-map snapshot before promotion, maintains an atomic active-bundle pointer, and supports rollback without rewriting current-map geometry.

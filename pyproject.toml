@@ -12,25 +12,34 @@ dependencies = [
   "numpy>=1.24",
   "scipy>=1.10",
   "PyYAML>=6.0",
+  "networkx>=3.0",
+  "pandas>=2.0",
+  "Pillow>=10.0",
+  "opencv-python-headless>=4.8",
+  "typer>=0.12",
+  "rich>=13.0",
 ]
 
 [project.optional-dependencies]
 colmap = ["pycolmap>=3.11"]
 viz = ["plotly>=5.18"]
 video = ["opencv-python-headless>=4.8"]
-dev = ["pytest>=8", "ruff>=0.6"]
+dino = ["torch>=2.1", "torchvision>=0.16", "transformers>=4.40"]
+parquet = ["pyarrow>=15.0"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10"]
 
 [project.scripts]
 sfm-qa = "sfm_qa.cli:main"
 mapdoctor = "mapdoctor.cli:main"
 sfm-diagnosis = "sfm_diagnosis.cli:main"
+update-map = "update_map.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/1122-gggggg/mapping"
 Issues = "https://github.com/1122-gggggg/mapping/issues"
 
 [tool.setuptools.packages.find]
-where = ["diagnosis/src"]
+where = ["diagnosis/src", "map_update/lifelong/src"]
 
 [tool.setuptools.package-data]
 "sfm_qa.session_select" = ["defaults.yaml"]

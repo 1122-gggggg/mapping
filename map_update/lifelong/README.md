@@ -1,6 +1,6 @@
 # update_map
 
-針對 **GLUEMAP 建立的最新基本地圖**，以歷史／舊資料補充仍然有效的觀測視角，並供 **EDM detector-free matching + PnP** 定位使用的研究與實驗框架。
+針對任意 map adapter 正規化出的最新基本地圖，以歷史／舊資料補充仍然有效的觀測視角，並供任意定位方法使用的研究與實驗框架。
 
 本專案的核心不是把所有舊影像重新丟回 SfM，而是實作以下不對稱更新原則：
 
@@ -12,8 +12,8 @@
 M = M_{core} + M_{loc}
 \]
 
-- `M_core`：最新資料建立的 GLUEMAP / COLMAP reconstruction，**唯讀且不可漂移**。
-- `M_loc`：可更新的 EDM localization layer，保存 current 與 historical references、stable masks、2D–3D associations、bridge provenance、stability 與 route-cell utility。
+- `M_core`：map adapter 載入的最新 reconstruction，**唯讀且不可漂移**。
+- `M_loc`：可更新的 localization sidecar，保存 current 與 historical references、stable masks、2D–3D associations、bridge provenance、stability 與 route-cell utility。
 
 正常更新必須滿足：
 
@@ -32,18 +32,18 @@ M = M_{core} + M_{loc}
 
 ## 主要能力
 
-- 讀取 COLMAP/GLUEMAP 的文字或 binary sparse reconstruction。
+- 以 `BaseMap` adapter 讀取任意地圖；內建 COLMAP-compatible text/binary loader。
 - 建立 base-map SHA-256 snapshot，更新前後驗證基本地圖未被修改。
 - 掃描 current map、current validation、historical update sessions，建立不可混淆的資料 manifest。
 - 評估 blur、曝光、飽和、entropy 與近重複影格，進行 historical keyframe 篩選。
-- 將 EDM 2D–2D matches 安全提升成 historical-query 2D–current-3D correspondences。
+- 將任意 matcher 的 2D–2D matches 安全提升成 historical-query 2D–current-3D correspondences。
 - 排除 virtual BA-only tracks、changed pixels、uncertain pixels與重複 point3D IDs。
 - per-reference PnP、SE(3) pose clustering、multi-modal fail-closed、非線性 pose refinement。
 - 計算 reprojection、凸包、4×4 occupancy、正深度、FIM、pose covariance 與 LOO stability。
 - change-aware stable mask：支援 precomputed masks、aligned-image baseline 與可插拔 dense-feature backend。
 - image graph、current point-ID propagation、可信 bridge path、多路徑／多 anchor cycle gate。
 - Umeyama / RANSAC Sim(3) 對齊與 fixed-current anchored pose-graph optimization。
-- route-view cell、EDM front-end utility、FIM utility、K-cover 與 redundancy-aware reference selection。
+- route-view cell、localizer front-end utility、FIM utility、K-cover 與 redundancy-aware reference selection。
 - ExMaps 類 stability history，但預設只懲罰重複幾何衝突，不因單次 unmatched 或資料年齡直接淘汰。
 - 預測／自適應 feature-map memory（arXiv:2603.12460）：sidecar 分數與 FreMEn 週期預測；gate 失敗為精確 no-op；historical-only／未驗證幾何一律隔離，不得進入 production map。
 - E0–E5 主實驗與 A1–A11 ablation protocol 定義、結果比較與 promotion gates。
@@ -55,7 +55,7 @@ M = M_{core} + M_{loc}
 
 ```mermaid
 flowchart TD
-    A[Latest data] --> B[GLUEMAP current map M_core]
+    A[Latest data] --> B[Adapter-normalized current map M_core]
     B --> C[Freeze poses points intrinsics IDs]
     H[Historical sessions] --> Q[Quality and duplicate filtering]
     Q --> D[Direct historical to current localization]
@@ -68,7 +68,7 @@ flowchart TD
     G --> J[Multi-anchor and cycle validation]
     J --> E
     E --> K[Stable historical pixel to current point3D associations]
-    K --> L[EDM and FIM route-cell utility]
+    K --> L[Localizer and FIM route-cell utility]
     L --> M[Redundancy and budget selection]
     M --> N[Held-out current-query regression]
     N -->|Pass| P[M_loc candidate bundle]
@@ -81,10 +81,8 @@ flowchart TD
 ## 安裝
 
 ```bash
-git clone https://github.com/1122-gggggg/update_map.git
-cd update_map
-python -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/1122-gggggg/mapping.git
+cd mapping
 pip install -e ".[dev]"
 ```
 
@@ -125,7 +123,7 @@ Synthetic demo 會建立一個固定 current map、正確 historical direct view
 
 ```text
 workspace/
-├── base_map/                  # 最新資料建立的 GLUEMAP/COLMAP map
+├── base_map/                  # 任意 adapter 可載入的最新 map
 │   ├── cameras.bin|txt
 │   ├── images.bin|txt
 │   └── points3D.bin|txt
@@ -136,7 +134,7 @@ workspace/
 │   ├── old_session_001/
 │   ├── old_session_002/
 │   └── old_session_003/
-├── edm_precomputed/          # 可選：既有 EDM pipeline輸出
+├── localizer_precomputed/    # 可選：既有定位 pipeline 輸出
 │   ├── retrieval.json
 │   └── matches/
 └── runs/
@@ -161,15 +159,18 @@ update-map verify-map workspace/base_map runs/base_map_hashes.json
 
 ---
 
-## EDM 與既有定位系統接法
+## 與既有地圖／定位系統接法
 
-本 repository 不綁死某一個 EDM fork 或 HLoc 專案路徑。核心 pipeline 接受標準化 adapter，避免把研究邏輯和特定模型程式碼耦合。
+核心 pipeline 不綁定地圖格式或定位方法。地圖 loader 輸出 `BaseMap`；retriever 與 matcher 接受標準化 adapter。名稱只保留 provenance，不會選擇診斷或 promotion 邏輯。
+
+地圖可使用內建 `colmap`／`glomap`／`gluemap` loader，或設定
+`adapters.map_loader: package.module:loader`。外部 loader 只需回傳 `update_map.models.BaseMap`。
 
 支援三種方式：
 
-1. **Precomputed adapter**：讀取現有 EDM retrieval/match 結果，最適合先重現既有系統。
+1. **Precomputed adapter**：讀取現有定位器的 retrieval/match 結果。
 2. **Python callable adapter**：設定 `module:function`，直接呼叫既有 Python API。
-3. **External command adapter**：以 command template 呼叫既有 EDM CLI，再讀取標準 `.npz`。
+3. **External command adapter**：以 command template 呼叫既有定位 CLI，再讀取標準 `.npz`。
 
 單一 query-reference pair 的標準 `.npz`：
 
@@ -210,8 +211,13 @@ paths:
   base_map: /absolute/path/to/base_map
   historical_data: /absolute/path/to/historical_updates
   current_validation: /absolute/path/to/current_validation
-  precomputed_edm: /absolute/path/to/edm_precomputed
+  precomputed_localizer: /absolute/path/to/localizer_precomputed
   output_root: /absolute/path/to/runs
+adapters:
+  map_loader: package.module:loader
+  localizer: arbitrary-method-name
+  retrieval_type: precomputed
+  matcher_type: precomputed
 ```
 
 執行 protocol：
@@ -220,7 +226,7 @@ paths:
 update-map run-protocol --config configs/local.yaml
 ```
 
-當尚未接入 EDM adapter 時，可先執行：
+當尚未接入定位 adapter 時，可先執行：
 
 ```bash
 update-map validate-config --config configs/local.yaml
@@ -233,11 +239,11 @@ update-map audit --config configs/local.yaml
 
 | ID | 實驗 |
 |---|---|
-| `E0_BASE_CURRENT_ONLY` | current GLUEMAP + current EDM references |
+| `E0_BASE_CURRENT_ONLY` | current map + current localizer references |
 | `E1_DIRECT_NO_CHANGE_MASK` | 加入 direct historical refs，但不做 change mask；只作風險 ablation |
 | `E2_DIRECT_CHANGE_AWARE` | direct refs + stable-mask filtering |
 | `E3_DIRECT_VERIFIED_BRIDGE` | E2 + multi-anchor/cycle-verified bridge refs |
-| `E4_SELECTED_AUGMENTED` | E3 + EDM/FIM/K-cover utility selection與去冗餘 |
+| `E4_SELECTED_AUGMENTED` | E3 + localizer/FIM/K-cover utility selection與去冗餘 |
 | `E5_PRODUCTION_CANDIDATE` | current-first historical-on-demand + source-aware PnP + fail-closed multimodality |
 
 Ablation A1–A11 定義於 [`docs/experiment_protocol.md`](docs/experiment_protocol.md)。
@@ -292,7 +298,7 @@ Config lives under `lifelong:` in [`configs/default.yaml`](configs/default.yaml)
 
 ## 文獻對應
 
-本實作將不同論文的可用原理放到不同模組，而不是聲稱任何一篇論文直接提出完整 GLUEMAP→EDM 更新系統：
+本實作將不同論文的可用原理放到不同模組，而不是聲稱任何一篇論文直接提出完整地圖／定位更新系統：
 
 - Multi-Session SLAM with Differentiable Wide-Baseline Pose Optimization：wide-baseline session connection、Sim(3)、pose graph。
 - Multi-View Pose-Agnostic Change Localization with Zero Labels：pose-aligned、多視角、feature/structure change localization。
@@ -308,7 +314,7 @@ Config lives under `lifelong:` in [`configs/default.yaml`](configs/default.yaml)
 
 ## 目前邊界
 
-- Repository 提供完整 research orchestration、幾何、gates、bridge、selection、reports與 adapters；EDM model weights、GLUEMAP、原始資料不納入版本庫。
+- Repository 提供完整 research orchestration、幾何、gates、bridge、selection、reports與 adapters；定位器權重、地圖產物與原始資料不納入版本庫。
 - Dense DINOv2 change inference 和真正 scene rendering依使用者的現有模型／幾何資產接入；repository 同時提供可執行的 aligned-image baseline 與 precomputed-mask adapter。
 - 若沒有獨立 current validation session，系統會標記 `PROVISIONAL_PROXY_VALIDATION`，不得把結果宣稱為 production 泛化改善。
 - Bridge 能證明歷史影像相對 current map 的連接，但不能證明場景未變；bridge後仍必須重跑 change detection。
@@ -329,7 +335,7 @@ python scripts/validate_environment.py
 實驗輸出不得直接覆蓋 production。先 stage：
 
 ```bash
-update-map stage-bundle output/edm_bundle_augmented_candidate \
+update-map stage-bundle output/localizer_bundle_augmented_candidate \
   --version 2026-08-18-e5 \
   --registry workspace/bundle_registry \
   --base-map workspace/base_map
@@ -345,7 +351,7 @@ update-map promote-bundle \
   --base-map workspace/base_map
 ```
 
-回滾不改動 GLUEMAP，只切換 active sidecar pointer：
+回滾不改動 current map，只切換 active sidecar pointer：
 
 ```bash
 update-map rollback-bundle \

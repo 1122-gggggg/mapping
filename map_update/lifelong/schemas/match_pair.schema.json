@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "EDM match pair metadata",
+  "title": "Localizer match pair metadata",
   "type": "object",
   "required": ["query_id", "reference_id", "npz_path"],
   "properties": {

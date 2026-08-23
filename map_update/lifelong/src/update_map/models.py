@@ -431,7 +431,7 @@ class RouteCell:
 @dataclass
 class UtilityBreakdown:
     viewpoint_gain: float = 0.0
-    edm_success_gain: float = 0.0
+    localizer_success_gain: float = 0.0
     pose_information_gain: float = 0.0
     stable_ratio: float = 0.0
     redundancy_penalty: float = 0.0

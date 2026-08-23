@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "update-map"
 version = "0.1.0"
-description = "Change-aware historical-view augmentation for a privileged GLUEMAP geometry and EDM localization map."
+description = "Change-aware historical-view augmentation for an immutable map and arbitrary localizer."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
   {name = "update_map contributors"}
 ]
-keywords = ["visual-localization", "sfm", "gluemap", "edm", "map-update", "change-detection"]
+keywords = ["visual-localization", "sfm", "map-update", "change-detection"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",

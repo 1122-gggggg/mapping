@@ -49,7 +49,7 @@ def compute_utility_total(breakdown: UtilityBreakdown, config: SelectionConfig) 
     weights = config.weights
     total = (
         weights.viewpoint_gain * breakdown.viewpoint_gain
-        + weights.edm_success_gain * breakdown.edm_success_gain
+        + weights.localizer_success_gain * breakdown.localizer_success_gain
         + weights.pose_information_gain * breakdown.pose_information_gain
         + weights.stable_ratio * breakdown.stable_ratio
         - weights.redundancy_penalty * breakdown.redundancy_penalty

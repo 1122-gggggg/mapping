@@ -2,13 +2,13 @@
 
 This module implements the map-management part of **Predictive and Adaptive Maps for Long-Term Visual Navigation in Changing Environments** (`arXiv:2603.12460`) and adapts it to this repository's hard invariant:
 
-> Current GLUEMAP geometry is immutable. Long-term learning changes only a sidecar active set, feature scores and temporal models. Historical-only or otherwise unverified geometry is quarantined and cannot become a production PnP landmark.
+> Current-map geometry is immutable. Long-term learning changes only a sidecar active set, feature scores and temporal models. Historical-only or otherwise unverified geometry is quarantined and cannot become a production pose landmark.
 
 Implementation: `src/update_map/lifelong/`. Configuration: `lifelong:` in `configs/default.yaml`.
 
-## Event supervision from EDM/PnP
+## Event supervision from localizer pose estimation
 
-The original paper uses image-feature displacement voting. This repository keeps the paper's map-management logic but derives stronger labels from the existing EDM/2D-to-current-3D/LO-RANSAC/PnP pipeline:
+The original paper uses image-feature displacement voting. This repository keeps the paper's map-management logic but derives stronger labels from the configured matcher/2D-to-current-3D/robust-pose pipeline:
 
 - PnP inlier: `correct`;
 - matched correspondence rejected by the trusted geometric estimator: `incorrect`;
@@ -115,7 +115,7 @@ The paper's separate multiple-map experience strategy is intentionally not flatt
 ## Integration contract
 
 1. Build eligible IDs from active sidecar features visible in the query and accepted by stable/change/occlusion masks.
-2. Associate each EDM/PnP correspondence with its feature-memory ID.
+2. Associate each accepted localizer correspondence with its feature-memory ID.
 3. Convert the PnP inlier mask:
 
 ```python
@@ -124,7 +124,7 @@ events = classify_feature_events(eligible_ids, matched_feature_ids, pnp_inlier_m
 
 4. Convert new stable 2D-to-current-3D associations into `FeatureCandidate`. A recommended ID is `<reference_id>:<point2d_idx>:<point3d_id>` so multiple appearance observations of one landmark remain distinct.
 5. Call `update_session(...)` only after all registration/change gates pass.
-6. Persist with `manager.save(...)` beside the versioned candidate bundle. No COLMAP/GLUEMAP camera, image or point file is rewritten.
+6. Persist with `manager.save(...)` beside the versioned candidate bundle. No current-map camera, image or point file is rewritten.
 7. At query time expose only IDs returned by `select_features(...)` to the matcher/reference index.
 
 `MapUpdatePlan` reports exact observed, activated, retired, quarantined and ignored IDs, exchange target/applied count, and active counts before/after.

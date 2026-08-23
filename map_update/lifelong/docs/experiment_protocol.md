@@ -4,9 +4,9 @@
 
 Use three non-overlapping roles:
 
-1. `CURRENT_MAP`: newest data used to build the privileged GLUEMAP model.
+1. `CURRENT_MAP`: newest data used to build the privileged current map.
 2. `HISTORICAL_UPDATE`: older sessions used only to propose observations/references.
-3. `CURRENT_VALIDATION`: newest held-out flights or sessions used to measure whether historical views improve present-day EDM localization.
+3. `CURRENT_VALIDATION`: newest held-out sessions used to measure whether historical views improve present-day localization.
 
 Split by flight/session/day. Random adjacent-frame splitting is invalid because it strongly leaks appearance, pose and motion continuity.
 
@@ -26,13 +26,13 @@ model_versions.json
 random_seeds.json
 ```
 
-Cache retrieval, pair matches, lifting results and masks. Changing EDM checkpoint, image resizing, intrinsics, retrieval top-K or PnP settings creates a new run ID.
+Cache retrieval, pair matches, lifting results and masks. Changing the localizer, image resizing, intrinsics, retrieval top-K or pose settings creates a new run ID.
 
 ## 3. Main experiments
 
 ### E0_BASE_CURRENT_ONLY
 
-Original current GLUEMAP and current EDM references. This is the immutable baseline.
+Original current map and current localizer references. This is the immutable baseline.
 
 ### E1_DIRECT_NO_CHANGE_MASK
 
@@ -48,7 +48,7 @@ E2 plus historical references recovered by a multi-anchor or multi-path bridge a
 
 ### E4_SELECTED_AUGMENTED
 
-E3 with EDM/FIM/K-cover utility selection and redundancy pruning.
+E3 with localizer/FIM/K-cover utility selection and redundancy pruning.
 
 ### E5_PRODUCTION_CANDIDATE
 
@@ -67,7 +67,7 @@ E4 with current-first historical-on-demand retrieval, source-aware weighted PnP 
 | A7 | pooled retrieval vs current-first fallback |
 | A8 | unweighted vs confidence/source-aware PnP |
 | A9 | no stable-mask filtering vs stable-mask filtering |
-| A10 | no FIM utility vs FIM + EDM front-end utility |
+| A10 | no FIM utility vs FIM + localizer front-end utility |
 | A11 | unmatched-decay vs conflict-only stability updates |
 
 ## 5. Metrics
@@ -116,11 +116,11 @@ When ground truth exists:
 
 ### Systems
 
-- retrieval/EDM/PnP/total p50/p95/p99 latency;
+- retrieval/matching/pose/total p50/p95/p99 latency;
 - GPU and host memory;
 - disk size;
 - current, candidate and active reference counts;
-- EDM pairs per query.
+- match pairs per query.
 
 ## 6. Promotion gates
 

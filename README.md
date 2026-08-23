@@ -135,6 +135,18 @@ target_site 靠 446 條 accepted forced edges 把三組雙區域骨幹接起來�
 
 `map_update/` 是這條線的全部程式碼與研究紀錄。
 
+`map_update/lifelong/` 已整合原 `1122-gggggg/update_map` 的完整 Git 歷史，提供
+change-aware historical-view augmentation、immutable base-map snapshot、長期 feature
+memory、candidate bundle promotion／rollback 與 `update-map` CLI。它使用和診斷層相同的
+開放邊界：`adapters.map_loader` 可是內建名稱或 `package.module:loader`，定位方法名稱只作
+provenance，retriever／matcher 透過 precomputed、Python callable 或 external-command adapter
+接入，不選擇方法專屬邏輯。
+
+```bash
+update-map synthetic-demo --output /tmp/update-map-demo
+update-map inspect-map /path/to/map --map-adapter package.module:loader
+```
+
 - `docs/map_update/EDM_INCREMENTAL_UPDATE_DESIGN.md` — **從這裡開始讀**。EDM 時代的具體
   增量更新設計：以 gauge 是否被動過分流、U0–U5 流程、G-U1~G-U6 gates、P0–P8 實作順序。
 - `map_update/MAP_UPDATE_STRATEGY_RECORD.md` — 長期架構論證 (v2, 2026-07-15)。

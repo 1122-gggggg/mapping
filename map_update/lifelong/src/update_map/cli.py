@@ -18,9 +18,9 @@ from .adapters import (
 )
 from .bundle import CandidateBundleManager
 from .config import UpdateMapConfig, load_config
-from .io.colmap import load_colmap_reconstruction
 from .io.hashing import create_map_snapshot, load_snapshot, save_snapshot, verify_map_snapshot
 from .io.manifests import build_image_manifest, write_manifest
+from .map_adapters import load_map
 from .models import to_jsonable
 from .pipeline import HistoricalAugmentationPipeline
 from .quality import enrich_records_with_quality, select_historical_keyframes
@@ -36,7 +36,7 @@ from .synthetic import run_synthetic_demo
 
 app = typer.Typer(
     name="update-map",
-    help="Historical-view augmentation for a frozen current GLUEMAP geometry.",
+    help="Historical-view augmentation for a frozen current map.",
     no_args_is_help=True,
 )
 console = Console()
@@ -84,7 +84,9 @@ def _reference_paths(base_map, image_root: str | Path) -> dict[str, Path]:
 def _build_adapters(config: UpdateMapConfig):
     adapter = config.adapters
     if adapter.retrieval_type == "precomputed":
-        retrieval_file = adapter.retrieval_file or str(Path(config.paths.precomputed_edm) / "retrieval.json")
+        retrieval_file = adapter.retrieval_file or str(
+            Path(config.paths.precomputed_localizer) / "retrieval.json"
+        )
         retriever = PrecomputedRetriever(retrieval_file)
     elif adapter.retrieval_type == "callable":
         retriever = CallableRetriever(adapter.python_retriever)
@@ -93,7 +95,9 @@ def _build_adapters(config: UpdateMapConfig):
     else:
         raise ValueError(f"Unsupported retrieval adapter: {adapter.retrieval_type}")
     if adapter.matcher_type == "precomputed":
-        matches_root = adapter.matches_root or str(Path(config.paths.precomputed_edm) / "matches")
+        matches_root = adapter.matches_root or str(
+            Path(config.paths.precomputed_localizer) / "matches"
+        )
         matcher = PrecomputedMatcher(matches_root)
     elif adapter.matcher_type == "callable":
         matcher = CallableMatcher(adapter.python_matcher)
@@ -109,8 +113,8 @@ def _run_direct_ingestion(config: UpdateMapConfig, output: Path) -> dict[str, ob
     if required_errors:
         raise ValueError("; ".join(required_errors))
     if not config.paths.current_images:
-        raise ValueError("paths.current_images is required to resolve GLUEMAP reference RGB files")
-    base_map = load_colmap_reconstruction(config.paths.base_map)
+        raise ValueError("paths.current_images is required to resolve map reference images")
+    base_map = load_map(config.paths.base_map, config.adapters.map_loader)
     snapshot = create_map_snapshot(base_map.root or config.paths.base_map)
     save_snapshot(snapshot, output / "base_map_hashes.json")
     records = build_image_manifest(
@@ -174,7 +178,9 @@ def _run_direct_ingestion(config: UpdateMapConfig, output: Path) -> dict[str, ob
             "real_points": len(base_map.real_point_ids()),
             "virtual_points": len(base_map.virtual_point_ids()),
             "source_format": base_map.source_format,
+            "adapter": config.adapters.map_loader,
         },
+        "localizer": config.adapters.localizer,
         "historical_images": len(historical),
         "selected_keyframes": len(selected),
         "rejected_keyframes": len(rejected),
@@ -203,10 +209,15 @@ def validate_config_command(
 
 @app.command("inspect-map")
 def inspect_map(
-    base_map: Path = typer.Argument(..., exists=True, file_okay=False),
+    base_map: Path = typer.Argument(..., exists=True),
+    map_adapter: str = typer.Option(
+        "colmap",
+        "--map-adapter",
+        help="Built-in map adapter or package.module:loader",
+    ),
 ) -> None:
-    model = load_colmap_reconstruction(base_map)
-    table = Table(title="Current GLUEMAP/COLMAP map")
+    model = load_map(base_map, map_adapter)
+    table = Table(title="Current map")
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("Format", model.source_format)
@@ -287,7 +298,12 @@ def active_bundle(
 @app.command("audit")
 def audit(
     config: Optional[Path] = typer.Option(None, exists=True, dir_okay=False),
-    base_map: Optional[Path] = typer.Option(None, exists=True, file_okay=False),
+    base_map: Optional[Path] = typer.Option(None, exists=True),
+    map_adapter: Optional[str] = typer.Option(
+        None,
+        "--map-adapter",
+        help="Built-in map adapter or package.module:loader",
+    ),
     historical: Optional[Path] = typer.Option(None, exists=True, file_okay=False),
     validation: Optional[Path] = typer.Option(None, file_okay=False),
     current_images: Optional[Path] = typer.Option(None, file_okay=False),
@@ -299,6 +315,8 @@ def audit(
     cfg = _resolve_config(config)
     if base_map:
         cfg.paths.base_map = str(base_map)
+    if map_adapter:
+        cfg.adapters.map_loader = map_adapter
     if historical:
         cfg.paths.historical_data = str(historical)
     if validation:
@@ -309,7 +327,7 @@ def audit(
     if errors:
         raise typer.BadParameter("; ".join(errors))
     output.mkdir(parents=True, exist_ok=True)
-    model = load_colmap_reconstruction(cfg.paths.base_map)
+    model = load_map(cfg.paths.base_map, cfg.adapters.map_loader)
     records = build_image_manifest(
         cfg.paths.historical_data,
         cfg.paths.current_validation or None,

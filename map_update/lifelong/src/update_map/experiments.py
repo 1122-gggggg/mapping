@@ -41,7 +41,7 @@ ABLATIONS: dict[str, str] = {
     "A7": "pooled retrieval versus current-first fallback",
     "A8": "unweighted versus confidence/source-aware PnP",
     "A9": "no stable-mask filtering versus stable-mask filtering",
-    "A10": "no FIM utility versus FIM + EDM front-end utility",
+    "A10": "no FIM utility versus FIM + localizer front-end utility",
     "A11": "unmatched-decay versus conflict-only stability update",
 }
 

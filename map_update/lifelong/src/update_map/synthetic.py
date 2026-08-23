@@ -211,7 +211,7 @@ def run_synthetic_demo(output_dir: str | Path) -> dict[str, object]:
         supports_cells={"route:p0:y0", "route:p1:y0"},
         utility=UtilityBreakdown(
             viewpoint_gain=0.8,
-            edm_success_gain=0.2,
+            localizer_success_gain=0.2,
             pose_information_gain=0.4,
             stable_ratio=reference.stable_ratio,
             runtime_cost=0.1,
@@ -236,7 +236,7 @@ def run_synthetic_demo(output_dir: str | Path) -> dict[str, object]:
         supports_cells={"route:weak:p2:y3"},
         utility=UtilityBreakdown(
             viewpoint_gain=1.0,
-            edm_success_gain=0.5,
+            localizer_success_gain=0.5,
             pose_information_gain=0.6,
             stable_ratio=0.9,
             runtime_cost=0.15,

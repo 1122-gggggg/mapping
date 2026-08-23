@@ -2,7 +2,7 @@
 
 ## 1. Direct historical registration
 
-For a historical image \(I_h\), retrieve only current-map references \(I_r\). EDM provides:
+For a historical image \(I_h\), retrieve only current-map references \(I_r\). The configured matcher provides:
 
 \[
 \mathcal M_{hr}=\{(u_h^k,u_r^k,c_k,\sigma_k)\}.
@@ -32,7 +32,7 @@ For the dominant reference cluster, the refined pose minimizes:
 \hat T=\arg\min_T\sum_k w_k\rho\left(\|u_h^k-\pi(K_hTX_k)\|^2\right).
 \]
 
-The default weight is based on match/association confidence. An existing EDM integration may further calibrate confidence and predicted uncertainty.
+The default weight is based on match/association confidence. A localizer integration may further calibrate confidence and predicted uncertainty.
 
 ## 3. Pose information
 
@@ -110,7 +110,7 @@ A historical reference is included only if it improves future current-query loca
 \[
 U(r)=
 \alpha\Delta C_{view}+
-\beta\Delta P_{EDM}+
+\beta\Delta P_{localizer}+
 \gamma\Delta I_{pose}+
 \delta S_{stable}
 -\eta R_{redundancy}
@@ -120,7 +120,7 @@ U(r)=
 
 Route cells discretize position, height, yaw, pitch, direction and condition. Greedy K-cover selection first fills cells below their support target, then adds references by marginal utility per cost. Direct and bridged references carry different risk priors.
 
-The decisive measurement is held-out current-query EDM localization gain, not how many historical images can be registered.
+The decisive measurement is held-out current-query localization gain, not how many historical images can be registered.
 
 ## 7. Long-term stability
 

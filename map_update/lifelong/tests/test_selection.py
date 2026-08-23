@@ -26,7 +26,7 @@ def candidate(reference_id: str, cells: set[str], utility: float, point_offset: 
     return ReferenceCandidate(
         ref,
         cells,
-        UtilityBreakdown(edm_success_gain=utility, stable_ratio=0.9),
+        UtilityBreakdown(localizer_success_gain=utility, stable_ratio=0.9),
         visible_point3d_ids=ref.current_point3d_ids,
     )
 

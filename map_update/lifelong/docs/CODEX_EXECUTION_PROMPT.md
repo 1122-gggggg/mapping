@@ -6,17 +6,17 @@ Copy the following task into Codex after cloning this repository and setting the
 
 ## Mission
 
-Use the existing newest-data GLUEMAP reconstruction as an immutable privileged geometry and use historical sessions only to add still-valid EDM viewpoints/observations. Execute the complete E0–E5 and A1–A11 protocol. Do not merely write a design document.
+Use the existing newest-data map as an immutable privileged geometry and use historical sessions only to add still-valid localizer viewpoints/observations. Execute the complete E0–E5 and A1–A11 protocol. Do not merely write a design document.
 
 Set:
 
 ```text
 REPO_ROOT=<this repository>
-BASE_MAP_DIR=<latest GLUEMAP/COLMAP sparse model>
+BASE_MAP=<latest map supported by a BaseMap adapter>
 CURRENT_IMAGES_DIR=<RGB files referenced by images.bin/txt>
 HISTORICAL_UPDATE_DATA_DIR=<older sessions>
 CURRENT_VALIDATION_DATA_DIR=<held-out latest sessions>
-EDM_BUNDLE_OR_PIPELINE=<existing EDM/retrieval implementation or precomputed output>
+LOCALIZER_PIPELINE=<existing localization/retrieval implementation or precomputed output>
 ```
 
 ## Non-negotiable invariants
@@ -35,16 +35,16 @@ EDM_BUNDLE_OR_PIPELINE=<existing EDM/retrieval implementation or precomputed out
 
 ## Work order
 
-1. Audit repository and data; document reusable EDM/GlueMap adapters and any duplicated metrics.
+1. Audit repository and data; document reusable map/localizer adapters and any duplicated metrics.
 2. Reproduce E0 current-only localization with all per-query diagnostics.
 3. Build historical manifest, quality filtering and session keyframes.
-4. Direct historical→current retrieval, EDM matching, safe lifting, per-reference PnP and pose clustering.
+4. Direct historical→current retrieval, localizer matching, safe lifting, per-reference pose estimation and clustering.
 5. For direct-strong images, run pose-aligned multi-view change localization and create stable/change/uncertain masks.
 6. Export only stable historical-pixel→current-point observations into a candidate sidecar.
 7. Classify direct failures into bad image, alias, historical change, viewpoint gap and unresolved.
 8. For viewpoint gaps, construct a bridge graph. First propagate current point IDs and re-run absolute PnP. If support ends, build a quarantined old-view submap, estimate robust Sim(3), and optimize only historical variables against fixed current anchors.
 9. Require multi-anchor/path and cycle evidence. Re-run change detection for every bridged image.
-10. Evaluate reference utility on held-out current queries using route-cell EDM success, FIM, stable ratio, redundancy, runtime and risk.
+10. Evaluate reference utility on held-out current queries using route-cell localizer success, FIM, stable ratio, redundancy, runtime and risk.
 11. Run E0–E5 and A1–A11. Compare success, pose error, confident wrong poses, weak-cell coverage, maximum continuous failure, p95 latency and map size.
 12. Produce a versioned candidate sidecar and rollback manifest. Do not merge automatically.
 

@@ -2,7 +2,8 @@
 
 ## 1. Current map
 
-Accepted layouts:
+The configured `adapters.map_loader` must return `update_map.models.BaseMap`.
+The built-in COLMAP-compatible loader accepts:
 
 ```text
 <base>/cameras.bin images.bin points3D.bin
@@ -56,9 +57,9 @@ camera_id,width,height,quality_status,quality_metrics,metadata
 }
 ```
 
-Reference IDs must resolve to the `name` field in the current COLMAP model, or to its numeric image ID.
+Reference IDs must resolve to the `name` field in the current `BaseMap`, or to its numeric image ID.
 
-## 4. EDM pair file
+## 4. Localizer pair file
 
 Compressed NumPy `.npz`:
 

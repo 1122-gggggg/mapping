@@ -1,7 +1,7 @@
 # Contributing
 
 1. Work on a feature branch.
-2. Keep the current GLUEMAP reconstruction immutable in all tests and experiments.
+2. Keep the current adapter-normalized map immutable in all tests and experiments.
 3. Add a regression test before changing any gate, metric, coordinate convention, or map format.
 4. Do not promote historical-only geometry into the production map.
 5. Run `pytest` and `ruff check .` before opening a pull request.

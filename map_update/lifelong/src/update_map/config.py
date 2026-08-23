@@ -13,7 +13,7 @@ class PathsConfig:
     historical_data: str = ""
     current_validation: str = ""
     current_images: str = ""
-    precomputed_edm: str = ""
+    precomputed_localizer: str = ""
     precomputed_change_masks: str = ""
     output_root: str = "runs"
 
@@ -106,7 +106,7 @@ class BridgeConfig:
 @dataclass
 class SelectionWeights:
     viewpoint_gain: float = 1.0
-    edm_success_gain: float = 3.0
+    localizer_success_gain: float = 3.0
     pose_information_gain: float = 1.0
     stable_ratio: float = 0.5
     redundancy_penalty: float = 1.0
@@ -236,6 +236,8 @@ class ValidationConfig:
 
 @dataclass
 class AdapterConfig:
+    map_loader: str = "colmap"
+    localizer: str = "unspecified"
     retrieval_type: str = "precomputed"
     matcher_type: str = "precomputed"
     retrieval_file: str = ""
@@ -285,6 +287,10 @@ class UpdateMapConfig:
             errors.append("change.stable_ratio_candidate cannot exceed stable_ratio_active")
         if self.selection.budget < 0:
             errors.append("selection.budget must be non-negative")
+        if not self.adapters.map_loader.strip():
+            errors.append("adapters.map_loader must not be empty")
+        if not self.adapters.localizer.strip():
+            errors.append("adapters.localizer must not be empty")
         errors.extend(f"lifelong.{error}" for error in self.lifelong.validate())
         if require_paths:
             for field_name in ("base_map", "historical_data"):
