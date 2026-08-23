@@ -14,7 +14,8 @@
     "min_hull_coverage": 0.15,
     "min_grid4_occupancy": 6,
     "min_positive_depth_ratio": 1.0,
-    "min_pose_consensus": 0.67
+    "min_pose_consensus": 0.67,
+    "min_strict_success_rate": 0.95
   },
   "comparison": {
     "max_success_rate_drop": 0.02,

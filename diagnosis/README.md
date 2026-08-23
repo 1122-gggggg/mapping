@@ -8,7 +8,9 @@ MapDoctor (`mapdoctor`) and sfm-diagnosis (`sfm_diagnosis`) provide the diagnosi
 
 Pipeline: **Stage 0 session selection → Stage 1 map diagnosis → Stage 2 SfM localization**.
 
-This tool does **not** run a localizer. `--logs` is a MapDoctor-schema localization CSV.
+This tool does **not** run a localizer. `--logs` is a MapDoctor-schema localization CSV,
+and its held-out provenance is not verified by this command; S0/S9 hashes remain the
+release authority.
 
 ## Install
 
@@ -28,6 +30,8 @@ sfm-qa select-sessions --videos /path/to/videos --output ./qa-select
 ```
 
 See `docs/session_selection.md`, `docs/frozen_core.md`, and `docs/method_lessons.md`.
+The default proposal policy is cohort-relative and always keeps a best-available readable
+geometry-probe set; heuristic QA references do not authorize or forbid an SfM merge.
 
 ## Analyze
 
@@ -53,9 +57,13 @@ Compatibility aliases: `check`, `check-map`, `check-localize`.
 
 `query,success,inliers,inlier_ratio,reproj_p90_px,hull_coverage,grid4_occupancy,positive_depth_ratio,pose_consensus`
 
+All columns are required. Only `reproj_p90_px` may have an empty value; the remaining
+quality fields must be finite and in their documented ranges.
+
 Optional for pose diagnosis: `x,y,z`.
 
-Exit code 0 only when `overall_status` is `READY` or `MAP_SCREENED_LOCALIZATION_UNCHECKED`.
+Exit code 0 when `overall_status` is `READY`, `READY_WITH_MAP_WARNINGS`, or
+`MAP_SCREENED_LOCALIZATION_UNCHECKED`.
 
 `--output DIR` writes `DIR/map/report.json`, `DIR/sfm/report.json` (if `--logs`), and combined `DIR/report.json`.
 
@@ -114,11 +122,12 @@ sfm-diagnosis --help
 
 | Status | Meaning |
 | --- | --- |
-| `READY` | Map screening passed and every query passed MapDoctor localization gates |
+| `READY` | Map screening passed and provided-log strict success reached the configured aggregate target (default 95%); release still requires external held-out proof |
+| `READY_WITH_MAP_WARNINGS` | Provided localization reached its target; map integrity passed, but one or more advisory map-health heuristics did not |
 | `MAP_SCREENED_LOCALIZATION_UNCHECKED` | Map screening passed; no logs given |
 | `MAP_SCREENING_FAILED` | Static map checks failed |
-| `LOCALIZATION_FAILED` | Map screening passed; at least one query failed gates |
-| `BOTH_FAILED` | Map screening failed and at least one query failed gates |
+| `LOCALIZATION_FAILED` | Map screening passed; provided-log strict success missed its aggregate target |
+| `BOTH_FAILED` | Map screening and provided-log aggregate localization target both failed |
 
 ## Demo
 

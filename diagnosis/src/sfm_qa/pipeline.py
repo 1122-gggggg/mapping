@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from sfm_diagnosis.evidence import load_build_evidence
 from sfm_diagnosis.weak_regions import analyze_weak_regions
 
 from .bridge import map_model_to_map_data, mapdoctor_rows_to_history_rows, nearest_mapping_rotation
+from .relative_quality import percentile_ranks, weighted_observed_score
 
 MAP_LIMITED_CODES = {
     DiagnosisCode.DATA_SPARSE.value,
@@ -44,7 +46,129 @@ ALIAS_CODES = {
     DiagnosisCode.REFERENCE_EVIDENCE_INSUFFICIENT.value,
 }
 
-_PASS_STATUSES = frozenset({"READY", "MAP_SCREENED_LOCALIZATION_UNCHECKED"})
+_PASS_STATUSES = frozenset(
+    {"READY", "READY_WITH_MAP_WARNINGS", "MAP_SCREENED_LOCALIZATION_UNCHECKED"}
+)
+
+
+def _relative_localization_quality(results, strict_by_query: dict[str, bool]) -> tuple[dict, dict]:
+    """Rank the current query cohort and expose every risk--coverage tradeoff."""
+
+    metric_specs = {
+        "inliers": ({result.query: result.inliers for result in results}, True, 0.20),
+        "inlier_ratio": (
+            {result.query: result.inlier_ratio for result in results},
+            True,
+            0.15,
+        ),
+        "reprojection": (
+            {result.query: result.reproj_p90_px for result in results},
+            False,
+            0.15,
+        ),
+        "hull_coverage": (
+            {result.query: result.hull_coverage for result in results},
+            True,
+            0.10,
+        ),
+        "grid_coverage": (
+            {result.query: result.grid4_occupancy for result in results},
+            True,
+            0.10,
+        ),
+        "positive_depth": (
+            {result.query: result.positive_depth_ratio for result in results},
+            True,
+            0.05,
+        ),
+        "pose_consensus": (
+            {result.query: result.pose_consensus for result in results},
+            True,
+            0.10,
+        ),
+    }
+    ranks = {
+        name: percentile_ranks(values, higher_is_better=higher)
+        for name, (values, higher, _) in metric_specs.items()
+    }
+    weights = {name: weight for name, (_, _, weight) in metric_specs.items()}
+    details: dict[str, dict] = {}
+    for result in results:
+        values = {name: ranks[name].get(result.query) for name in metric_specs}
+        quality, completeness = weighted_observed_score(values, weights)
+        quality *= 0.70 + 0.30 * completeness
+        details[result.query] = {
+            "relative_quality_score": float(quality),
+            "relative_risk_score": float(1.0 - quality),
+            "relative_evidence_completeness": float(completeness),
+            "relative_metric_ranks": values,
+        }
+
+    quality_ranks = percentile_ranks(
+        {query: row["relative_quality_score"] for query, row in details.items()}
+    )
+    for query, rank in quality_ranks.items():
+        details[query]["relative_quality_rank"] = rank
+
+    ordered = sorted(
+        results,
+        key=lambda result: (
+            details[result.query]["relative_quality_score"],
+            result.query,
+        ),
+        reverse=True,
+    )
+    curve: list[dict] = []
+    accepted: list = []
+    index = 0
+    while index < len(ordered):
+        threshold = details[ordered[index].query]["relative_quality_score"]
+        end = index + 1
+        while (
+            end < len(ordered)
+            and math.isclose(
+                details[ordered[end].query]["relative_quality_score"],
+                threshold,
+                rel_tol=1e-12,
+                abs_tol=1e-15,
+            )
+        ):
+            end += 1
+        accepted.extend(ordered[index:end])
+        count = len(accepted)
+        curve.append(
+            {
+                "accepted": count,
+                "coverage": count / len(ordered),
+                "minimum_relative_quality": float(threshold),
+                "mean_relative_quality": float(
+                    sum(details[item.query]["relative_quality_score"] for item in accepted)
+                    / count
+                ),
+                "raw_success_rate": sum(item.success for item in accepted) / count,
+                "strict_success_rate": (
+                    sum(strict_by_query[item.query] for item in accepted) / count
+                ),
+            }
+        )
+        index = end
+
+    scores = [row["relative_quality_score"] for row in details.values()]
+    summary = {
+        "selection_mode": "RELATIVE_RISK_COVERAGE",
+        "calibrated_failure_probability": False,
+        "ranking": [result.query for result in ordered],
+        "coverage_curve": curve,
+        "quality_p10": float(np.percentile(scores, 10)) if scores else None,
+        "quality_median": float(np.median(scores)) if scores else None,
+        "quality_p90": float(np.percentile(scores, 90)) if scores else None,
+        "note": (
+            "Cohort-relative scores prioritize diagnosis and expose availability/quality "
+            "tradeoffs. The log is not proven held out here; external S0/S9 evidence "
+            "remains release authority."
+        ),
+    }
+    return summary, details
 
 
 def jsonable(value: Any) -> Any:
@@ -107,6 +231,61 @@ def _has_finite_xyz(result) -> bool:
     )
 
 
+def _map_integrity_checks(model: MapModel, metrics) -> dict[str, bool]:
+    def finite(values) -> bool:
+        return all(math.isfinite(float(value)) for value in values)
+
+    def track_element_is_linked(point, element) -> bool:
+        image = model.images.get(element.image_id)
+        if image is None or not 0 <= element.point2d_idx < len(image.observations):
+            return False
+        return image.observations[element.point2d_idx].point3d_id == point.id
+
+    return {
+        "has_registered_images": metrics.registered_images > 0,
+        "has_cameras": metrics.cameras > 0,
+        "has_points3d": metrics.points3d > 0,
+        "has_observations": metrics.observations > 0,
+        "all_images_have_known_cameras": all(
+            image.camera_id in model.cameras for image in model.images.values()
+        ),
+        "camera_models_are_finite": all(
+            camera.width > 0
+            and camera.height > 0
+            and bool(camera.params)
+            and finite(camera.params)
+            for camera in model.cameras.values()
+        ),
+        "image_poses_are_finite": all(
+            finite(image.center)
+            and finite(image.viewing_direction)
+            and sum(value * value for value in image.viewing_direction) > 0.0
+            for image in model.images.values()
+        ),
+        "points_are_finite": all(
+            finite(point.xyz)
+            and math.isfinite(float(point.error))
+            and point.error >= 0.0
+            for point in model.points3d.values()
+        ),
+        "observations_are_finite_and_linked": all(
+            math.isfinite(float(observation.x))
+            and math.isfinite(float(observation.y))
+            and (
+                observation.point3d_id is None
+                or observation.point3d_id in model.points3d
+            )
+            for image in model.images.values()
+            for observation in image.observations
+        ),
+        "tracks_reference_known_images": all(
+            track_element_is_linked(point, element)
+            for point in model.points3d.values()
+            for element in point.track
+        ),
+    }
+
+
 def check_map(
     model_path: str | Path,
     *,
@@ -138,8 +317,12 @@ def check_map(
             images_dir=images_dir,
         )
     weak = analyze_weak_regions(map_data, evidence=evidence)
-    map_ok = all(check["pass"] for check in readiness.checks.values())
-    map_status = "PASS" if map_ok else "FAIL"
+    integrity_checks = _map_integrity_checks(model, metrics)
+    map_integrity_ok = all(integrity_checks.values())
+    map_ok = map_integrity_ok and all(
+        check["pass"] for check in readiness.checks.values()
+    )
+    map_status = "PASS" if map_ok else "INVALID" if not map_integrity_ok else "FAIL"
     weak_summary = weak.summary
     return jsonable(
         {
@@ -150,6 +333,8 @@ def check_map(
                 "score": readiness.score,
                 "grade": readiness.grade,
                 "checks": readiness.checks,
+                "integrity_checks": integrity_checks,
+                "map_integrity_ok": map_integrity_ok,
                 "map_ok": map_ok,
                 "map_status": map_status,
             },
@@ -184,10 +369,16 @@ def check_localize(
     summary = summarize_benchmark(results, settings.localization)
     history_rows = mapdoctor_rows_to_history_rows(results)
     history = LocalizationHistory(history_rows) if history_rows else None
+    strict_by_query = {
+        result.query: result.passes(settings.localization) for result in results
+    }
+    relative_summary, relative_details = _relative_localization_quality(
+        results, strict_by_query
+    )
 
     queries = []
     for result in results:
-        strict_pass = result.passes(settings.localization)
+        strict_pass = strict_by_query[result.query]
         gate_failures = result.failures(settings.localization)
         diagnosis_primary = None
         diagnosis_codes: list[str] = []
@@ -206,24 +397,46 @@ def check_localize(
                 "attribution": attribution,
                 "diagnosis_primary": diagnosis_primary,
                 "diagnosis_codes": diagnosis_codes,
+                **relative_details[result.query],
             }
         )
 
-    localization_ok = bool(queries) and all(row["strict_pass"] for row in queries)
+    required_rate = float(settings.localization.min_strict_success_rate)
+    target = Fraction(str(required_rate))
+    required_successes = (
+        target.numerator * len(queries) + target.denominator - 1
+    ) // target.denominator
+    strict_successes = sum(row["strict_pass"] for row in queries)
+    localization_ok = bool(queries) and strict_successes >= required_successes
     counts = Counter(row["attribution"] for row in queries)
     return jsonable(
         {
             "total": summary.total_queries,
             "strict_success_rate": summary.strict_success_rate,
+            "strict_successes": strict_successes,
+            "required_strict_success_rate": required_rate,
+            "required_strict_successes": required_successes,
             "localization_ok": localization_ok,
             "localization_status": "PASS" if localization_ok else "FAIL",
             "attribution_counts": dict(sorted(counts.items())),
+            "relative_quality": relative_summary,
+            "heldout_provenance_verified": False,
+            "evaluation_provenance": "UNVERIFIED_PROVIDED_LOG",
             "queries": queries,
         }
     )
 
 
-def _overall_status(map_ok: bool, loc: dict | None) -> str:
+def _overall_status(
+    map_ok: bool,
+    loc: dict | None,
+    *,
+    map_integrity_ok: bool = True,
+) -> str:
+    if not map_integrity_ok:
+        if loc is not None and not bool(loc["localization_ok"]):
+            return "BOTH_FAILED"
+        return "MAP_SCREENING_FAILED"
     if loc is None:
         return "MAP_SCREENED_LOCALIZATION_UNCHECKED" if map_ok else "MAP_SCREENING_FAILED"
     loc_ok = bool(loc["localization_ok"])
@@ -232,7 +445,7 @@ def _overall_status(map_ok: bool, loc: dict | None) -> str:
     if map_ok and not loc_ok:
         return "LOCALIZATION_FAILED"
     if not map_ok and loc_ok:
-        return "MAP_SCREENING_FAILED"
+        return "READY_WITH_MAP_WARNINGS"
     return "BOTH_FAILED"
 
 
@@ -274,7 +487,11 @@ def analyze(
         )
     payload = jsonable(
         {
-            "overall_status": _overall_status(map_report["readiness"]["map_ok"], loc_report),
+            "overall_status": _overall_status(
+                map_report["readiness"]["map_ok"],
+                loc_report,
+                map_integrity_ok=map_report["readiness"]["map_integrity_ok"],
+            ),
             "map": map_report,
             "localization": loc_report,
         }

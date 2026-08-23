@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +25,19 @@ class LocalizationThresholds:
     min_grid4_occupancy: int = 6
     min_positive_depth_ratio: float = 1.0
     min_pose_consensus: float = 0.67
+    min_strict_success_rate: float = 0.95
+
+    def __post_init__(self) -> None:
+        if isinstance(self.min_strict_success_rate, bool):
+            raise ValueError("min_strict_success_rate must be finite and in [0, 1]")
+        try:
+            rate = float(self.min_strict_success_rate)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "min_strict_success_rate must be finite and in [0, 1]"
+            ) from exc
+        if not math.isfinite(rate) or not 0.0 <= rate <= 1.0:
+            raise ValueError("min_strict_success_rate must be finite and in [0, 1]")
 
 
 @dataclass(frozen=True)

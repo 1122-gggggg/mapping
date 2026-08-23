@@ -144,9 +144,9 @@ def _motion_profile(row: SessionQuality) -> tuple[float, ...] | None:
         row.fast_motion_ratio,
         row.unproven_ratio,
     )
-    if all(value is None for value in values):
+    if any(value is None for value in values):
         return None
-    vector = [max(0.0, float(value or 0.0)) for value in values]
+    vector = [max(0.0, float(value)) for value in values]
     total = sum(vector)
     if total <= 0.0:
         return None

@@ -41,6 +41,12 @@ def test_empirical_bayes_prior_has_declared_strength_and_center():
     assert alpha / (alpha + beta) == pytest.approx(expected_rate)
 
 
+@pytest.mark.parametrize("rate", [-0.01, 1.01, float("nan"), True, "bad"])
+def test_localization_aggregate_target_is_a_probability(rate):
+    with pytest.raises(ValueError, match="min_strict_success_rate"):
+        LocalizationThresholds(min_strict_success_rate=rate)
+
+
 @pytest.mark.parametrize("manifest", ["q1", [123], [None]])
 def test_direct_comparison_manifest_rejects_non_sequence_or_non_string_values(manifest):
     with pytest.raises(ValueError, match="sequence of strings|values must be strings"):

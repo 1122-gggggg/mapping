@@ -33,6 +33,10 @@ Always runs for `sfm-qa analyze` (and `check` / `check-map` / `check-localize`).
 
 1. Load the reconstruction through the requested MapDoctor adapter (`colmap`, `glomap`, or `gluemap`).
 2. Score MapDoctor readiness / health / covisibility fragility.
+   Structural integrity (at least one registered image, camera, 3D point, observation,
+   and a known camera for every image) is reported separately and remains hard.
+   Non-finite camera/pose/point/observation values and dangling observation/track links
+   produce `map_status=INVALID`.
 3. Convert the same in-memory model to `sfm_diagnosis.MapData`.
 4. If `--database`, `--pairs`, `--images-manifest`, or `--images-dir` is given, load optional build evidence and pass it into `analyze_weak_regions`.
 5. Write `DIR/map/report.json`. The combined report keeps the same payload under the `map` key.
@@ -45,9 +49,17 @@ Runs only when `--logs` is given.
 
 1. Score the MapDoctor-schema localization CSV.
 2. Attribute failed queries with `diagnose_pose` when `x,y,z` exist.
-3. Write `DIR/sfm/report.json`.
+3. Rank all queries by cohort-relative inlier, reprojection, image-plane coverage,
+   positive-depth and pose-consensus evidence; emit a complete relative risk--coverage curve.
+4. Accept the provided run when `strict_success_rate` reaches the configured
+   `min_strict_success_rate` (default `0.95`), rather than requiring every query to
+   pass every strict check.
+5. Write `DIR/sfm/report.json`.
 
 This stage does not run a localizer. The CSV is an already-computed result log.
+It also does not prove that the log is held out: reports explicitly emit
+`heldout_provenance_verified=false`. S0/S9 content hashes or an equivalent external
+manifest must establish that contract before a release claim.
 
 If `--logs` is omitted, Stage 2 is skipped and `overall_status` is `MAP_SCREENED_LOCALIZATION_UNCHECKED` (or `MAP_SCREENING_FAILED`).
 
@@ -57,5 +69,10 @@ Attribute leftover / recapture queries against the **frozen** Stage 0 base, not 
 
 `DIR/report.json` contains `overall_status`, `map`, and `localization` (`null` when Stage 2 is skipped).
 
-Exit 0 only for `READY` and `MAP_SCREENED_LOCALIZATION_UNCHECKED`.
+Exit 0 for `READY`, `READY_WITH_MAP_WARNINGS`, and
+`MAP_SCREENED_LOCALIZATION_UNCHECKED`. `READY_WITH_MAP_WARNINGS` means the provided
+localization target passed while one or more advisory map-health heuristics did not; the
+report preserves those warnings instead of letting them override downstream localization
+evidence. A structural-integrity failure can never receive this status, and an external
+S0/S9 contract must still prove the log is untouched held-out data.
 (`select-sessions` is outside this table and always exits 0 after writing.)

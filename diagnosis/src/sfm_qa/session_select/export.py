@@ -165,6 +165,7 @@ def write_prebuild_outputs(output_dir: Path, prebuild: Mapping[str, Any] | None)
     base_path = output_dir / "prebuild_base_candidates.txt"
     validation_path = output_dir / "prebuild_validation_candidates.txt"
     rejected_path = output_dir / "prebuild_rejected_sessions.txt"
+    deferred_path = output_dir / "prebuild_deferred_sessions.txt"
     pairs_path = output_dir / "prebuild_verification_pairs.csv"
 
     _write_name_list(base_path, list(payload.get("proposed_base_sessions") or ()))
@@ -176,6 +177,13 @@ def write_prebuild_outputs(output_dir: Path, prebuild: Mapping[str, Any] | None)
         else []
     )
     _write_name_list(rejected_path, rejected_rows)
+    deferred = payload.get("deferred") or {}
+    deferred_rows = (
+        [f"{sid}\t{reason}" for sid, reason in sorted(deferred.items())]
+        if isinstance(deferred, Mapping)
+        else []
+    )
+    _write_name_list(deferred_path, deferred_rows)
     pair_rows = [
         dict(row)
         for row in (payload.get("verification_pairs") or ())
@@ -187,6 +195,7 @@ def write_prebuild_outputs(output_dir: Path, prebuild: Mapping[str, Any] | None)
         "prebuild_base_candidates.txt": base_path,
         "prebuild_validation_candidates.txt": validation_path,
         "prebuild_rejected_sessions.txt": rejected_path,
+        "prebuild_deferred_sessions.txt": deferred_path,
         "prebuild_verification_pairs.csv": pairs_path,
     }
 
@@ -321,7 +330,7 @@ def render_selection_report(
         "# Session selection report",
         "",
         "Two-phase selection: proposal first, geometric admission second.",
-        "Numeric gates are **heuristic**, not fitted site cutoffs.",
+        "Quality metrics use cohort-relative ranking; numeric gates remain diagnostic references.",
         "VPR / retrieval is **not** a geometric edge.",
         "Timestamp is recorded but **never** used to rank Base.",
         "Fail-closed: uncertain → QUARANTINE; no reliable edge → NEW_SUBMAP;",
@@ -329,6 +338,9 @@ def render_selection_report(
         "",
         "## Phase A — pre-build proposal",
         "",
+        f"- Selection mode: `{prebuild.get('selection_mode', 'unknown')}`.",
+        f"- Best-available fallback used: "
+        f"`{bool(prebuild.get('relative_fallback_used', False))}`.",
         f"- Proposal confidence: `{prebuild.get('proposal_confidence', 'NONE')}`.",
         f"- Proposed videos for geometry verification: "
         f"{list(prebuild.get('proposed_base_sessions') or []) or '(none)'}.",
@@ -338,15 +350,50 @@ def render_selection_report(
         "- **These are not BASE roles.** Every proposed cross-session pair still needs "
         "verified geometry before it can enter the map.",
         "",
-        "## Phase B — BASE_CORE",
+        "### Relative video ranking",
         "",
     ]
+    session_scores = prebuild.get("session_scores") or {}
+    if isinstance(session_scores, Mapping) and session_scores:
+        ranked_scores = sorted(
+            (
+                (str(sid), dict(payload))
+                for sid, payload in session_scores.items()
+                if isinstance(payload, Mapping)
+            ),
+            key=lambda item: (
+                float(item[1].get("portfolio_score") or 0.0),
+                item[0],
+            ),
+            reverse=True,
+        )
+        for sid, payload in ranked_scores:
+            lines.append(
+                f"- `{sid}`: portfolio={_fmt(payload.get('portfolio_score'))}, "
+                f"relative-metrics={_fmt(payload.get('relative_metric_score'))}, "
+                f"cohort-rank={_fmt(payload.get('relative_quality_rank'))}, "
+                f"evidence={_fmt(payload.get('evidence_completeness'))}, "
+                f"selected={bool(payload.get('selected_for_geometry'))}."
+            )
+    else:
+        lines.append("- (no rankable videos)")
+    lines.extend(
+        [
+            "",
+            "## Phase B — BASE_CORE",
+            "",
+        ]
+    )
     seed = selection.get("seed")
     lines.append(
-        f"- Seed (max internal quality among STRONG/USABLE): `{seed}`. "
+        f"- Seed: `{seed}`; mode=`{selection.get('selection_mode', 'unknown')}`. "
         "Timestamp was not a ranking key. Seed is not automatically the whole Base."
     )
     lines.append(f"- Greedy selected: {list(selection.get('selected') or []) or '(none)'}.")
+    lines.append(
+        f"- Best-available but not release evidence: "
+        f"`{bool(selection.get('best_available_not_release', False))}`."
+    )
     lines.append(f"- Stop reason: `{selection.get('stop_reason')}`.")
     core = sorted(by_role.get("BASE_CORE") or [])
     if not core:

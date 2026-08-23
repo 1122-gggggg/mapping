@@ -32,14 +32,16 @@ jobs:
         run: |
           ruff check \
             diagnosis/src/sfm_qa/cli.py \
+            diagnosis/src/sfm_qa/pipeline.py \
+            diagnosis/src/sfm_qa/relative_quality.py \
             diagnosis/src/sfm_qa/session_select \
-            diagnosis/tests/sfm_qa/test_prebuild_selection.py \
+            diagnosis/tests/sfm_qa \
             map_update/core/point_evidence_ledger.py \
             map_update/core/test_point_evidence_recency.py \
             tools
       - name: Test session selection and diagnosis contracts
         run: |
-          pytest -q diagnosis/tests/sfm_qa tools/test_diagnose_map.py tools/test_diagnosis_layout.py
+          pytest -q diagnosis/tests tools/test_diagnose_map.py tools/test_diagnosis_layout.py
       - name: Test point-evidence maintenance
         run: |
           PYTHONPATH=map_update/core pytest -q \

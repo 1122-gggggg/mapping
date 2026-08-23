@@ -24,6 +24,20 @@ For each video, the proposal layer uses measured signals rather than timestamp:
 
 Missing/ambiguous measurements do not become positive evidence. The numerical gates in `defaults.yaml` are engineering heuristics and must be calibrated on held-out sessions before being interpreted probabilistically.
 
+By default, those heuristics are **not eligibility requirements**. Each observed
+metric is converted to a tie-aware percentile inside the current video cohort:
+
+```text
+r_i = midrank(x_i) / (n_observed - 1)
+Q_i = Σ(observed w_j r_ij) / Σ(observed w_j)
+```
+
+The absolute measured score remains a weak prior, and the report separately emits
+`evidence_completeness`; a missing metric is omitted, never counted as healthy. `WEAK`,
+`REJECT`, and `INCONSISTENT` contribute increasing risk penalties but do not empty the
+proposal pool. Only an unrecoverable input artifact (for example a confirmed unreadable
+zero-frame video) is removed before the geometry-probe queue.
+
 The proposal objective is a budgeted marginal score:
 
 ```text
@@ -31,10 +45,12 @@ The proposal objective is a budgeted marginal score:
            + wb bridgeability
            + wc graph_neighbourhood_coverage
            + wd motion_diversity
+           + wa measured_exposure_diversity
            + wt triplet_support
            + wm multi_link_support
            - wr risk
            - wk frame_cost
+           - wn redundancy
 ```
 
 This is not a learned score. Its purpose is to spend S3/S4 geometry on the most useful sessions first, not to declare them correct.
@@ -54,7 +70,7 @@ A weak edge inside otherwise strong triangles gets lower priority. At proposal t
 
 The selector prefers a video that covers previously uncovered graph neighbourhoods to another highly redundant video. This follows the same design principle as K-Cover visual-map sparsification: preserve enough support/coverage under a finite map or matching budget rather than maximizing raw video count.
 
-If no retrieval graph exists, the selector does not invent all-pairs edges. It proposes only a small geometry-probe subset and emits forced verification pairs. At least one otherwise usable session is reserved as a proposal-stage validation candidate when the pool is large enough; the later site S0 corpus lock is still the final authority on hold-out leakage.
+If no retrieval graph exists, the selector does not invent all-pairs edges. It proposes only a small geometry-probe subset and emits forced verification pairs. Selection stops at a **relative marginal-gain collapse**, not at a fixed score. If every video is weak under the old references, it still returns the least-bad non-empty probe set and labels `relative_fallback_used=true`; this never grants merge authority. At least one session is reserved as a proposal-stage validation candidate when the pool is large enough; the later site S0 corpus lock is still the final authority on hold-out leakage.
 
 Outputs:
 
@@ -63,6 +79,7 @@ prebuild_plan.json
 prebuild_base_candidates.txt
 prebuild_validation_candidates.txt
 prebuild_rejected_sessions.txt
+prebuild_deferred_sessions.txt
 prebuild_verification_pairs.csv
 ```
 
@@ -81,11 +98,12 @@ The implementation normalizes `grid_occupancy_4x4` whether upstream supplied a `
 
 Greedy procedure:
 
-1. Score each session internally. Missing geometry fails closed — never invent `STRONG`.
-2. Seed `S` with the highest internal-quality `STRONG`/`USABLE` session.
-3. Add only an admissible geometric neighbor with largest `ΔU`, subject to track/observation budgets and diminishing-return gates (`min_information_gain`, `min_coverage_gain`).
-4. Split `S` into `BASE_CORE` (load-bearing) and `BASE_SUPPORT` (helpful but not load-bearing).
-5. Classify leftovers into update/reference/submap/quarantine roles.
+1. Score each session internally. Missing geometry never invents `STRONG`.
+2. Seed `S` with the highest internal-quality `STRONG`/`USABLE` session. If every reconstructed session is `WEAK`, use the best mapped `WEAK` session as an explicitly labeled relative fallback.
+3. Rank mapped `WEAK` sessions alongside stronger sessions under `U(S)`; risk penalties can lower them, but a complementary verified session is not rejected for missing one heuristic target.
+4. Add only an admissible geometric neighbor with largest positive measured `ΔU`, subject to track/observation budgets.
+5. Split `S` into `BASE_CORE` (load-bearing) and `BASE_SUPPORT` (helpful but not load-bearing).
+6. Classify leftovers into update/reference/submap/quarantine roles.
 
 Prefer **one fewer video** over a cheap merge that adds tracks without independent geometry.
 
@@ -96,7 +114,8 @@ A session-to-session link is a geometric **edge** only after verification:
 - verified pairs / shared tracks above heuristic floors
 - rotation, translation-direction and scale consensus
 - cross-session reprojection consistency
-- **at least two independent bridge groups** separated temporally/spatially
+- at least one independent bridge group for a usable edge; the default `STRONG` label
+  requires at least two temporally/spatially separated groups
 - Sim(3) fit on a support set and validation on a disjoint hold-out
 - cycle/graph checks where redundant paths exist
 
@@ -118,7 +137,7 @@ Visual place recognition / retrieval only proposes candidate pairs. A high simil
 
 ## Track budgets
 
-Optional hard caps (`max_base_sessions`, `max_total_tracks`, `max_total_observations`, `max_tracks_per_session`) stop the greedy walk before reconstruction becomes track-heavy. Diminishing coverage/information gain with rising track cost is a reason to stop adding videos.
+Optional resource budgets (`max_base_sessions`, `max_total_tracks`, `max_total_observations`, `max_tracks_per_session`) stop the greedy walk before reconstruction becomes track-heavy. They are compute/memory constraints, not quality pass criteria. Diminishing relative coverage/information gain with rising track cost is a reason to stop adding videos.
 
 ## Role vocabulary
 
@@ -175,9 +194,15 @@ pip install -e '.[video]'
 
 ## Literature design notes
 
-The selector deliberately borrows **principles**, not paper scores, from several lines of work:
+The selector deliberately borrows **principles**, not paper scores, from several lines of
+work. The expanded primary-source matrix, evidence/inference split, and validation protocol are
+in [`../../docs/RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md`](../../docs/RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md).
 
 - Manam & Govindu, *Leveraging Camera Triplets for Efficient and Accurate Structure-from-Motion*, CVPR 2024: triangle support can simultaneously expose weak graph edges and reduce graph density.
+- Shah et al., *View-graph Selection Framework for SfM*, ECCV 2018: task-specific image/edge costs can target accuracy, efficiency, coverage, or disambiguation instead of chaining fixed thresholds.
+- Snavely et al., *Skeletal Graphs for Efficient Structure from Motion*, CVPR 2008: a small uncertainty-preserving view skeleton can be reconstructed first, then remaining images registered later.
+- Sarlin et al., *LaMAR*, ECCV 2022: mapping/query sequence selection must account for cross-session coverage in multi-floor, long-term, appearance-changing environments.
+- Dymczyk et al., *Keep It Brief*, IROS 2015: K-cover with slack preserves localization support under a finite map budget and remains feasible when perfect coverage is impossible.
 - Chang et al., *Long-Term Visual Map Sparsification with Heterogeneous GNN*, CVPR 2022: K-Cover motivates preserving localization support under a finite map budget instead of retaining every observation.
 - He et al., *Detector-Free Structure from Motion*, CVPR 2024: difficult texture/overlap should trigger a stronger geometric frontend rather than be hidden by a weak feature graph.
 - Pan et al., *Global Structure-from-Motion Meets Feedforward Reconstruction (GLUEMAP)*, CVPR 2026: global consistency and scalable optimization still require a reliable image/session graph; feed-forward local robustness does not eliminate graph-quality control.

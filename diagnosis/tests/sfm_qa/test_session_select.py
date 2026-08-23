@@ -309,6 +309,150 @@ def test_seed_is_strong_high_coverage_not_earlier_timestamp():
     )
 
 
+def test_mapped_weak_sessions_use_relative_fallback_with_verified_geometry():
+    first = _make_session(
+        session_id="WEAK_A",
+        internal_status="WEAK",
+        internal_quality_score=0.42,
+        registered_ratio=0.72,
+        convex_hull_coverage=0.35,
+    )
+    second = _make_session(
+        session_id="WEAK_B",
+        internal_status="WEAK",
+        internal_quality_score=0.38,
+        registered_ratio=0.68,
+        convex_hull_coverage=0.55,
+    )
+    edge = _make_edge(
+        session_a="WEAK_A",
+        session_b="WEAK_B",
+        status="USABLE",
+        independent_bridge_groups=2,
+        num_verified_pairs=20,
+    )
+
+    result = greedy_select_core([first, second], [edge], load_config())
+
+    assert result["selected"]
+    assert result["seed"] == "WEAK_A"
+    assert result["selection_mode"] == "RELATIVE_WEAK_FALLBACK"
+    assert result["relative_fallback_used"] is True
+    assert result["best_available_not_release"] is True
+
+
+def test_mapped_weak_fallback_does_not_cross_zero_geometry_edge():
+    sessions = [
+        _make_session(
+            session_id=sid,
+            internal_status="WEAK",
+            internal_quality_score=score,
+        )
+        for sid, score in (("WEAK_A", 0.42), ("WEAK_B", 0.38))
+    ]
+    empty_edge = _make_edge(
+        session_a="WEAK_A",
+        session_b="WEAK_B",
+        status="WEAK",
+        num_candidate_pairs=0,
+        num_verified_pairs=0,
+        num_cross_session_tracks=0,
+        independent_bridge_groups=0,
+        inlier_count=0,
+    )
+
+    result = greedy_select_core(sessions, [empty_edge], load_config())
+
+    assert result["selected"] == ["WEAK_A"]
+
+
+def test_zero_valued_map_metrics_do_not_create_a_weak_fallback_seed():
+    zero = _make_session(
+        session_id="ZERO",
+        internal_status="WEAK",
+        internal_quality_score=0.2,
+        registered_ratio=0.0,
+        num_tracks=0,
+        num_observations=0,
+        positive_depth_ratio=0.0,
+        convex_hull_coverage=0.0,
+        grid_occupancy_4x4=0.0,
+        parallax_median_deg=0.0,
+        fim_condition_number=0.0,
+        fim_logdet=None,
+        reprojection_rmse=None,
+        reprojection_p90=None,
+    )
+
+    result = greedy_select_core([zero], [], load_config())
+
+    assert result["selected"] == []
+    assert result["selection_mode"] == "NO_MAPPED_CANDIDATE"
+
+
+def test_finite_fim_is_enough_to_rank_a_mapped_weak_fallback() -> None:
+    mapped = _make_session(
+        session_id="FIM_ONLY",
+        internal_status="WEAK",
+        registered_ratio=None,
+        num_tracks=None,
+        num_observations=None,
+        positive_depth_ratio=None,
+        convex_hull_coverage=None,
+        grid_occupancy_4x4=None,
+        parallax_median_deg=None,
+        fim_condition_number=None,
+        fim_logdet=-3.0,
+        reprojection_rmse=None,
+        reprojection_p90=None,
+    )
+
+    result = greedy_select_core([mapped], [], load_config())
+
+    assert result["selected"] == ["FIM_ONLY"]
+    assert result["selection_mode"] == "RELATIVE_WEAK_FALLBACK"
+
+
+def test_cycle_closer_cannot_use_zero_geometry_usable_edges():
+    sessions = [_make_session(session_id=name) for name in ("A", "B", "C")]
+    genuine = _make_edge(session_a="A", session_b="B", status="STRONG")
+    empty_edges = [
+        _make_edge(
+            session_a=left,
+            session_b="C",
+            status="USABLE",
+            num_candidate_pairs=0,
+            num_verified_pairs=0,
+            num_cross_session_tracks=0,
+            independent_bridge_groups=0,
+            inlier_count=0,
+        )
+        for left in ("A", "B")
+    ]
+
+    result = greedy_select_core(sessions, [genuine, *empty_edges], load_config())
+
+    assert set(result["selected"]) == {"A", "B"}
+
+
+@pytest.mark.parametrize(
+    ("status", "groups"),
+    [("UNKNOWN", 2), ("USABLE", None)],
+)
+def test_unknown_status_or_missing_bridge_count_fails_closed(status, groups):
+    sessions = [_make_session(session_id=name) for name in ("A", "B")]
+    edge = _make_edge(
+        session_a="A",
+        session_b="B",
+        status=status,
+        independent_bridge_groups=groups,
+    )
+
+    result = greedy_select_core(sessions, [edge], load_config())
+
+    assert len(result["selected"]) == 1
+
+
 def test_two_components_one_critical_ambiguous_edge_not_both_base_core():
     left = _make_session(
         session_id="L1",

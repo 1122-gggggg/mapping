@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -11,6 +12,7 @@ from .objective import compute_objective_terms, delta_utility, efficiency_covera
 from .types import SessionEdgeQuality, SessionQuality, edge_is_vpr_only
 
 _CORE_OK = frozenset({"STRONG", "USABLE"})
+_GEOMETRIC_EDGE_STATUS = frozenset({"STRONG", "USABLE", "WEAK"})
 _BLOCKED_EDGE = frozenset({"AMBIGUOUS", "REJECT"})
 
 
@@ -20,6 +22,46 @@ def _qualities(rows: Iterable[SessionQuality]) -> dict[str, SessionQuality]:
 
 def _edges(rows: Iterable[SessionEdgeQuality]) -> list[SessionEdgeQuality]:
     return list(rows)
+
+
+def _has_map_evidence(row: SessionQuality) -> bool:
+    """Video-only WEAK rows are proposals; mapped WEAK rows can be ranked."""
+
+    positive_values = (
+        row.registered_ratio,
+        row.num_tracks,
+        row.num_observations,
+        row.positive_depth_ratio,
+        row.convex_hull_coverage,
+        row.grid_occupancy_4x4,
+        row.parallax_median_deg,
+        row.fim_condition_number,
+    )
+    for value in positive_values:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number > 0.0:
+            return True
+    for value in (row.reprojection_rmse, row.reprojection_p90, row.fim_logdet):
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            return True
+    return False
+
+
+def _session_is_selectable(row: SessionQuality) -> bool:
+    return row.internal_status in _CORE_OK or (
+        row.internal_status == "WEAK" and _has_map_evidence(row)
+    )
 
 
 def connecting_edges(
@@ -36,7 +78,34 @@ def connecting_edges(
 
 
 def _link_is_geometric(edge: SessionEdgeQuality) -> bool:
-    if edge.status in _BLOCKED_EDGE:
+    if edge.status in _BLOCKED_EDGE or edge.status not in _GEOMETRIC_EDGE_STATUS:
+        return False
+    support = (
+        edge.num_verified_pairs,
+        edge.num_cross_session_tracks,
+        edge.inlier_count,
+    )
+    has_support = False
+    for value in support:
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number > 0.0:
+            has_support = True
+            break
+    if not has_support:
+        return False
+    groups = edge.independent_bridge_groups
+    if groups is None or isinstance(groups, bool):
+        return False
+    try:
+        group_count = float(groups)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(group_count) or group_count <= 0.0:
         return False
     if edge_is_vpr_only(edge):
         return False
@@ -182,7 +251,7 @@ def _close_cycles(
         if edge.session_a in selected
         and edge.session_b in selected
         and edge.status in {"STRONG", "USABLE"}
-        and not edge_is_vpr_only(edge)
+        and _link_is_geometric(edge)
     ]
     diagnostics = session_graph_diagnostics(selected, inner)
     tree_like = diagnostics["usable_edges"] if "usable_edges" in diagnostics else len(inner)
@@ -191,15 +260,15 @@ def _close_cycles(
         return selected
     closer_ids: list[str] = []
     for row in leftover:
-        if row.internal_status not in _CORE_OK:
+        if not _session_is_selectable(row):
             continue
         links = connecting_edges(row.session_id, set(selected), edges)
         usable = [
             edge
             for edge in links
             if edge.status in {"STRONG", "USABLE"}
+            and _link_is_geometric(edge)
             and not edge.is_critical_bridge
-            and not edge_is_vpr_only(edge)
         ]
         if len(usable) >= 2 and _budget_ok(set(selected), row, qualities, config):
             closer_ids.append(row.session_id)
@@ -220,12 +289,30 @@ def greedy_select_core(
     cfg = dict(config or {})
     quality_by_id = _qualities(qualities)
     edge_rows = _edges(edges)
-    min_info = float(lookup(cfg, "selection.min_information_gain", 0.02) or 0.02)
-    min_cov = float(lookup(cfg, "selection.min_coverage_gain", 0.02) or 0.02)
     weights = lookup(cfg, "selection.weights")
     blocked = set(exclude)
 
     seed = seed_session(quality_by_id.values(), cfg, exclude=blocked)
+    relative_fallback = False
+    if seed is None:
+        weak_mapped = [
+            row
+            for row in quality_by_id.values()
+            if row.session_id not in blocked
+            and row.internal_status == "WEAK"
+            and _has_map_evidence(row)
+        ]
+        if weak_mapped:
+            seed = max(
+                weak_mapped,
+                key=lambda row: (
+                    row.internal_quality_score,
+                    float(row.convex_hull_coverage or 0.0),
+                    float(row.fim_logdet or 0.0),
+                    row.session_id,
+                ),
+            ).session_id
+            relative_fallback = True
     if seed is None:
         return {
             "core": [],
@@ -234,6 +321,9 @@ def greedy_select_core(
             "scores": {},
             "stop_reason": "no_strong_or_usable_seed",
             "seed": None,
+            "selection_mode": "NO_MAPPED_CANDIDATE",
+            "relative_fallback_used": False,
+            "best_available_not_release": False,
         }
 
     selected = [seed]
@@ -246,7 +336,7 @@ def greedy_select_core(
         ranked: list[tuple[float, float, str, dict[str, float], str]] = []
         for sid in remaining:
             row = quality_by_id[sid]
-            if row.internal_status not in _CORE_OK:
+            if not _session_is_selectable(row):
                 continue
             if not _budget_ok(selected_set, row, quality_by_id, cfg):
                 continue
@@ -269,14 +359,8 @@ def greedy_select_core(
         d_cov = after["coverage"] - current["coverage"]
         d_info = after["information"] - current["information"]
         d_red = after["redundancy"] - current["redundancy"]
-        d_tracks = after["tracks"] - current["tracks"]
-        d_obs = after["observations"] - current["observations"]
-        cheap_gain = d_cov < min_cov and d_info < min_info and d_red < min_cov
-        expensive = d_tracks > 0 or d_obs > 0
-        if cheap_gain and expensive and delta_u <= 0:
-            stop_reason = "diminishing_returns"
-            break
-        if delta_u <= 0 and cheap_gain:
+        no_measured_gain = d_cov <= 0.0 and d_info <= 0.0 and d_red <= 0.0
+        if delta_u <= 0.0 and no_measured_gain:
             stop_reason = "nonpositive_delta_u"
             break
         selected.append(sid)
@@ -299,4 +383,9 @@ def greedy_select_core(
         "scores": scores,
         "stop_reason": stop_reason,
         "seed": seed,
+        "selection_mode": (
+            "RELATIVE_WEAK_FALLBACK" if relative_fallback else "RELATIVE_OBJECTIVE"
+        ),
+        "relative_fallback_used": relative_fallback,
+        "best_available_not_release": relative_fallback,
     }

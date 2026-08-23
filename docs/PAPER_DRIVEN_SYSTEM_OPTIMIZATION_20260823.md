@@ -39,6 +39,9 @@ No upstream score is allowed to skip a downstream geometric/release gate.
 
 ## 2. Implemented optimization: two-phase video admission
 
+The later relative-quality audit and its expanded primary-source matrix are recorded in
+[`RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md`](RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md).
+
 ### 2.1 Phase A — proposal only
 
 `sfm-qa select-sessions` now computes video-level quality and motion evidence before deciding where to spend pair matching / reconstruction budget.
@@ -68,19 +71,40 @@ R_i = weighted(degenerate motion, duplicates, bad exposure,
 A greedy marginal objective then selects a bounded candidate set:
 
 ```text
-ΔJ(i | S) = wq A_i + wb B_i + wc C_i + wd D_i
-           + wt T_i + wm M_i - wr R_i - wk K_i
+ΔJ(i | S) = wq A_i + wb B_i + wc C_i + wd D_i + wa E_i
+           + wt T_i + wm M_i - wr R_i - wk K_i - wn N_i
 ```
 
-where `B` is proposal bridgeability, `C` uncovered graph neighbourhood, `D` measured motion diversity, `T` camera-triplet support, `M` multi-link support and `K` frame cost.
+where `B` is proposal bridgeability, `C` uncovered graph neighbourhood, `D` measured motion diversity, `E` measured exposure diversity, `T` camera-triplet support, `M` multi-link support, `K` frame cost and `N` redundancy.
+
+The production default now ranks the current cohort instead of applying
+`min_video_score` as an eligibility gate. Missing measurements are omitted and reported
+through evidence completeness. Measured exposure diversity and a redundancy penalty are
+part of the portfolio objective. If every video is weak under the legacy references, the
+selector emits the best available non-empty geometry-probe set with
+`relative_fallback_used=true`.
 
 **Important:** this output is not `BASE_CORE`. It is a queue of videos/pairs that deserve geometric verification.
 
 ### 2.2 Phase B — geometric admission
 
-The existing fail-closed session graph remains authoritative. A cross-session edge requires verified geometry: matches/tracks, pose/scale consensus, spatial support, independent bridge groups and hold-out Sim(3) validation where applicable. Only then can greedy `U(S)` assign `BASE_CORE` or `BASE_SUPPORT`.
+The existing fail-closed session graph remains authoritative. Current admission enforces verified geometry, independent bridge groups, and pose/scale consensus. Spatial-support, reprojection, cycle, and disjoint hold-out Sim(3) checks remain separate diagnostic/release checks where evidence is available. Only a real geometric edge can let greedy `U(S)` assign both sessions to `BASE_CORE` or `BASE_SUPPORT`.
 
 This resolves the previous structural problem: video-only mode could safely choose a single seed but could not responsibly recommend a multi-video base because retrieval was correctly forbidden from acting as geometry. The new proposal layer fills that gap without weakening the geometric contract.
+
+Mapped `WEAK` sessions now remain candidates under the joint utility when real
+reconstruction evidence exists. If no mapped `STRONG`/`USABLE` seed exists, the best
+mapped weak session is an explicitly labeled fallback. Unverified VPR edges, ambiguous
+unique bridges, and held-out leakage remain non-negotiable blockers.
+
+### 2.3 Post-map relative diagnosis
+
+Provided localization reports now include a cohort-relative query score and complete
+risk–coverage curve. Aggregate acceptance uses the configured strict-success target
+(default 95%) rather than requiring all queries to pass. A passing provided log can
+produce `READY_WITH_MAP_WARNINGS` when map integrity passes but advisory map-only metrics
+disagree. The command marks provenance unverified; S0/S9 hashes must prove held-out
+isolation before release.
 
 ---
 
@@ -145,11 +169,12 @@ The method targets visual aliasing where distinct surfaces look alike and genera
 
 ### 4.4 LFOE-GlobalSfM — conditional second opinion on translation edges
 
-*Learning to Filter Outlier Edges in Global Structure-from-Motion*, CVPR 2025.
+*Learning to Filter Outlier Edges in Global SfM*, CVPR 2025.
 
 The method models the line graph of camera-pair relations and predicts inaccurate translation edges, with clustering for scalability.
 
-**Decision:** keep the pinned backend as a research/diagnostic fallback when:
+**Planned trigger conditions (not wired to the live selector):** evaluate the pinned
+research backend when:
 
 - S4 leaves a small number of high-influence ambiguous edges;
 - independent Sim(3) disagrees across sessions;
@@ -168,7 +193,7 @@ Detector-Free SfM starts from quantized detector-free matches, builds a coarse r
 
 ### 4.6 MP-SfM — fallback for low overlap / low parallax / symmetry
 
-*MP-SfM: Monocular Priors for Robust Structure from Motion*, CVPR 2025.
+*MP-SfM: Monocular Surface Priors for Robust Structure-from-Motion*, CVPR 2025.
 
 The key idea is to inject monocular geometric priors such as depth/normals with uncertainty to stabilize cases where multiview constraints alone become weak or ambiguous.
 
@@ -176,7 +201,7 @@ The key idea is to inject monocular geometric priors such as depth/normals with 
 
 ### 4.7 RoMo — dynamic-scene escalation path
 
-*RoMo: Robust Motion Segmentation for Structure from Motion*, ICCV 2025.
+*RoMo: Robust Motion Segmentation Improves Structure from Motion*, ICCV 2025.
 
 RoMo combines optical flow, epipolar cues and pretrained video segmentation to reject dynamic-scene correspondences.
 
@@ -186,7 +211,7 @@ RoMo combines optical flow, epipolar cues and pretrained video segmentation to r
 
 ### 4.8 Light3R-SfM — speed/memory research alternative
 
-*Light3R-SfM*, CVPR 2025, uses retrieval-guided sparse scene graphs / tree-style connectivity to reduce feed-forward reconstruction cost.
+*Light3R-SfM: Towards Feed-forward Structure-from-Motion*, CVPR 2025, uses retrieval-guided sparse scene graphs / tree-style connectivity to reduce feed-forward reconstruction cost.
 
 **Decision:** benchmark as an alternative when GlueMap local inference or graph size, rather than BA, dominates runtime/memory. Do not substitute it into release maps without S6/S9 parity.
 
@@ -218,7 +243,7 @@ and point stability aggregates decayed evidence across sessions.
 
 The important transferable principle is that disconnected/weakly connected sessions need robust wide-baseline geometry and similarity alignment; temporal adjacency cannot substitute for cross-session evidence.
 
-**Decision:** preserve independent submap reconstruction + held-out Sim(3) validation as a hard safety pattern for weak bridges.
+**Future/release-gate decision:** preserve independent submap reconstruction and add disjoint hold-out Sim(3) validation as the safety pattern for weak bridges. The current session admission code does not yet implement the disjoint hold-out fit/validation split.
 
 ### 4.12 Change detection / map freshness
 
@@ -226,7 +251,7 @@ Galappaththige et al., *Multi-View Pose-Agnostic Change Localization with Zero L
 
 Du et al., *RTMap: Real-Time Recursive Mapping with Change Detection and Localization*, ICCV 2025, jointly treats prior-map localization, uncertainty and structural change over repeated traversals.
 
-**Decision:** these support the architecture of accumulating multi-session evidence before replacing geometry. They do **not** justify copying an HD-map/3DGS representation into this sparse SfM localization system. Route 4 remains evidence-first: detect, localize, confirm across views/sessions, then replace a local tile with boundary anchors and revalidate.
+**Future-work decision:** these support accumulating multi-session evidence before replacing geometry. They do **not** justify copying an HD-map/3DGS representation into this sparse SfM localization system. Current code emits review evidence and `needs_tile_replace`; tile rebuilding, boundary-anchor optimization and revalidation are not implemented.
 
 ---
 
@@ -256,7 +281,7 @@ S4 Doppelgangers++ + graph/cycle audit
   ↓
 S5 GlueMap + fixed-intrinsics final BA
   ↓
-S5.7 independent per-session/submap Sim(3)
+S5.7 independent per-session/submap Sim(3) (future disjoint hold-out release gate)
   ↓
 S6 ghost / duplicate geometry audit
   ↓
@@ -311,7 +336,7 @@ A2 QA + motion/epipolar
 A3 A2 + retrieval proposal graph
 A4 A3 + triplet/budgeted proposal
 A5 A4 + S4 Doppelgangers++
-A6 A5 + independent Sim3 gate
+A6 A5 + independent disjoint-hold-out Sim3 gate (future)
 ```
 
 This isolates whether the selector saves computation without sacrificing S9 coverage, and whether false-edge gates improve geometry/localization independently of raw video count.
@@ -343,16 +368,16 @@ better method = passes geometry gates
 
 ## 8. References
 
-- Pan, L., Schönberger, J. L., Pollefeys, M. *Global Structure-from-Motion Meets Feedforward Reconstruction*. CVPR 2026 / GLUEMAP.
-- Manam, B., Govindu, V. M. *Leveraging Camera Triplets for Efficient and Accurate Structure-from-Motion*. CVPR 2024.
-- Xiangli, Y. et al. *Doppelgangers++: Improved Visual Disambiguation with Geometric 3D Features*. CVPR 2025.
-- He, X. et al. *Detector-Free Structure from Motion*. CVPR 2024.
-- *MP-SfM: Monocular Priors for Robust Structure from Motion*. CVPR 2025.
-- *Learning to Filter Outlier Edges in Global Structure-from-Motion*. CVPR 2025.
-- *RoMo: Robust Motion Segmentation for Structure from Motion*. ICCV 2025.
-- *Light3R-SfM*. CVPR 2025.
-- Chang, M.-F. et al. *Long-Term Visual Map Sparsification with Heterogeneous GNN*. CVPR 2022.
-- Rotsidis et al. *ExMaps: Long-Term Localization in Dynamic Scenes Using Exponential Decay*. WACV 2021.
-- *Multi-Session SLAM with Differentiable Wide-Baseline Pose Optimization*. CVPR 2024.
-- Galappaththige, C. J. et al. *Multi-View Pose-Agnostic Change Localization with Zero Labels*. CVPR 2025.
-- Du, Y. et al. *RTMap: Real-Time Recursive Mapping with Change Detection and Localization*. ICCV 2025.
+- Pan, L., Schönberger, J. L., Pollefeys, M. [*Global Structure-from-Motion Meets Feedforward Reconstruction*](https://arxiv.org/abs/2605.26103). CVPR 2026 / GLUEMAP.
+- Manam, B., Govindu, V. M. [*Leveraging Camera Triplets for Efficient and Accurate Structure-from-Motion*](https://openaccess.thecvf.com/content/CVPR2024/html/Manam_Leveraging_Camera_Triplets_for_Efficient_and_Accurate_Structure-from-Motion_CVPR_2024_paper.html). CVPR 2024.
+- Xiangli, Y. et al. [*Doppelgangers++: Improved Visual Disambiguation with Geometric 3D Features*](https://openaccess.thecvf.com/content/CVPR2025/html/Xiangli_Doppelgangers_Improved_Visual_Disambiguation_with_Geometric_3D_Features_CVPR_2025_paper.html). CVPR 2025.
+- He, X. et al. [*Detector-Free Structure from Motion*](https://arxiv.org/abs/2306.15669). CVPR 2024.
+- Pataki et al. [*MP-SfM: Monocular Surface Priors for Robust Structure-from-Motion*](https://openaccess.thecvf.com/content/CVPR2025/html/Pataki_MP-SfM_Monocular_Surface_Priors_for_Robust_Structure-from-Motion_CVPR_2025_paper.html). CVPR 2025.
+- Damblon et al. [*Learning to Filter Outlier Edges in Global SfM*](https://openaccess.thecvf.com/content/CVPR2025/html/Damblon_Learning_to_Filter_Outlier_Edges_in_Global_SfM_CVPR_2025_paper.html). CVPR 2025.
+- Goli et al. [*RoMo: Robust Motion Segmentation Improves Structure from Motion*](https://openaccess.thecvf.com/content/ICCV2025/html/Goli_RoMo_Robust_Motion_Segmentation_Improves_Structure_from_Motion_ICCV_2025_paper.html). ICCV 2025.
+- [*Light3R-SfM: Towards Feed-forward Structure-from-Motion*](https://cvpr.thecvf.com/virtual/2025/poster/32660). CVPR 2025.
+- Chang, M.-F. et al. [*Long-Term Visual Map Sparsification with Heterogeneous GNN*](https://openaccess.thecvf.com/content/CVPR2022/html/Chang_Long-Term_Visual_Map_Sparsification_With_Heterogeneous_GNN_CVPR_2022_paper.html). CVPR 2022.
+- Rotsidis et al. [*ExMaps: Long-Term Localization in Dynamic Scenes Using Exponential Decay*](https://richardt.name/publications/exmaps/). WACV 2021.
+- Lipson, L., Deng, J. [*Multi-Session SLAM with Differentiable Wide-Baseline Pose Optimization*](https://openaccess.thecvf.com/content/CVPR2024/html/Lipson_Multi-Session_SLAM_with_Differentiable_Wide-Baseline_Pose_Optimization_CVPR_2024_paper.html). CVPR 2024.
+- Galappaththige, C. J. et al. [*Multi-View Pose-Agnostic Change Localization with Zero Labels*](https://openaccess.thecvf.com/content/CVPR2025/html/Galappaththige_Multi-View_Pose-Agnostic_Change_Localization_with_Zero_Labels_CVPR_2025_paper.html). CVPR 2025.
+- Du, Y. et al. [*RTMap: Real-Time Recursive Mapping with Change Detection and Localization*](https://openaccess.thecvf.com/content/ICCV2025/html/Du_RTMap_Real-Time_Recursive_Mapping_with_Change_Detection_and_Localization_ICCV_2025_paper.html). ICCV 2025.

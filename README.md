@@ -95,6 +95,12 @@ sfm_system/建圖/outputs/
 | **1** | `python tools/diagnose_map.py --model … --backend gluemap` | S5/S6 之後的靜態地圖篩檢 | 否。S6/S9 仍是 release 閘 |
 | **2** | 同上再加 `--logs loc.csv` | S9 之後的 per-query 歸因 | 否。不可用 S9 聚合列假造 CSV |
 
+Stage 0 預設採 cohort-relative portfolio：品質門檻只作風險參考，整批影片都偏弱時仍會
+輸出現有資料中的最佳非空 geometry-probe 組合，並明示 `relative_fallback_used`；VPR
+仍不能當幾何邊。Stage 2 會輸出 query-relative risk–coverage；對已由 S0/S9 外部證明為
+held-out 的 log，以 strict success rate（預設 95%）判定，不要求每個 query 的每項指標全部通過。完整論文與設計依據見
+`docs/RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md`。
+
 ```bash
 # S5/S6 之後
 python tools/diagnose_map.py \

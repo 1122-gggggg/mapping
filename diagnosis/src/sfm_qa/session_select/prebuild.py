@@ -23,10 +23,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from itertools import combinations
 from typing import Any
 
+from sfm_qa.relative_quality import percentile_ranks, weighted_observed_score
+
 from .config import lookup
 from .types import SessionEdgeQuality, SessionQuality
 
-_BLOCKED_STATUS = frozenset({"REJECT", "INCONSISTENT"})
+_UNRECOVERABLE_REASONS = frozenset({"missing_video", "unreadable_video"})
 
 
 def _clamp(value: Any, low: float = 0.0, high: float = 1.0) -> float:
@@ -37,6 +39,16 @@ def _clamp(value: Any, low: float = 0.0, high: float = 1.0) -> float:
     if not math.isfinite(number):
         return low
     return max(low, min(high, number))
+
+
+def _config_float(config: Mapping[str, Any], key: str, default: float) -> float:
+    value = lookup(dict(config), key, default)
+    return float(default if value is None else value)
+
+
+def _config_int(config: Mapping[str, Any], key: str, default: int) -> int:
+    value = lookup(dict(config), key, default)
+    return int(default if value is None else value)
 
 
 def _edge_value(edge: SessionEdgeQuality | Mapping[str, Any], field: str) -> float:
@@ -121,9 +133,9 @@ def _motion_profile(row: SessionQuality) -> tuple[float, ...] | None:
         row.fast_motion_ratio,
         row.unproven_ratio,
     )
-    if all(value is None for value in values):
+    if any(value is None for value in values):
         return None
-    array = [max(0.0, float(value or 0.0)) for value in values]
+    array = [max(0.0, float(value)) for value in values]
     total = sum(array)
     if total <= 0.0:
         return None
@@ -140,69 +152,163 @@ def motion_profile_distance(left: SessionQuality, right: SessionQuality) -> floa
     return 0.5 * sum(abs(a - b) for a, b in zip(first, second))
 
 
-def video_risk(row: SessionQuality) -> float:
-    """Bounded risk proxy from degeneracy, blur/exposure and motion consistency."""
+def exposure_distance(left: SessionQuality, right: SessionQuality) -> float:
+    """Measured exposure diversity; capture time is intentionally not a proxy."""
 
-    low = _clamp(row.low_parallax_ratio)
-    degeneracy = _clamp(
-        _clamp(row.hover_ratio)
-        + _clamp(row.pure_rotation_ratio)
-        + _clamp(row.fast_motion_ratio)
-        + 0.5 * low
+    if left.exposure_mean is None or right.exposure_mean is None:
+        return 0.0
+    return _clamp(abs(float(left.exposure_mean) - float(right.exposure_mean)) / 255.0)
+
+
+def _risk_score(row: SessionQuality) -> tuple[float, float]:
+    """Bounded risk and evidence completeness from observed measurements only."""
+
+    return weighted_observed_score(
+        {
+            "hover": _clamp(row.hover_ratio) if row.hover_ratio is not None else None,
+            "pure_rotation": (
+                _clamp(row.pure_rotation_ratio)
+                if row.pure_rotation_ratio is not None
+                else None
+            ),
+            "fast_motion": (
+                _clamp(row.fast_motion_ratio)
+                if row.fast_motion_ratio is not None
+                else None
+            ),
+            "low_parallax": (
+                _clamp(row.low_parallax_ratio)
+                if row.low_parallax_ratio is not None
+                else None
+            ),
+            "duplicate": (
+                _clamp(row.near_duplicate_ratio)
+                if row.near_duplicate_ratio is not None
+                else None
+            ),
+            "underexposed": (
+                _clamp(row.underexposed_ratio)
+                if row.underexposed_ratio is not None
+                else None
+            ),
+            "overexposed": (
+                _clamp(row.overexposed_ratio)
+                if row.overexposed_ratio is not None
+                else None
+            ),
+            "epipolar": (
+                _clamp(row.epipolar_outlier_ratio_median)
+                if row.epipolar_outlier_ratio_median is not None
+                else None
+            ),
+            "unproven": (
+                _clamp(row.unproven_ratio) if row.unproven_ratio is not None else None
+            ),
+        },
+        {
+            "hover": 0.10,
+            "pure_rotation": 0.10,
+            "fast_motion": 0.10,
+            "low_parallax": 0.05,
+            "duplicate": 0.20,
+            "underexposed": 0.075,
+            "overexposed": 0.075,
+            "epipolar": 0.20,
+            "unproven": 0.10,
+        },
+        empty_score=0.5,
     )
-    duplicate = _clamp(row.near_duplicate_ratio)
-    exposure = _clamp(_clamp(row.underexposed_ratio) + _clamp(row.overexposed_ratio))
-    epipolar = _clamp(row.epipolar_outlier_ratio_median)
-    unproven = _clamp(row.unproven_ratio)
-    return _clamp(
-        0.35 * degeneracy
-        + 0.20 * duplicate
-        + 0.15 * exposure
-        + 0.20 * epipolar
-        + 0.10 * unproven
-    )
+
+
+def video_risk(row: SessionQuality) -> float:
+    """Bounded risk proxy without treating missing measurements as healthy."""
+
+    return _risk_score(row)[0]
+
+
+def _video_terms(
+    row: SessionQuality,
+    config: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, float | None], dict[str, float]]:
+    cfg = dict(config or {})
+    sharp_reference = float(lookup(cfg, "prebuild.sharpness_reference", 100.0) or 100.0)
+    terms = {
+        "internal_quality": _clamp(row.internal_quality_score),
+        "parallax": (
+            _clamp(row.parallax_ratio) if row.parallax_ratio is not None else None
+        ),
+        "low_parallax_credit": (
+            _clamp(row.low_parallax_ratio)
+            if row.low_parallax_ratio is not None
+            else None
+        ),
+        "sharpness": (
+            _clamp(float(row.sharpness_p10) / max(sharp_reference, 1e-9))
+            if row.sharpness_p10 is not None
+            else None
+        ),
+        "motion_evidence": (
+            1.0 - _clamp(row.unproven_ratio) if row.unproven_ratio is not None else None
+        ),
+        "non_duplicate": (
+            1.0 - _clamp(row.near_duplicate_ratio)
+            if row.near_duplicate_ratio is not None
+            else None
+        ),
+        "underexposure_quality": (
+            1.0 - _clamp(row.underexposed_ratio)
+            if row.underexposed_ratio is not None
+            else None
+        ),
+        "overexposure_quality": (
+            1.0 - _clamp(row.overexposed_ratio)
+            if row.overexposed_ratio is not None
+            else None
+        ),
+        "epipolar_consistency": (
+            1.0 - _clamp(row.epipolar_outlier_ratio_median)
+            if row.epipolar_outlier_ratio_median is not None
+            else None
+        ),
+    }
+    raw_weights = lookup(cfg, "prebuild.video_weights", {}) or {}
+    parallax_weight = float(raw_weights.get("parallax", 0.25))
+    exposure_weight = float(raw_weights.get("exposure", 0.10))
+    weights = {
+        "internal_quality": float(raw_weights.get("internal_quality", 0.20)),
+        "parallax": parallax_weight * 0.80,
+        "low_parallax_credit": parallax_weight * 0.20,
+        "sharpness": float(raw_weights.get("sharpness", 0.15)),
+        "motion_evidence": float(raw_weights.get("motion_evidence", 0.10)),
+        "non_duplicate": float(raw_weights.get("non_duplicate", 0.10)),
+        "underexposure_quality": exposure_weight * 0.50,
+        "overexposure_quality": exposure_weight * 0.50,
+        "epipolar_consistency": float(raw_weights.get("epipolar_consistency", 0.10)),
+    }
+    return terms, weights
+
+
+def _video_score(
+    row: SessionQuality,
+    config: Mapping[str, Any] | None = None,
+) -> tuple[float, float]:
+    terms, weights = _video_terms(row, config)
+    return weighted_observed_score(terms, weights)
 
 
 def video_admission_score(
     row: SessionQuality,
     config: Mapping[str, Any] | None = None,
 ) -> float:
-    """Score whether a video is worth geometry verification before SfM."""
+    """Observed-metric score for geometry verification, before cohort ranking."""
 
-    cfg = dict(config or {})
-    sharp_reference = float(lookup(cfg, "prebuild.sharpness_reference", 100.0) or 100.0)
-    sharpness = _clamp((row.sharpness_p10 or 0.0) / max(sharp_reference, 1e-9))
-    parallax = _clamp(_clamp(row.parallax_ratio) + 0.35 * _clamp(row.low_parallax_ratio))
-    motion_evidence = 1.0 - _clamp(row.unproven_ratio)
-    duplicate_quality = 1.0 - _clamp(row.near_duplicate_ratio)
-    exposure_quality = 1.0 - _clamp(
-        _clamp(row.underexposed_ratio) + _clamp(row.overexposed_ratio)
-    )
-    epipolar_quality = 1.0 - _clamp(row.epipolar_outlier_ratio_median)
-    internal = _clamp(row.internal_quality_score)
+    return _video_score(row, config)[0]
 
-    weights = lookup(cfg, "prebuild.video_weights", {}) or {}
-    w_internal = float(weights.get("internal_quality", 0.20))
-    w_parallax = float(weights.get("parallax", 0.25))
-    w_sharp = float(weights.get("sharpness", 0.15))
-    w_motion = float(weights.get("motion_evidence", 0.10))
-    w_duplicate = float(weights.get("non_duplicate", 0.10))
-    w_exposure = float(weights.get("exposure", 0.10))
-    w_epipolar = float(weights.get("epipolar_consistency", 0.10))
-    denominator = max(
-        1e-9,
-        w_internal + w_parallax + w_sharp + w_motion + w_duplicate + w_exposure + w_epipolar,
-    )
-    score = (
-        w_internal * internal
-        + w_parallax * parallax
-        + w_sharp * sharpness
-        + w_motion * motion_evidence
-        + w_duplicate * duplicate_quality
-        + w_exposure * exposure_quality
-        + w_epipolar * epipolar_quality
-    ) / denominator
-    return _clamp(score)
+
+def _unrecoverable(row: SessionQuality) -> str | None:
+    reasons = {str(reason).split(":", 1)[0] for reason in (row.reasons or ())}
+    found = sorted(reasons & _UNRECOVERABLE_REASONS)
+    return found[0] if found else None
 
 
 def _proposal_graph(
@@ -256,44 +362,187 @@ def propose_prebuild_set(
     rows = {row.session_id: row for row in qualities}
     edge_rows = list(edges)
     min_video_score = float(lookup(cfg, "prebuild.min_video_score", 0.35) or 0.35)
-    min_marginal = float(lookup(cfg, "prebuild.min_marginal_gain", 0.15) or 0.15)
+    relative_admission = bool(lookup(cfg, "prebuild.relative_admission", True))
+    marginal_keep_ratio = max(
+        0.0,
+        _config_float(cfg, "prebuild.relative_marginal_keep_ratio", 0.25),
+    )
     min_base = int(lookup(cfg, "prebuild.min_base_sessions", 2) or 2)
     max_sessions_cfg = lookup(cfg, "prebuild.max_sessions")
     max_sessions = int(max_sessions_cfg) if max_sessions_cfg is not None else max(1, len(rows))
     max_no_graph = int(lookup(cfg, "prebuild.max_no_graph_sessions", 3) or 3)
-    validation_count = int(lookup(cfg, "prebuild.validation_candidates", 1) or 1)
+    validation_count = max(0, _config_int(cfg, "prebuild.validation_candidates", 1))
     allow_weak = bool(lookup(cfg, "prebuild.allow_weak_video_candidates", False))
 
-    video_scores = {sid: video_admission_score(row, cfg) for sid, row in rows.items()}
-    risks = {sid: video_risk(row) for sid, row in rows.items()}
-    eligible: list[str] = []
+    rankable: list[str] = []
     rejected: dict[str, str] = {}
     for sid, row in rows.items():
-        if row.internal_status in _BLOCKED_STATUS:
-            rejected[sid] = f"internal_status={row.internal_status}"
-            continue
-        if row.internal_status == "WEAK" and not allow_weak:
-            rejected[sid] = "weak_video_requires_explicit_override_or_geometry"
-            continue
-        if video_scores[sid] < min_video_score:
-            rejected[sid] = f"video_score_below_heuristic_{min_video_score:.3f}"
-            continue
-        eligible.append(sid)
+        fatal = _unrecoverable(row)
+        if fatal is not None:
+            rejected[sid] = f"unrecoverable_input={fatal}"
+        else:
+            rankable.append(sid)
+    rankable_set = set(rankable)
 
-    strengths, adjacency, triplets = _proposal_graph(edge_rows)
+    component_payloads = {sid: _video_terms(row, cfg) for sid, row in rows.items()}
+    measured_scores = {
+        sid: weighted_observed_score(terms, weights)
+        for sid, (terms, weights) in component_payloads.items()
+    }
+    video_scores = {sid: score for sid, (score, _) in measured_scores.items()}
+    completeness = {sid: available for sid, (_, available) in measured_scores.items()}
+    measured_risks = {sid: _risk_score(row) for sid, row in rows.items()}
+    risks = {sid: score for sid, (score, _) in measured_risks.items()}
+    risk_completeness = {
+        sid: available for sid, (_, available) in measured_risks.items()
+    }
+    video_weights = next(
+        (weights for _, weights in component_payloads.values()),
+        {},
+    )
+    component_ranks = {
+        name: percentile_ranks(
+            {
+                sid: (
+                    component_payloads[sid][0].get(name)
+                    if sid in rankable_set
+                    else None
+                )
+                for sid in rows
+            },
+            higher_is_better=True,
+        )
+        for name in video_weights
+    }
+    relative_video_scores = {
+        sid: weighted_observed_score(
+            {name: component_ranks[name].get(sid) for name in video_weights},
+            video_weights,
+        )[0]
+        for sid in rows
+    }
+    quality_ranks = percentile_ranks(
+        {
+            sid: relative_video_scores[sid] if sid in rankable_set else None
+            for sid in rows
+        },
+        higher_is_better=True,
+    )
+    low_risk_ranks = percentile_ranks(
+        {sid: risks[sid] if sid in rankable_set else None for sid in rows},
+        higher_is_better=False,
+    )
+    absolute_weight = max(
+        0.0, _config_float(cfg, "prebuild.absolute_quality_weight", 0.35)
+    )
+    relative_weight = max(
+        0.0, _config_float(cfg, "prebuild.relative_quality_weight", 0.65)
+    )
+    weight_sum = max(1e-9, absolute_weight + relative_weight)
+
+    def status_penalty(row: SessionQuality) -> float:
+        return {
+            "STRONG": 0.00,
+            "USABLE": 0.00,
+            "WEAK": 0.08,
+            "REJECT": 0.20,
+            "INCONSISTENT": 0.30,
+        }.get(row.internal_status, 0.10)
+
+    portfolio_scores: dict[str, float] = {}
+    portfolio_risks: dict[str, float] = {}
+    for sid, row in rows.items():
+        relative_score = relative_video_scores[sid]
+        low_risk_rank = low_risk_ranks.get(sid)
+        relative_low_risk = 0.5 if low_risk_rank is None else float(low_risk_rank)
+        evidence_factor = 0.70 + 0.30 * completeness[sid]
+        portfolio_scores[sid] = _clamp(
+            (
+                absolute_weight * video_scores[sid]
+                + relative_weight * relative_score
+            )
+            / weight_sum
+            * evidence_factor
+            - status_penalty(row)
+        )
+        portfolio_risks[sid] = _clamp(
+            0.5 * risks[sid]
+            + 0.5 * (1.0 - relative_low_risk)
+            + 0.20 * (1.0 - risk_completeness[sid])
+            + status_penalty(row)
+        )
+
+    eligible: list[str] = []
+    deferred: dict[str, str] = {}
+    if relative_admission:
+        # Status contributes a penalty above, but never becomes a quality gate.
+        # This lets a complementary WEAK session beat a redundant USABLE one.
+        eligible = list(rankable)
+    else:
+        for sid in rankable:
+            row = rows[sid]
+            if row.internal_status in {"REJECT", "INCONSISTENT"}:
+                rejected[sid] = f"internal_status={row.internal_status}"
+                continue
+            if row.internal_status == "WEAK" and not allow_weak:
+                rejected[sid] = "weak_video_requires_explicit_override_or_geometry"
+                continue
+            if video_scores[sid] < min_video_score:
+                rejected[sid] = f"video_score_below_heuristic_{min_video_score:.3f}"
+                continue
+            eligible.append(sid)
+
+    absolute_reference_passed = {
+        sid: (
+            sid in rankable_set
+            and rows[sid].internal_status in {"STRONG", "USABLE"}
+            and video_scores[sid] >= min_video_score
+        )
+        for sid in rows
+    }
+
+    def score_payload(sid: str) -> dict[str, Any]:
+        return {
+            "video_admission_score": float(video_scores[sid]),
+            "relative_metric_score": float(relative_video_scores[sid]),
+            "relative_quality_rank": quality_ranks.get(sid),
+            "risk": float(risks[sid]),
+            "risk_evidence_completeness": float(risk_completeness[sid]),
+            "relative_low_risk_rank": low_risk_ranks.get(sid),
+            "evidence_completeness": float(completeness[sid]),
+            "portfolio_score": float(portfolio_scores[sid]),
+            "portfolio_risk": float(portfolio_risks[sid]),
+            "absolute_reference_passed": bool(absolute_reference_passed[sid]),
+            "selected_for_geometry": False,
+            "validation_candidate": False,
+        }
+
+    graph_nodes = rankable_set if relative_admission else set(eligible)
+    proposal_edges = [
+        edge
+        for edge in edge_rows
+        if set(_edge_ends(edge)) <= graph_nodes
+    ]
+    strengths, adjacency, triplets = _proposal_graph(proposal_edges)
     graph_available = bool(strengths)
     if not eligible:
         return {
             "proposed_base_sessions": [],
             "validation_candidates": [],
             "verification_pairs": [],
-            "session_scores": {},
+            "session_scores": {sid: score_payload(sid) for sid in rows},
             "rejected": rejected,
+            "deferred": deferred,
             "proposal_confidence": "NONE",
             "proposal_graph_available": graph_available,
+            "selection_mode": (
+                "RELATIVE_PORTFOLIO" if relative_admission else "LEGACY_ABSOLUTE_FILTER"
+            ),
+            "relative_fallback_used": False,
+            "best_available_not_release": False,
             "requires_geometric_verification": True,
             "notes": [
-                "No video passed proposal-level QA.",
+                "No readable video is available for a geometry probe.",
                 "Retrieval is never geometric merge authority.",
             ],
         }
@@ -304,15 +553,17 @@ def propose_prebuild_set(
     w_bridge = float(weights.get("bridgeability", 0.25))
     w_graph_cov = float(weights.get("graph_coverage", 0.15))
     w_diversity = float(weights.get("motion_diversity", 0.10))
+    w_appearance = float(weights.get("appearance_diversity", 0.05))
     w_triplet = float(weights.get("triplet_support", 0.10))
     w_multi = float(weights.get("multi_link", 0.10))
     w_risk = float(weights.get("risk", 0.20))
     w_cost = float(weights.get("frame_cost", 0.05))
+    w_redundancy = float(weights.get("redundancy", 0.10))
 
     seed = max(
         eligible,
         key=lambda sid: (
-            video_scores[sid] - 0.5 * risks[sid],
+            portfolio_scores[sid] - 0.5 * portfolio_risks[sid],
             rows[sid].num_keyframes,
             sid,
         ),
@@ -322,8 +573,8 @@ def propose_prebuild_set(
     ranked_steps: list[dict[str, Any]] = [
         {
             "session_id": seed,
-            "marginal_score": video_scores[seed] - 0.5 * risks[seed],
-            "reason": "highest_video_admission_score",
+            "marginal_score": portfolio_scores[seed] - 0.5 * portfolio_risks[seed],
+            "reason": "highest_relative_portfolio_score",
         }
     ]
 
@@ -337,15 +588,19 @@ def propose_prebuild_set(
     # Preserve an untouched validation candidate whenever the pool is large enough.
     # This is proposal-stage isolation only; the final S0 corpus lock still owns
     # the authoritative build/test split and content-hash proof.
-    reserve = validation_count if len(eligible) > min_base else 0
-    proposal_capacity = max(min_base, len(eligible) - max(0, reserve))
+    preferred_count = sum(
+        rows[sid].internal_status in {"STRONG", "USABLE"} for sid in eligible
+    )
+    capacity_pool = preferred_count if preferred_count >= min_base else len(eligible)
+    reserve = validation_count if capacity_pool > min_base else 0
+    proposal_capacity = max(min_base, capacity_pool - max(0, reserve))
     budget = min(max_sessions, proposal_capacity, len(eligible))
     if not graph_available:
         budget = min(budget, max_no_graph)
 
     while remaining and len(selected) < budget:
         covered = covered_neighbourhood(selected_set)
-        total_weight = sum(video_scores[sid] for sid in eligible) or 1.0
+        total_weight = sum(portfolio_scores[sid] for sid in eligible) or 1.0
         candidates: list[tuple[float, str, dict[str, float]]] = []
         for sid in remaining:
             links = [
@@ -366,39 +621,64 @@ def propose_prebuild_set(
             diversity = (
                 sum(profile_distances) / len(profile_distances) if profile_distances else 0.0
             )
+            exposure_distances = [
+                exposure_distance(rows[sid], rows[other]) for other in selected
+            ]
+            appearance_diversity = (
+                sum(exposure_distances) / len(exposure_distances)
+                if exposure_distances
+                else 0.0
+            )
             new_nodes = ({sid} | set(adjacency.get(sid, {}))) - covered
             graph_coverage = (
-                sum(video_scores.get(node, 0.0) for node in new_nodes) / total_weight
+                sum(portfolio_scores.get(node, 0.0) for node in new_nodes) / total_weight
                 if graph_available
                 else 0.0
             )
             frame_cost = _clamp(rows[sid].num_frames / max_frames)
+            redundancy = bridgeability * (1.0 - diversity) * (1.0 - appearance_diversity)
             terms = {
-                "video_quality": video_scores[sid],
+                "video_quality": portfolio_scores[sid],
                 "bridgeability": bridgeability,
                 "graph_coverage": graph_coverage,
                 "motion_diversity": diversity,
+                "appearance_diversity": appearance_diversity,
                 "triplet_support": float(triplet_support),
                 "multi_link": multi_link,
-                "risk": risks[sid],
+                "risk": portfolio_risks[sid],
                 "frame_cost": frame_cost,
+                "redundancy": redundancy,
             }
             marginal = (
                 w_video * terms["video_quality"]
                 + w_bridge * terms["bridgeability"]
                 + w_graph_cov * terms["graph_coverage"]
                 + w_diversity * terms["motion_diversity"]
+                + w_appearance * terms["appearance_diversity"]
                 + w_triplet * terms["triplet_support"]
                 + w_multi * terms["multi_link"]
                 - w_risk * terms["risk"]
                 - w_cost * terms["frame_cost"]
+                - w_redundancy * terms["redundancy"]
             )
             candidates.append((marginal, sid, terms))
 
-        candidates.sort(key=lambda item: (item[0], video_scores[item[1]], item[1]), reverse=True)
+        candidates.sort(
+            key=lambda item: (item[0], portfolio_scores[item[1]], item[1]),
+            reverse=True,
+        )
         marginal, sid, terms = candidates[0]
-        if len(selected) >= min_base and marginal < min_marginal:
-            break
+        previous_marginals = [
+            float(step["marginal_score"])
+            for step in ranked_steps[1:]
+            if step.get("marginal_score") is not None
+        ]
+        best_previous = max(previous_marginals, default=marginal)
+        if len(selected) >= min_base:
+            if marginal <= 0.0:
+                break
+            if best_previous > 0.0 and marginal < best_previous * marginal_keep_ratio:
+                break
         selected.append(sid)
         selected_set.add(sid)
         remaining.remove(sid)
@@ -411,27 +691,33 @@ def propose_prebuild_set(
             }
         )
 
+    validation_pool = rankable if relative_admission else eligible
     remaining_ranked = sorted(
-        (sid for sid in eligible if sid not in selected_set),
+        (sid for sid in validation_pool if sid not in selected_set),
         key=lambda sid: (
             max(
                 (strengths.get(_pair_key(sid, other), 0.0) for other in selected),
                 default=0.0,
             )
             * 0.6
-            + video_scores[sid] * 0.4,
-            video_scores[sid],
+            + portfolio_scores[sid] * 0.4,
+            portfolio_scores[sid],
             sid,
         ),
         reverse=True,
     )
     validation = remaining_ranked[: max(0, validation_count)]
+    deferred = {
+        sid: "not_selected_by_relative_portfolio"
+        for sid in validation_pool
+        if sid not in selected_set and sid not in validation
+    }
 
     verification_pairs: list[dict[str, Any]] = []
     for left, right in combinations(selected, 2):
         key = _pair_key(left, right)
         candidate_count = 0
-        for edge in edge_rows:
+        for edge in proposal_edges:
             if _edge_ends(edge) == key:
                 candidate_count = max(
                     candidate_count,
@@ -485,15 +771,13 @@ def propose_prebuild_set(
         else:
             confidence = "LOW"
 
-    session_scores = {
-        sid: {
-            "video_admission_score": float(video_scores[sid]),
-            "risk": float(risks[sid]),
-            "selected_for_geometry": sid in selected_set,
-            "validation_candidate": sid in validation,
-        }
-        for sid in rows
-    }
+    session_scores = {sid: score_payload(sid) for sid in rows}
+    for sid in rows:
+        session_scores[sid]["selected_for_geometry"] = sid in selected_set
+        session_scores[sid]["validation_candidate"] = sid in validation
+    relative_fallback_used = any(
+        not absolute_reference_passed[sid] for sid in selected_set
+    )
     return {
         "proposed_base_sessions": selected,
         "validation_candidates": validation,
@@ -501,11 +785,18 @@ def propose_prebuild_set(
         "session_scores": session_scores,
         "ranked_steps": ranked_steps,
         "rejected": rejected,
+        "deferred": deferred,
         "proposal_confidence": confidence,
         "proposal_graph_available": graph_available,
+        "selection_mode": (
+            "RELATIVE_PORTFOLIO" if relative_admission else "LEGACY_ABSOLUTE_FILTER"
+        ),
+        "relative_fallback_used": relative_fallback_used,
+        "best_available_not_release": relative_fallback_used,
         "requires_geometric_verification": True,
         "notes": [
             "This is a pre-build proposal, not merge authority.",
+            "Quality thresholds are diagnostic references; relative ranking keeps a non-empty best-available probe set.",
             "VPR/candidate counts rank verification effort only; they are never geometric edges.",
             "Final BASE_CORE/BASE_SUPPORT still requires verified multi-bridge geometry.",
         ],

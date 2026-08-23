@@ -6,8 +6,12 @@
 # Nothing in this section authorizes an SfM merge.
 prebuild:
   motion_interval_seconds: 0.5
-  min_video_score: 0.35                 # heuristic proposal floor
-  min_marginal_gain: 0.15               # heuristic diminishing-return stop
+  relative_admission: true              # rank the available cohort; do not empty it with QA gates
+  relative_quality_weight: 0.65         # cohort percentile contribution
+  absolute_quality_weight: 0.35         # observed quality remains a diagnostic prior
+  relative_marginal_keep_ratio: 0.25    # stop after a cohort-relative marginal-gain collapse
+  min_video_score: 0.35                 # legacy/reference score, not a default eligibility gate
+  min_marginal_gain: 0.15               # legacy config retained for backward compatibility
   min_base_sessions: 2                  # heuristic when >=2 usable videos exist
   max_sessions: null                    # optional hard proposal budget
   max_no_graph_sessions: 3              # heuristic cap when no retrieval graph exists
@@ -34,10 +38,12 @@ prebuild:
     bridgeability: 0.25
     graph_coverage: 0.15
     motion_diversity: 0.10
+    appearance_diversity: 0.05
     triplet_support: 0.10
     multi_link: 0.10
     risk: 0.20
     frame_cost: 0.05
+    redundancy: 0.10
 
 # Phase B: only geometrically verified edges can enter the actual Base.
 selection:
