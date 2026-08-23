@@ -226,6 +226,7 @@ def save_weak_region_analysis(output_dir: str | Path, analysis: WeakRegionAnalys
                 "recapture": r["recapture"],
                 "repair_sequence": r["repair_sequence"],
                 "anchor_image_names": r["anchor_image_names"],
+                "solution_plan": r["solution_plan"],
             }
             for r in analysis.regions
         ],
@@ -353,6 +354,7 @@ def _region(
         [rows[i] for i in members],
     )
     actions, recapture = _actions(causes, bool(anchors))
+    solution_plan = _solution_plan(actions, recapture)
     scores = [rows[i]["weakness_score"] for i in members]
     severity = 0.75 * max(scores) + 0.25 * float(np.mean(scores))
     if WeakRegionCause.LOW_PARALLAX.value in causes:
@@ -380,6 +382,7 @@ def _region(
         "image_quality": quality_stats,
         "recapture": recapture,
         "repair_sequence": actions,
+        "solution_plan": solution_plan,
     }
 
 
@@ -484,10 +487,20 @@ def _actions(causes: list[str], has_anchors: bool) -> tuple[list[dict], str]:
 
     def add(priority: int, action: str, reason: str) -> None:
         if action not in {x["action"] for x in actions}:
-            actions.append({"priority": priority, "action": action, "reason": reason})
+            expected_improvements, acceptance_checks = _action_contract(action)
+            actions.append(
+                {
+                    "priority": priority,
+                    "stage_id": action.lower(),
+                    "action": action,
+                    "reason": reason,
+                    "expected_improvements": expected_improvements,
+                    "acceptance_checks": acceptance_checks,
+                }
+            )
 
     if WeakRegionCause.IMAGE_QUALITY_WEAK.value in causes:
-        add(1, "RECOVER_IMAGE_QUALITY_OR_RECAPTURE", "Fix unusable source frames first.")
+        add(1, "RECOVER_SOURCE_IMAGE_QUALITY", "Fix unusable source frames first.")
     if any(c in causes for c in (WeakRegionCause.VIEW_GRAPH_ISOLATION.value, WeakRegionCause.RETRIEVAL_GAP.value)):
         add(1, "TARGETED_BRIDGE_PAIR_SELECTION", "Connect weak images to healthy/cross-route anchors.")
     if WeakRegionCause.MATCHING_SHORTAGE.value in causes:
@@ -533,6 +546,134 @@ def _actions(causes: list[str], has_anchors: bool) -> tuple[list[dict], str]:
     else:
         recapture = "NOT_FIRST_ACTION"
     return actions, recapture
+
+
+def _action_contract(action: str) -> tuple[list[str], list[str]]:
+    contracts = {
+        "RECOVER_SOURCE_IMAGE_QUALITY": (
+            ["usable source frames are recovered or their unavailability is documented"],
+            ["re-measure image-quality evidence before considering capture"],
+        ),
+        "TARGETED_BRIDGE_PAIR_SELECTION": (
+            ["stronger weak-to-anchor or cross-route pair support in existing data"],
+            ["recompute selected/candidate pairs and anchor connectivity for the region"],
+        ),
+        "TARGETED_DENSE_REMATCHING": (
+            ["more verified correspondences on targeted weak and bridge pairs"],
+            ["review matches, inliers, and inlier ratios for targeted pairs"],
+        ),
+        "TIGHTEN_GEOMETRIC_VERIFICATION": (
+            ["fewer geometrically inconsistent correspondences or pair poses"],
+            ["rerun geometric verification and inspect retained and rejected pair evidence"],
+        ),
+        "MULTIVIEW_TRACK_REPAIR": (
+            ["more consistent multi-view support for affected tracks"],
+            ["recompute track-length and two-view diagnostics and inspect stable-region regressions"],
+        ),
+        "LOCAL_RETRIANGULATION_AND_BA": (
+            ["better-supported local points with consistent reprojection evidence"],
+            ["recompute triangulation, parallax, and reprojection diagnostics with anchors constrained"],
+        ),
+        "PRUNE_RETRIANGULATE_LOCAL_BA": (
+            ["fewer outlier-supported points and more consistent local reprojection evidence"],
+            ["verify residual and track diagnostics and compare frozen weak/stable holdouts"],
+        ),
+        "EXPAND_EXISTING_CORRESPONDENCE_SUPPORT": (
+            ["more existing observations supporting the weak region"],
+            ["recompute point support and track coverage from existing images"],
+        ),
+        "SEARCH_EXISTING_LONG_BASELINE_ANCHORS": (
+            ["existing long-baseline or cross-route support for parallax-sensitive pairs"],
+            ["record baseline evidence and recompute triangulation-angle and anchor metrics"],
+        ),
+        "TARGETED_LATERAL_OBLIQUE_RECAPTURE": (
+            ["new independent baseline observations if the counterfactual leaves a measured deficit"],
+            [
+                "authorize only after existing_data_counterfactual_complete and validate new frames on frozen weak/stable holdouts"
+            ],
+        ),
+        "COLLECT_BUILD_EVIDENCE": (
+            ["evidence coverage sufficient to separate unresolved root causes"],
+            ["confirm retrieval, matching, verification, and image-quality evidence availability"],
+        ),
+    }
+    return contracts.get(
+        action,
+        (
+            [f"observable evidence relevant to {action} is improved or its deficit is characterized"],
+            [f"rerun weak-region diagnostics and record the observed result for {action}"],
+        ),
+    )
+
+
+def _solution_plan(actions: list[dict], recapture: str) -> dict:
+    counterfactual_stage = {
+        "stage_id": "existing_data_counterfactual",
+        "action": "existing_data_counterfactual",
+        "reason": "Evaluate declared existing-data repairs on frozen weak and stable holdouts.",
+        "expected_improvements": ["observed repairability of existing-data interventions is measured"],
+        "acceptance_checks": [
+            "all declared existing-data stages have weak and stable holdout comparisons"
+        ],
+    }
+    existing_data_steps = [
+        dict(item)
+        for item in actions
+        if item["action"] != "TARGETED_LATERAL_OBLIQUE_RECAPTURE"
+    ]
+    existing_data_steps.append(counterfactual_stage)
+
+    recapture_steps = [
+        {
+            "stage_id": "recapture_decision",
+            "decision": recapture,
+            "after_stage_id": counterfactual_stage["stage_id"],
+            "acceptance_checks": [
+                "do not authorize recapture until the existing-data counterfactual is complete"
+            ],
+        }
+    ]
+    recapture_steps.extend(
+        {
+            **dict(item),
+            "after_stage_id": "recapture_decision",
+        }
+        for item in actions
+        if item["action"] == "TARGETED_LATERAL_OBLIQUE_RECAPTURE"
+    )
+    return {
+        "schema_version": 1,
+        "policy": "EXISTING_DATA_FIRST",
+        "authorization_status": "NOT_AUTHORIZED",
+        "counterfactual_status": "REQUIRED_NOT_RUN",
+        "required_stages": [
+            item["stage_id"]
+            for item in existing_data_steps
+            if item["stage_id"] != "existing_data_counterfactual"
+        ],
+        "counterfactual_trials": [],
+        "counterfactual_result": None,
+        "blocked_by": [
+            "existing_data_counterfactual_complete",
+            "heldout_provenance_verified",
+            "stable_holdout_comparison",
+            "structural_deficit_evidence",
+        ],
+        "existing_data_steps": existing_data_steps,
+        "recapture_steps": recapture_steps,
+        "counterfactual_required_before_recapture": True,
+        "validation_contract": {
+            "required_checks": [
+                "re-run weak-region metrics after each repair stage",
+                "compare frozen weak and stable holdouts with the same validation protocol",
+                "record observed evidence before accepting a repair or recapture decision",
+            ],
+            "counterfactual_completion_metric": "existing_data_counterfactual_complete",
+            "weak_region_holdout_required": True,
+            "stable_region_holdout_required": True,
+            "observed_evidence_only": True,
+        },
+    }
 
 
 def _pair_stats(pair_rows, map_data, members, anchors, cfg) -> dict:

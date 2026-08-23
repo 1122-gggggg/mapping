@@ -85,6 +85,10 @@ Stage 0 預設採 cohort-relative portfolio：品質門檻只作風險參考，�
 held-out 的 log，以 strict success rate（預設 95%）判定，不要求每個 query 的每項指標全部通過。完整論文與設計依據見
 `docs/RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md`。
 
+弱區域與失敗 query 會輸出 existing-data-first 解方、counterfactual 與 conditional
+recapture 驗收契約。完整 S0–S9 缺口與優先序見
+`docs/S0_S9_LOCALIZATION_QUALITY_ROADMAP_20260823.md`。
+
 ```bash
 # S5/S6 之後
 python tools/diagnose_map.py \

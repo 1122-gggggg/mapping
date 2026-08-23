@@ -10,6 +10,8 @@ from mapdoctor.adapters import get_adapter
 from sfm_qa.bridge import map_model_to_map_data
 from sfm_qa.pipeline import (
     _overall_status,
+    _query_recommendations,
+    _resolution_plan,
     analyze,
     attribute_query,
     check,
@@ -103,6 +105,25 @@ def test_check_demo_candidate_csv_map_limited(tmp_path):
         assert row["attribution"] == "MAP_LIMITED"
         assert row["diagnosis_primary"] == "DATA_SPARSE"
         assert "DATA_SPARSE" in row["diagnosis_codes"]
+        assert row["diagnosis_recommendations"]
+        assert any("mapping coverage" in item for item in row["diagnosis_recommendations"])
+        assert row["resolution_plan"]["policy"] == "EXISTING_DATA_FIRST"
+        assert row["resolution_plan"]["actions"]
+        assert row["resolution_plan"]["validation_contract"]
+        assert row["pose_evidence_status"] == "HYPOTHESIS_ONLY"
+        assert row["resolution_plan"]["schema_version"] == 1
+        assert row["resolution_plan"]["authorization_status"] == "NOT_AUTHORIZED"
+        assert row["resolution_plan"]["counterfactual_status"] == "REQUIRED_NOT_RUN"
+        assert row["resolution_plan"]["required_stages"]
+        assert row["resolution_plan"]["counterfactual_trials"] == []
+        assert row["resolution_plan"]["counterfactual_result"] is None
+        assert (
+            row["resolution_plan"]["recapture_policy"]
+            == "NOT_AUTHORIZED_PENDING_COUNTERFACTUAL"
+        )
+        assert row["resolution_plan"]["actions"][-1].startswith(
+            "RECAPTURE_CONDITIONAL_AFTER_COUNTERFACTUAL"
+        )
         assert row["attribution"] != "OK"
 
     relative = loc["relative_quality"]
@@ -158,6 +179,56 @@ def test_localization_accepts_target_rate_without_requiring_every_query(tmp_path
     )
     assert stricter_report["localization"]["required_strict_successes"] == 20
     assert stricter_report["localization"]["localization_ok"] is False
+
+
+def test_resolution_plan_prioritizes_localizer_and_alias_repairs() -> None:
+    localizer = _resolution_plan(
+        ["low_inliers"],
+        "LOCALIZER_LIMITED",
+        ["repair matching"],
+    )
+    alias = _resolution_plan(
+        ["low_pose_consensus"],
+        "ALIAS_OR_PNP",
+        ["verify references"],
+    )
+
+    assert localizer["priority"] == "LOCALIZER_FIX"
+    assert localizer["recapture_policy"] == "NOT_AUTHORIZED_BY_QUERY_DIAGNOSIS"
+    assert alias["priority"] == "REFERENCE_GEOMETRY_VERIFY"
+    assert alias["recapture_policy"] == "NOT_AUTHORIZED_BY_QUERY_DIAGNOSIS"
+
+    map_plan = _resolution_plan(
+        ["low_grid_occupancy"],
+        "MAP_LIMITED",
+        ["Search existing anchors, then recapture a lateral view."],
+    )
+    counterfactual_index = next(
+        index
+        for index, action in enumerate(map_plan["actions"])
+        if action.startswith("COUNTERFACTUAL_VALIDATE")
+    )
+    capture_indices = [
+        index
+        for index, action in enumerate(map_plan["actions"])
+        if "CAPTURE" in action
+    ]
+    assert capture_indices
+    assert all(index > counterfactual_index for index in capture_indices)
+    assert map_plan["authorization_status"] == "NOT_AUTHORIZED"
+    assert "existing_data_counterfactual_complete" in map_plan["blocked_by"]
+
+
+def test_missing_query_pose_gets_failure_funnel_instead_of_map_claim() -> None:
+    recommendations = _query_recommendations(
+        ["localization_failed"],
+        "UNATTRIBUTED",
+        [],
+        has_xyz=False,
+    )
+
+    assert any("FAILURE_FUNNEL_TRACE" in item for item in recommendations)
+    assert any("finite query pose" in item for item in recommendations)
 
 
 def test_heldout_localization_can_override_advisory_map_metric_warning(tmp_path):

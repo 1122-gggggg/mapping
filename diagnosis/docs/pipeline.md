@@ -42,6 +42,12 @@ Always runs for `sfm-qa analyze` (and `check` / `check-map` / `check-localize`).
 5. Write `DIR/map/report.json`. The combined report keeps the same payload under the `map` key.
 
 `diagnostic_mode` comes from the weak-region summary. It is present even when no build evidence is supplied.
+Each weak region also emits an `EXISTING_DATA_FIRST` `solution_plan`: ordered repair
+steps, expected evidence changes, acceptance checks, a frozen weak/stable counterfactual,
+and only then a conditional recapture decision. These are intervention hypotheses, not
+predicted gains or flight authorization; their initial authorization status is
+`NOT_AUTHORIZED`. Concrete capture poses still require audited
+pose-direction metrics through `python -m mapdoctor.recapture plan`.
 
 ## Stage 2: SfM localization
 
@@ -51,10 +57,14 @@ Runs only when `--logs` is given.
 2. Attribute failed queries with `diagnose_pose` when `x,y,z` exist.
 3. Rank all queries by cohort-relative inlier, reprojection, image-plane coverage,
    positive-depth and pose-consensus evidence; emit a complete relative risk--coverage curve.
-4. Accept the provided run when `strict_success_rate` reaches the configured
+4. For every failed query, preserve `diagnose_pose` recommendations and emit an
+   existing-data-first `resolution_plan` for retrieval, matching, PnP, reference aliasing,
+   or map repair. Query coordinates are marked `HYPOTHESIS_ONLY`, and recapture remains
+   unauthorized until the separate hard-evidence planner completes its counterfactual.
+5. Accept the provided run when `strict_success_rate` reaches the configured
    `min_strict_success_rate` (default `0.95`), rather than requiring every query to
    pass every strict check.
-5. Write `DIR/sfm/report.json`.
+6. Write `DIR/sfm/report.json`.
 
 This stage does not run a localizer. The CSV is an already-computed result log.
 It also does not prove that the log is held out: reports explicitly emit

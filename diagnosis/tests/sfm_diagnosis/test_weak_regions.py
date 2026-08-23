@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 
 from sfm_diagnosis.evidence import BuildEvidence
@@ -6,6 +8,7 @@ from sfm_diagnosis.weak_regions import (
     WeakRegionCause,
     WeakRegionConfig,
     analyze_weak_regions,
+    save_weak_region_analysis,
 )
 
 
@@ -80,6 +83,31 @@ def test_weak_region_explains_track_parallax_and_graph_failures():
     assert "TARGETED_BRIDGE_PAIR_SELECTION" in actions
     assert "MULTIVIEW_TRACK_REPAIR" in actions
     assert "TARGETED_LATERAL_OBLIQUE_RECAPTURE" in actions
+    assert all(item["expected_improvements"] for item in region["repair_sequence"])
+    assert all(item["acceptance_checks"] for item in region["repair_sequence"])
+    solution = region["solution_plan"]
+    assert solution["schema_version"] == 1
+    assert solution["policy"] == "EXISTING_DATA_FIRST"
+    assert solution["existing_data_steps"]
+    assert solution["recapture_steps"]
+    assert solution["counterfactual_required_before_recapture"] is True
+    assert solution["validation_contract"]
+    assert solution["authorization_status"] == "NOT_AUTHORIZED"
+    assert solution["counterfactual_status"] == "REQUIRED_NOT_RUN"
+    assert solution["required_stages"]
+    assert solution["counterfactual_trials"] == []
+    assert solution["counterfactual_result"] is None
+    assert "existing_data_counterfactual_complete" in solution["blocked_by"]
+
+
+def test_saved_repair_plan_includes_solution_contract(tmp_path):
+    result = analyze_weak_regions(mixed_map(), config=_pair_cfg())
+
+    save_weak_region_analysis(tmp_path, result)
+
+    payload = json.loads((tmp_path / "repair_plan.json").read_text(encoding="utf-8"))
+    assert payload
+    assert payload[0]["solution_plan"]["policy"] == "EXISTING_DATA_FIRST"
 
 
 def test_pair_evidence_distinguishes_matching_ambiguity():

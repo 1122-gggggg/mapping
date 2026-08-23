@@ -231,6 +231,138 @@ def _has_finite_xyz(result) -> bool:
     )
 
 
+_ATTRIBUTION_ACTION = {
+    "MAP_LIMITED": (
+        "MAP_REPAIR: inspect weak-region coverage and geometry, then test repairs using "
+        "existing images before collecting new data."
+    ),
+    "LOCALIZER_LIMITED": (
+        "LOCALIZER_FIX: trace retrieval, matching, 2D-3D lifting, and PnP on the existing map."
+    ),
+    "ALIAS_OR_PNP": (
+        "REFERENCE_GEOMETRY_VERIFY: inspect independent reference hypotheses, calibration, "
+        "and repeated-structure aliasing before changing the map."
+    ),
+    "UNATTRIBUTED": (
+        "FAILURE_FUNNEL_TRACE: instrument retrieval, matching, 2D-3D lifting, and PnP to "
+        "identify the earliest failing stage."
+    ),
+}
+
+_GATE_ACTION = {
+    "localization_failed": "Replay retrieval through PnP and record the earliest failed stage.",
+    "low_inliers": "Run targeted strong matching and rebuild unique 2D-3D support.",
+    "low_inlier_ratio": "Tighten geometric verification and quarantine ambiguous matches.",
+    "missing_reprojection_error": "Instrument reprojection residuals before accepting a pose.",
+    "high_reprojection_error": "Prune inconsistent correspondences and re-estimate the pose.",
+    "low_inlier_hull_coverage": "Balance correspondences across the image before rerunning PnP.",
+    "low_grid_occupancy": "Expand reference/correspondence coverage into missing image cells.",
+    "low_positive_depth_ratio": "Check calibration, 2D-3D associations, and pose-hypothesis degeneracy.",
+    "low_pose_consensus": "Keep per-reference poses separate and reject incompatible hypotheses.",
+}
+
+
+def _dedupe_strings(values) -> list[str]:
+    return list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+
+
+def _query_recommendations(
+    gate_failures: list[str],
+    attribution: str,
+    diagnosis_recommendations: list[str],
+    *,
+    has_xyz: bool,
+) -> list[str]:
+    actions = list(diagnosis_recommendations)
+    if attribution == "OK":
+        if not has_xyz:
+            actions.append(
+                "Strict gates passed, but finite query pose/location evidence was not "
+                "provided for pose-local root-cause diagnosis."
+            )
+        return _dedupe_strings(actions)
+    actions.append(_ATTRIBUTION_ACTION.get(attribution, _ATTRIBUTION_ACTION["UNATTRIBUTED"]))
+    actions.extend(_GATE_ACTION.get(failure, f"Resolve strict gate failure: {failure}.") for failure in gate_failures)
+    if not has_xyz:
+        actions.append(
+            "Provide finite query pose/location evidence so map-limited and localizer-limited "
+            "failures can be separated."
+        )
+    return _dedupe_strings(actions)
+
+
+def _resolution_plan(
+    gate_failures: list[str],
+    attribution: str,
+    recommendations: list[str],
+) -> dict[str, Any]:
+    map_limited = attribution == "MAP_LIMITED"
+    deferred_capture = [
+        item
+        for item in recommendations
+        if "recapture" in item.lower() or "capture a " in item.lower()
+    ]
+    actions = [item for item in recommendations if item not in deferred_capture]
+    actions.append(
+        "COUNTERFACTUAL_VALIDATE: replay the intervention on frozen weak and stable "
+        "query blocks before accepting it."
+    )
+    if map_limited:
+        actions.extend(
+            f"DEFERRED_CAPTURE_HYPOTHESIS: {item}" for item in deferred_capture
+        )
+        actions.append(
+            "RECAPTURE_CONDITIONAL_AFTER_COUNTERFACTUAL: request targeted capture only "
+            "if existing-data repairs leave a measured structural deficit."
+        )
+    priority = {
+        "MAP_LIMITED": "MAP_COUNTERFACTUAL",
+        "LOCALIZER_LIMITED": "LOCALIZER_FIX",
+        "ALIAS_OR_PNP": "REFERENCE_GEOMETRY_VERIFY",
+    }.get(attribution, "EXISTING_DATA_TRIAGE")
+    required_stages = {
+        "MAP_LIMITED": ["map_support", "geometry", "retrieval", "matching", "pnp"],
+        "LOCALIZER_LIMITED": ["retrieval", "matching", "pnp"],
+        "ALIAS_OR_PNP": ["reference_geometry", "geometric_verification", "pnp"],
+    }.get(attribution, ["retrieval", "matching", "pnp", "map_support"])
+    blocked_by = [
+        "existing_data_counterfactual_complete",
+        "heldout_provenance_verified",
+        "stable_holdout_comparison",
+    ]
+    if map_limited:
+        blocked_by.append("structural_deficit_evidence")
+    return {
+        "schema_version": 1,
+        "policy": "EXISTING_DATA_FIRST",
+        "priority": priority,
+        "authorization_status": "NOT_AUTHORIZED",
+        "counterfactual_status": "REQUIRED_NOT_RUN",
+        "required_stages": required_stages,
+        "counterfactual_trials": [],
+        "counterfactual_result": None,
+        "actions": _dedupe_strings(actions),
+        "failed_gate_checks": list(gate_failures),
+        "counterfactual_required_before_recapture": True,
+        "recapture_policy": (
+            "NOT_AUTHORIZED_PENDING_COUNTERFACTUAL"
+            if map_limited
+            else "NOT_AUTHORIZED_BY_QUERY_DIAGNOSIS"
+        ),
+        "blocked_by": blocked_by,
+        "validation_contract": {
+            "required_checks": [
+                "rerun the same failed query block with frozen map/query/config identities",
+                "close every reported strict gate failure",
+                "confirm the stable holdout does not regress",
+            ],
+            "pass_condition": (
+                "the weak query block improves and the frozen stable holdout remains non-regressed"
+            ),
+        },
+    }
+
+
 def _map_integrity_checks(model: MapModel, metrics) -> dict[str, bool]:
     def finite(values) -> bool:
         return all(math.isfinite(float(value)) for value in values)
@@ -382,13 +514,31 @@ def check_localize(
         gate_failures = result.failures(settings.localization)
         diagnosis_primary = None
         diagnosis_codes: list[str] = []
-        if _has_finite_xyz(result):
+        diagnosis_recommendations: list[str] = []
+        has_xyz = _has_finite_xyz(result)
+        if has_xyz:
             center = (float(result.x), float(result.y), float(result.z))
             pose = Pose(center, nearest_mapping_rotation(map_data, center))
             diagnosis = diagnose_pose(map_data, pose, history=history)
             diagnosis_primary = diagnosis.primary.value
             diagnosis_codes = [code.value for code in diagnosis.codes]
+            diagnosis_recommendations = list(diagnosis.recommendations)
         attribution = attribute_query(strict_pass, diagnosis_primary)
+        diagnosis_recommendations = _query_recommendations(
+            gate_failures,
+            attribution,
+            diagnosis_recommendations,
+            has_xyz=has_xyz,
+        )
+        resolution_plan = (
+            None
+            if strict_pass
+            else _resolution_plan(
+                gate_failures,
+                attribution,
+                diagnosis_recommendations,
+            )
+        )
         queries.append(
             {
                 "query": result.query,
@@ -397,6 +547,11 @@ def check_localize(
                 "attribution": attribution,
                 "diagnosis_primary": diagnosis_primary,
                 "diagnosis_codes": diagnosis_codes,
+                "pose_evidence_status": (
+                    "HYPOTHESIS_ONLY" if has_xyz else "UNAVAILABLE"
+                ),
+                "diagnosis_recommendations": diagnosis_recommendations,
+                "resolution_plan": resolution_plan,
                 **relative_details[result.query],
             }
         )

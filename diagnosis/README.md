@@ -53,6 +53,12 @@ sfm-qa analyze /path/to/sparse/0 --backend colmap \
 
 Compatibility aliases: `check`, `check-map`, `check-localize`.
 
+Weak map regions and failed localization queries include structured solution plans.
+The plans require existing-data repair and frozen weak/stable counterfactual replay before
+conditional targeted recapture; this command does not execute those interventions. Capture
+coordinates remain planning hypotheses until the separate metric-audited recapture planner
+has sufficient route-frame and safety evidence.
+
 `--logs` CSV required columns:
 
 `query,success,inliers,inlier_ratio,reproj_p90_px,hull_coverage,grid4_occupancy,positive_depth_ratio,pose_consensus`

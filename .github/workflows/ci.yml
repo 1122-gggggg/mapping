@@ -31,6 +31,7 @@ jobs:
       - name: Lint optimized core
         run: |
           ruff check \
+            diagnosis/src/sfm_diagnosis/weak_regions.py \
             diagnosis/src/sfm_qa/cli.py \
             diagnosis/src/sfm_qa/pipeline.py \
             diagnosis/src/sfm_qa/relative_quality.py \
