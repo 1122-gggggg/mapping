@@ -6,11 +6,29 @@ Install from the mapping repo root: `pip install -e '.[dev]'`.
 MapDoctor (`mapdoctor`) and sfm-diagnosis (`sfm_diagnosis`) provide the diagnosis half.
 本仓库用一条主命令先诊断地图，再诊断后续视觉定位。
 
-Pipeline: **Stage 0 session selection → Stage 1 map diagnosis → Stage 2 SfM localization**.
+Pipeline: **Stage 0 pre-build selection → Stage 1 build/map diagnosis → Stage 2 post-build localization diagnosis**.
+
+The diagnosis core has no venue identifier, fixed origin, fixed bounds, or localizer enum.
+Every deployment supplies its own map coordinates, region assignments, thresholds, and
+immutable train/validation split.
+
+| Lifecycle | Generic input contract | Output |
+| --- | --- | --- |
+| Before mapping | sessions, images, optional existing-map evidence | cohort-relative selection and holdout proposal |
+| During mapping | a `MapModel` adapter plus optional pair/database/image evidence | integrity, geometry, graph, and weak-region diagnosis |
+| After mapping | `query,success` plus optional standardized or method-specific metrics | benchmark, failure attribution, comparison, and repair plan |
+
+Built-in map adapters are `colmap`, `glomap`, and `gluemap`. Any other map format can be
+used without changing this repository by implementing `MapAdapter` and passing
+`--map-adapter package.module:AdapterClass`. Programmatic integrations may call
+`register_adapter(name, AdapterClass)` or pass an already normalized `MapModel` to the API.
+
+`localizer` is an arbitrary provenance label. It is preserved in reports but never selects
+thresholds, required metrics, or repair logic.
 
 This tool does **not** run a localizer. `--logs` is a MapDoctor-schema localization CSV,
-and its held-out provenance is not verified by this command; S0/S9 hashes remain the
-release authority.
+and its held-out provenance is not verified by this command; each deployment must provide
+immutable query/map/config identities before release.
 
 ## Install
 
@@ -37,19 +55,19 @@ geometry-probe set; heuristic QA references do not authorize or forbid an SfM me
 
 ```bash
 # Stage 1 only: screen the reconstruction
-sfm-qa analyze /path/to/sparse/0 --backend gluemap --output ./qa-out
+sfm-qa analyze /path/to/map --map-adapter gluemap --output ./qa-out
 
 # Stage 1 + Stage 2: map screen, then attribute localization logs
-sfm-qa analyze /path/to/sparse/0 --backend colmap --logs loc.csv --output ./qa-out
+sfm-qa analyze /path/to/map --map-adapter colmap --logs loc.csv --output ./qa-out
 
 # Optional build evidence for a richer map stage
-sfm-qa analyze /path/to/sparse/0 --backend colmap \
+sfm-qa analyze /path/to/map --map-adapter colmap \
   --database database.db --pairs pairs.csv \
   --images-manifest images.csv --images-dir /path/to/images \
   --output ./qa-out
 ```
 
-`--backend` is required: `colmap`, `glomap`, or `gluemap`.
+`--map-adapter` is required for map input. `--backend` remains a compatibility alias.
 
 Compatibility aliases: `check`, `check-map`, `check-localize`.
 
@@ -59,12 +77,12 @@ conditional targeted recapture; this command does not execute those intervention
 coordinates remain planning hypotheses until the separate metric-audited recapture planner
 has sufficient route-frame and safety evidence.
 
-`--logs` CSV required columns:
-
-`query,success,inliers,inlier_ratio,reproj_p90_px,hull_coverage,grid4_occupancy,positive_depth_ratio,pose_consensus`
-
-All columns are required. Only `reproj_p90_px` may have an empty value; the remaining
-quality fields must be finite and in their documented ranges.
+`--logs` CSV/JSON requires only `query,success`. Optional standardized fields are
+`localizer,inliers,inlier_ratio,reproj_p90_px,hull_coverage,grid4_occupancy,positive_depth_ratio,pose_consensus,x,y,z`.
+JSON rows may also include a scalar `metrics` object for method-specific evidence; extra
+CSV columns are retained there automatically. A quality gate runs only when its metric is
+present, unless the deployment lists it under `localization.required_metrics` in the
+MapDoctor JSON config.
 
 Optional for pose diagnosis: `x,y,z`.
 
@@ -103,7 +121,7 @@ video frames must not be treated as independent trials.
 ## Graph fragility
 
 ```bash
-mapdoctor graph-fragility /path/to/sparse/0 --backend gluemap \
+mapdoctor graph-fragility /path/to/map --map-adapter gluemap \
   --minimum-shared-landmarks 15 --output graph.json
 ```
 
@@ -139,7 +157,7 @@ sfm-diagnosis --help
 
 ```bash
 python examples/reproducible_demo/generate_demo.py --output /tmp/mapdoctor-demo
-sfm-qa analyze /tmp/mapdoctor-demo/sparse/0 --backend gluemap --output /tmp/qa-out
+sfm-qa analyze /tmp/mapdoctor-demo/sparse/0 --map-adapter gluemap --output /tmp/qa-out
 ```
 
 See `docs/pipeline.md` for the Stage 0–2 contract.

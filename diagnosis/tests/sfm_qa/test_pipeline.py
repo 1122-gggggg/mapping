@@ -84,6 +84,30 @@ def test_check_demo_base_csv_ready(tmp_path):
     assert {row["attribution"] for row in loc["queries"]} == {"OK"}
 
 
+def test_check_accepts_method_agnostic_localizer_contract(tmp_path):
+    paths = _generate_demo(tmp_path / "demo")
+    logs = tmp_path / "generic-localizer.json"
+    logs.write_text(
+        json.dumps(
+            [
+                {
+                    "query": "query-from-any-method",
+                    "success": True,
+                    "localizer": "custom-localizer",
+                    "metrics": {"method_confidence": 0.91},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    report = check(paths["model"], backend="gluemap", logs_path=logs)
+
+    assert report["overall_status"] == "READY"
+    assert report["localization"]["strict_success_rate"] == 1.0
+    assert report["localization"]["queries"][0]["attribution"] == "OK"
+
+
 def test_check_demo_candidate_csv_map_limited(tmp_path):
     paths = _generate_demo(tmp_path / "demo")
     report = check(paths["model"], backend="gluemap", logs_path=paths["candidate"])

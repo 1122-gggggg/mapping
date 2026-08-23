@@ -71,6 +71,35 @@ def test_benchmark_rejects_duplicate_query_names(tmp_path):
         load_localization_results(path)
 
 
+def test_method_agnostic_results_require_only_query_and_success(tmp_path):
+    path = tmp_path / "generic-localizer.json"
+    path.write_text(
+        '[{"query": "q1", "success": true, "localizer": "custom-method", '
+        '"metrics": {"method_confidence": 0.8}}, '
+        '{"query": "q2", "success": false, "localizer": "custom-method"}]',
+        encoding="utf-8",
+    )
+
+    results = load_localization_results(path)
+    summary = summarize_benchmark(results, LocalizationThresholds())
+
+    assert summary.strict_success_rate == 0.5
+    assert results[0].localizer == "custom-method"
+    assert results[0].metrics == {"method_confidence": 0.8}
+    assert results[0].failures(LocalizationThresholds()) == []
+    assert results[1].failures(LocalizationThresholds()) == ["localization_failed"]
+
+
+def test_config_can_require_selected_quality_evidence(tmp_path):
+    path = tmp_path / "generic-localizer.csv"
+    path.write_text("query,success\nq1,true\n", encoding="utf-8")
+    result = load_localization_results(path)[0]
+
+    thresholds = LocalizationThresholds(required_metrics=("inliers",))
+
+    assert result.failures(thresholds) == ["missing_inliers"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

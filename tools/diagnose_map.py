@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Run in-repo Stage 1/2 diagnosis on a finished sparse map.
+"""Run in-repo Stage 1/2 diagnosis on a map supported by a MapAdapter.
 
-Does not replace S0-S9. S9 held-out localization stays the release gate.
 This is the complementary read-only screen: MapDoctor health + sfm-diagnosis
 weak regions, and optional localization-log attribution.
 """
@@ -21,10 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Final sparse model directory or parent containing 0/",
     )
     parser.add_argument(
+        "--map-adapter",
         "--backend",
-        choices=("colmap", "glomap", "gluemap"),
-        default="gluemap",
-        help="Producer interface used to load the sparse reconstruction",
+        dest="map_adapter",
+        required=True,
+        help="Built-in map adapter or package.module:AdapterClass",
     )
     parser.add_argument("--output", type=Path, required=True, help="Directory for sfm-qa reports")
     parser.add_argument("--config", type=Path, default=None, help="Optional MapDoctor JSON settings")
@@ -42,12 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def resolve_model(model: Path) -> Path:
-    if (model / "cameras.bin").exists() or (model / "cameras.txt").exists():
-        return model
-    nested = model / "0"
-    if (nested / "cameras.bin").exists() or (nested / "cameras.txt").exists():
-        return nested
-    raise SystemExit(f"No COLMAP cameras.bin or cameras.txt found in {model} or {nested}.")
+    resolved = model.expanduser().resolve()
+    if not resolved.exists():
+        raise SystemExit(f"Map input does not exist: {resolved}")
+    return resolved
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     report = analyze(
         model,
-        backend=args.backend,
+        backend=args.map_adapter,
         logs_path=args.logs,
         config_path=args.config,
         output_dir=args.output,

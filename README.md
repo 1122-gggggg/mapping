@@ -71,36 +71,42 @@ pip install -e '.[dev]'
 ## 診斷：Stage 0–2
 
 `diagnosis/` 是原本獨立的 [sfm_map_diagnosis](https://github.com/1122-gggggg/sfm_map_diagnosis)。
-建圖負責把地圖做出來並用 S9 驗收；診斷負責解釋地圖哪裡弱、定位失敗該怪地圖還是定位器。
+它不依賴 `sites/<site>`、場地 ID、固定原點／邊界或特定定位器。建圖前、建圖中、建圖後
+都透過通用資料契約工作：session/image evidence、`MapModel`、以及 localization result。
+現有 `sites/` 是另外一組歷史建圖／release 工具，不是診斷核心的依賴。
 
-| Stage | 命令 | 對應建圖 | 硬 gate？ |
+| Stage | 命令 | 通用輸入 | 硬 gate？ |
 |---|---|---|---|
-| **0** | `sfm-qa select-sessions` | 補 S0：拍之前先建議 session 角色 | 否，advisory |
-| **1** | `python tools/diagnose_map.py --model … --backend gluemap` | S5/S6 之後的靜態地圖篩檢 | 否。S6/S9 仍是 release 閘 |
-| **2** | 同上再加 `--logs loc.csv` | S9 之後的 per-query 歸因 | 否。不可用 S9 聚合列假造 CSV |
+| **0：建圖前** | `sfm-qa select-sessions` | sessions、images、選用的既有地圖證據 | 否，advisory |
+| **1：建圖中／後** | `sfm-qa analyze MAP --map-adapter ADAPTER` | 任意 adapter 正規化出的 `MapModel` | 地圖完整性是硬檢查 |
+| **2：定位後** | 同上再加 `--logs loc.csv` | 任意定位器輸出的 `query,success` 與選用指標 | 由部署設定決定 |
 
 Stage 0 預設採 cohort-relative portfolio：品質門檻只作風險參考，整批影片都偏弱時仍會
 輸出現有資料中的最佳非空 geometry-probe 組合，並明示 `relative_fallback_used`；VPR
-仍不能當幾何邊。Stage 2 會輸出 query-relative risk–coverage；對已由 S0/S9 外部證明為
-held-out 的 log，以 strict success rate（預設 95%）判定，不要求每個 query 的每項指標全部通過。完整論文與設計依據見
+仍不能當幾何邊。Stage 2 會輸出 query-relative risk–coverage；對由部署方 immutable
+manifest 證明為 held-out 的 log，以 strict success rate（預設 95%）判定。品質欄位只在
+存在時啟用 gate；部署方可用 `localization.required_metrics` 強制指定必填證據。完整論文與設計依據見
 `docs/RELATIVE_QUALITY_DIAGNOSTIC_DESIGN_20260823.md`。
+
+內建 map adapter 有 `colmap`、`glomap`、`gluemap`；其他格式可直接傳
+`--map-adapter package.module:AdapterClass`，不用改診斷核心。定位結果的 `localizer` 是任意
+provenance label，不會切換 HLOC、EDM、SCR 或任何方法專屬邏輯。
 
 弱區域與失敗 query 會輸出 existing-data-first 解方、counterfactual 與 conditional
 recapture 驗收契約。完整 S0–S9 缺口與優先序見
 `docs/S0_S9_LOCALIZATION_QUALITY_ROADMAP_20260823.md`。
 
 ```bash
-# S5/S6 之後
-python tools/diagnose_map.py \
-  --model /path/to/runs/target_site_v1/final_model \
-  --backend gluemap \
-  --output /path/to/runs/target_site_v1/sfm-qa
+# 建圖中或建圖後：任何可轉成 MapModel 的地圖
+sfm-qa analyze /path/to/map \
+  --map-adapter package.module:AdapterClass \
+  --output /path/to/diagnosis
 
-# MapDoctor HTML 報告（target_site hook）
-python sites/target_site/tools/run_mapdoctor_qa.py \
-  --model /path/to/runs/target_site_v1/final_model \
-  --backend gluemap \
-  --output /path/to/runs/target_site_v1/mapdoctor
+# 定位後：任何定位方法，最小結果契約只有 query,success
+sfm-qa analyze /path/to/map \
+  --map-adapter package.module:AdapterClass \
+  --logs /path/to/localization-results.csv \
+  --output /path/to/diagnosis
 ```
 
 細節見 `docs/MAPDOCTOR_QA_INTEGRATION.md` 與 `diagnosis/docs/pipeline.md`。

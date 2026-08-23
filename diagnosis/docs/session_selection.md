@@ -7,7 +7,7 @@ Objective: decide which videos are worth geometric verification, which verified 
 1. **Stage 0A — pre-build proposal.** Video QA, motion/epipolar evidence and optional retrieval candidates rank where expensive cross-session geometry should be spent. This stage may propose multiple videos even before a map exists.
 2. **Stage 0B — verified admission.** Only geometrically verified session edges can create `BASE_CORE` / `BASE_SUPPORT`. VPR alone never authorizes a merge.
 
-The command is advisory: it writes reports and exits 0. It does not run SfM or mutate a map. The site-specific S0 corpus lock remains the authoritative build/test split and must hash-prove held-out isolation before release.
+The command is advisory: it writes reports and exits 0. It does not run SfM or mutate a map. A deployment-owned immutable corpus manifest remains the authoritative build/test split and must hash-prove held-out isolation before release.
 
 ## Stage 0A: which videos should be tested for the base?
 
@@ -70,7 +70,7 @@ A weak edge inside otherwise strong triangles gets lower priority. At proposal t
 
 The selector prefers a video that covers previously uncovered graph neighbourhoods to another highly redundant video. This follows the same design principle as K-Cover visual-map sparsification: preserve enough support/coverage under a finite map or matching budget rather than maximizing raw video count.
 
-If no retrieval graph exists, the selector does not invent all-pairs edges. It proposes only a small geometry-probe subset and emits forced verification pairs. Selection stops at a **relative marginal-gain collapse**, not at a fixed score. If every video is weak under the old references, it still returns the least-bad non-empty probe set and labels `relative_fallback_used=true`; this never grants merge authority. At least one session is reserved as a proposal-stage validation candidate when the pool is large enough; the later site S0 corpus lock is still the final authority on hold-out leakage.
+If no retrieval graph exists, the selector does not invent all-pairs edges. It proposes only a small geometry-probe subset and emits forced verification pairs. Selection stops at a **relative marginal-gain collapse**, not at a fixed score. If every video is weak under the old references, it still returns the least-bad non-empty probe set and labels `relative_fallback_used=true`; this never grants merge authority. At least one session is reserved as a proposal-stage validation candidate when the pool is large enough; the deployment's immutable corpus manifest is still the final authority on hold-out leakage.
 
 Outputs:
 

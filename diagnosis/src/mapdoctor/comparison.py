@@ -132,7 +132,9 @@ def compare_results(
     inlier_changes = [
         (after[name].inliers - before[name].inliers) / before[name].inliers
         for name in common_success
-        if before[name].inliers > 0
+        if before[name].inliers is not None
+        and after[name].inliers is not None
+        and before[name].inliers > 0
     ]
     reproj_changes = [
         after[name].reproj_p90_px - before[name].reproj_p90_px

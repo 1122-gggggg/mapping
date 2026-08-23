@@ -1,4 +1,4 @@
-"""GlueMap-first SfM map diagnostics."""
+"""Adapter-based SfM map diagnostics."""
 
 from .diagnose import Diagnosis, DiagnosisCode, diagnose_pose
 from .evidence import BuildEvidence, load_build_evidence

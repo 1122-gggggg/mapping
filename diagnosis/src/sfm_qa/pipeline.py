@@ -164,8 +164,8 @@ def _relative_localization_quality(results, strict_by_query: dict[str, bool]) ->
         "quality_p90": float(np.percentile(scores, 90)) if scores else None,
         "note": (
             "Cohort-relative scores prioritize diagnosis and expose availability/quality "
-            "tradeoffs. The log is not proven held out here; external S0/S9 evidence "
-            "remains release authority."
+            "tradeoffs. The log is not proven held out here; external immutable split "
+            "evidence remains release authority."
         ),
     }
     return summary, details

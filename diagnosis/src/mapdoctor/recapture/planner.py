@@ -9,7 +9,6 @@ from .audit import MetricAuditReport, audit_by_region
 from .profiles import CaptureGeometry, PlannerThresholds, profile_for
 from .types import (
     Availability,
-    Backend,
     CaptureMode,
     CapturePass,
     CapturePose,
@@ -17,6 +16,7 @@ from .types import (
     MetricValue,
     PoseDirectionCell,
     RecaptureDecision,
+    normalize_localizer,
 )
 
 
@@ -139,54 +139,13 @@ def _structural_health(cells: Sequence[PoseDirectionCell], thresholds: PlannerTh
 
 def _repairability(
     cells: Sequence[PoseDirectionCell],
-    backend: Backend,
-    thresholds: PlannerThresholds,
 ) -> tuple[float | None, str | None]:
-    """Return existing-data repairability without treating unknown as low."""
-    explicit = _num(cells, "existing_data_repairability")
-    stage: str | None = None
-    candidates: list[float] = []
-
-    if backend == Backend.EDM:
-        snap = _num(cells, "dense_to_3d_snap_ratio")
-        bundle = _num(cells, "edm_bundle_reference_coverage")
-        dense = _num(cells, "dense_match_coverage")
-        if snap is not None and snap < thresholds.min_backend_association_ratio:
-            candidates.append(0.9)
-            stage = "map_association"
-        if bundle is not None and bundle < 0.7:
-            candidates.append(0.8)
-            stage = stage or "retrieval"
-        if dense is not None and dense < thresholds.min_backend_stage_survival:
-            candidates.append(0.7)
-            stage = stage or "dense_matching"
-
-    retrieval = _num(cells, "retrieval_recall_at_k")
-    if retrieval is not None and retrieval < thresholds.min_backend_stage_survival:
-        candidates.append(0.75)
-        stage = stage or "retrieval"
-    reprojection = _num(cells, "reprojection_error_p90_px")
-    triangulation = _num(cells, "triangulation_angle_p10_deg")
-    if (
-        reprojection is not None
-        and reprojection > thresholds.max_reprojection_p90_px
-        and triangulation is not None
-        and triangulation >= thresholds.min_triangulation_angle_p10_deg
-    ):
-        candidates.append(0.7)
-        stage = stage or "geometry"
-
-    # Stage failures can prove that existing data is probably repairable, but
-    # their absence cannot prove that recapture is necessary. Heuristics must
-    # not override a measured counterfactual score.
-    inferred_high = max(candidates) if candidates else None
-    if explicit is None:
-        return inferred_high, stage
-    return explicit, stage
+    """Use only measured counterfactual evidence, independent of localizer type."""
+    return _num(cells, "existing_data_repairability"), None
 
 
-def _repair_actions(stage: str | None, backend: Backend) -> tuple[str, ...]:
-    profile = profile_for(backend)
+def _repair_actions(stage: str | None) -> tuple[str, ...]:
+    profile = profile_for()
     if stage and stage in profile.repair_actions:
         return profile.repair_actions[stage]
     return (
@@ -355,7 +314,6 @@ def _weakest_mode(cells: Sequence[PoseDirectionCell]) -> str:
 
 def _passes(
     cells: Sequence[PoseDirectionCell],
-    backend: Backend,
     geometry: CaptureGeometry,
 ) -> tuple[CapturePass, ...]:
     basis = _route_basis(cells)
@@ -395,7 +353,7 @@ def _passes(
                 _poses(center, mode, geometry, yaw, pitch, basis),
                 ("increase missing view/baseline support while preserving a bridge to the healthy map",),
                 expected_gain,
-                _repair_actions(None, backend),
+                _repair_actions(None),
                 (
                     "B1 must improve the frozen weak-region holdout",
                     "stable-region regression must not worsen",
@@ -409,7 +367,7 @@ def _passes(
 def decide_region(
     cells: Sequence[PoseDirectionCell],
     audit: MetricAuditReport,
-    backend: Backend,
+    localizer: str,
     thresholds: PlannerThresholds,
     geometry: CaptureGeometry,
 ) -> RecaptureDecision:
@@ -418,11 +376,11 @@ def decide_region(
     attempts = _min_num(cells, "attempt_count")
     coverage = _min_num(cells, "holdout_query_coverage")
     structural = _structural_health(cells, thresholds)
-    repairability, stage = _repairability(cells, backend, thresholds)
+    repairability, stage = _repairability(cells)
     best, mean, _, sensitivity = _directional(cells)
     base = dict(
         region_id=region,
-        backend=backend,
+        localizer=localizer,
         existing_data_repairability=repairability,
         structural_health=structural,
         directional_sensitivity=sensitivity,
@@ -509,7 +467,7 @@ def decide_region(
             recapture_required=False,
             confidence=0.55,
             reasons=("existing-data repairability is unknown; unknown is not evidence for recapture",),
-            non_capture_actions=_repair_actions(stage, backend),
+            non_capture_actions=_repair_actions(stage),
             blocked_by=("existing_data_repairability",),
             capture_passes=(),
         )
@@ -520,7 +478,7 @@ def decide_region(
             recapture_required=False,
             confidence=0.75,
             reasons=("existing images contain recoverable support",),
-            non_capture_actions=_repair_actions(stage, backend),
+            non_capture_actions=_repair_actions(stage),
             blocked_by=(),
             capture_passes=(),
         )
@@ -538,7 +496,7 @@ def decide_region(
                 + (() if audit.directional.ready else ("directional_pose_lattice",)),
                 capture_passes=(),
             )
-        capture_passes = _passes(cells, backend, geometry)
+        capture_passes = _passes(cells, geometry)
         if not capture_passes:
             missing_geometry = []
             if not any(cell.route_tangent is not None for cell in cells):
@@ -577,7 +535,7 @@ def decide_region(
         recapture_required=False,
         confidence=0.6,
         reasons=("physical information deficit is not proven",),
-        non_capture_actions=_repair_actions(stage, backend),
+        non_capture_actions=_repair_actions(stage),
         blocked_by=(),
         capture_passes=(),
     )
@@ -585,20 +543,20 @@ def decide_region(
 
 def plan_regions(
     cells: Sequence[PoseDirectionCell],
-    backend: Backend | str,
+    localizer: str = "unspecified",
     *,
     thresholds: PlannerThresholds | None = None,
     capture: CaptureGeometry | None = None,
 ) -> tuple[tuple[RecaptureDecision, ...], Mapping[str, MetricAuditReport]]:
-    backend = backend if isinstance(backend, Backend) else Backend.coerce(backend)
+    localizer = normalize_localizer(localizer)
     thresholds = thresholds or PlannerThresholds()
     capture = capture or CaptureGeometry()
     grouped: dict[str, list[PoseDirectionCell]] = defaultdict(list)
     for cell in cells:
         grouped[cell.region_id].append(cell)
-    audits = audit_by_region(cells, backend)
+    audits = audit_by_region(cells, localizer)
     decisions = tuple(
-        decide_region(group, audits[region], backend, thresholds, capture)
+        decide_region(group, audits[region], localizer, thresholds, capture)
         for region, group in sorted(grouped.items())
     )
     return decisions, audits

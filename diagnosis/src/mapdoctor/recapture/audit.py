@@ -7,9 +7,15 @@ import math
 from pathlib import Path
 from typing import Any, Sequence
 
-from .metric_registry import METRIC_BY_NAME, METRICS, canonical_metric_name, required_metrics
+from .metric_registry import (
+    METRIC_BY_NAME,
+    METRICS,
+    MetricSpec,
+    canonical_metric_name,
+    required_metrics,
+)
 from .profiles import profile_for
-from .types import Availability, Backend, MetricValue, PoseDirectionCell
+from .types import Availability, MetricValue, PoseDirectionCell, normalize_localizer
 
 
 class AuditStatus(str, Enum):
@@ -55,7 +61,7 @@ class DirectionalAudit:
 
 @dataclass(frozen=True)
 class MetricAuditReport:
-    backend: Backend
+    localizer: str
     scope: str
     record_count: int
     authorization_ready: bool
@@ -73,8 +79,8 @@ class MetricAuditReport:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
-            "backend": self.backend.value,
+            "schema_version": 2,
+            "localizer": self.localizer,
             "scope": self.scope,
             "record_count": self.record_count,
             "authorization_ready": self.authorization_ready,
@@ -91,7 +97,7 @@ class MetricAuditReport:
 @dataclass(frozen=True)
 class SourceAuditReport:
     repository: str
-    backend: Backend
+    localizer: str
     source_files_scanned: int
     test_files_scanned: int
     metrics_with_source_evidence: tuple[str, ...]
@@ -100,7 +106,6 @@ class SourceAuditReport:
     def as_dict(self) -> dict[str, Any]:
         return {
             **self.__dict__,
-            "backend": self.backend.value,
             "metrics_with_source_evidence": list(self.metrics_with_source_evidence),
             "notes": list(self.notes),
         }
@@ -138,7 +143,7 @@ def _directional(cells: Sequence[PoseDirectionCell]) -> DirectionalAudit:
 
 
 def _validate(name: str, value: MetricValue) -> tuple[AuditStatus, str]:
-    spec = METRIC_BY_NAME[name]
+    spec = METRIC_BY_NAME.get(name, MetricSpec(name, description=name.replace("_", " ")))
     if value.status == Availability.UNAVAILABLE:
         return AuditStatus.MISSING, value.reason or "unavailable"
     if value.status == Availability.INVALID:
@@ -183,12 +188,12 @@ def _producer_for(cells: Sequence[PoseDirectionCell]) -> str | None:
 
 def audit_cells(
     cells: Sequence[PoseDirectionCell],
-    backend: Backend | str,
+    localizer: str = "unspecified",
     *,
     scope: str = "all",
 ) -> MetricAuditReport:
-    backend = backend if isinstance(backend, Backend) else Backend.coerce(backend)
-    profile = profile_for(backend)
+    localizer = normalize_localizer(localizer)
+    profile = profile_for(localizer)
     producer = _producer_for(cells)
 
     integrity_names = set(profile.integrity_metrics)
@@ -201,16 +206,23 @@ def audit_cells(
     if producer not in {"gluemap", "glue_map"}:
         diagnostic_names = {name for name in diagnostic_names if not name.startswith("gluemap_")}
 
-    relevant_specs = required_metrics(backend, map_producer=producer)
+    relevant_specs = required_metrics(localizer, map_producer=producer)
     required_names = {spec.name for spec in relevant_specs}
     required_names.update(authorization_names)
+    required_names.update(
+        canonical_metric_name(name)
+        for cell in cells
+        for name in cell.metrics
+    )
 
     items: list[MetricAuditItem] = []
     blocking: list[str] = []
     missing_diag: list[str] = []
     for name in sorted(required_names):
-        if name not in METRIC_BY_NAME:
-            continue
+        spec = METRIC_BY_NAME.get(
+            name,
+            MetricSpec(name, description=name.replace("_", " ")),
+        )
         statuses: list[AuditStatus] = []
         reasons: list[str] = []
         emitted = gate_usable = estimated = unavailable = invalid = 0
@@ -249,8 +261,8 @@ def audit_cells(
 
         item = MetricAuditItem(
             name,
-            METRIC_BY_NAME[name].category,
-            METRIC_BY_NAME[name].description,
+            spec.category,
+            spec.description,
             requirement,
             summary,
             len(cells),
@@ -280,7 +292,7 @@ def audit_cells(
     elif producer in {"gluemap", "glue_map"}:
         notes.append("GLUEMAP producer-specific diagnostics are included")
     return MetricAuditReport(
-        backend,
+        localizer,
         scope,
         len(cells),
         authorization_ready,
@@ -296,17 +308,20 @@ def audit_cells(
 
 def audit_by_region(
     cells: Sequence[PoseDirectionCell],
-    backend: Backend | str,
+    localizer: str = "unspecified",
 ) -> dict[str, MetricAuditReport]:
     grouped: dict[str, list[PoseDirectionCell]] = defaultdict(list)
     for cell in cells:
         grouped[cell.region_id].append(cell)
-    return {region: audit_cells(group, backend, scope=region) for region, group in grouped.items()}
+    return {
+        region: audit_cells(group, localizer, scope=region)
+        for region, group in grouped.items()
+    }
 
 
 def audit_source_repository(
     path: str | Path,
-    backend: Backend | str = Backend.GENERIC,
+    localizer: str = "unspecified",
 ) -> SourceAuditReport:
     """Conservative static reference scan.
 
@@ -316,7 +331,7 @@ def audit_source_repository(
     authoritative.
     """
     root = Path(path)
-    backend = backend if isinstance(backend, Backend) else Backend.coerce(backend)
+    localizer = normalize_localizer(localizer)
     all_python = [path for path in root.rglob("*.py") if ".git" not in path.parts]
     test_files = [
         path for path in all_python if "test" in path.name.lower() or "tests" in path.parts
@@ -337,7 +352,7 @@ def audit_source_repository(
     )
     return SourceAuditReport(
         str(root),
-        backend,
+        localizer,
         len(source_files),
         len(test_files),
         evidence,

@@ -7,13 +7,13 @@ from mapdoctor.model import MapModel
 from .bridge import enrich_pose_cells_from_model
 from .planner import plan_regions
 from .profiles import CaptureGeometry, PlannerThresholds
-from .types import Backend, PoseDirectionCell
+from .types import PoseDirectionCell, normalize_localizer
 
 
 def analyze_pose_cells(
     records: Sequence[PoseDirectionCell | Mapping[str, Any]],
     *,
-    backend: Backend | str = Backend.GENERIC,
+    localizer: str = "unspecified",
     thresholds: PlannerThresholds | None = None,
     capture: CaptureGeometry | None = None,
     model: MapModel | None = None,
@@ -25,24 +25,24 @@ def analyze_pose_cells(
     provenance is inherited; absent pose-local evidence is never replaced with
     sparse-map-wide proxy values.
     """
-    backend_value = backend if isinstance(backend, Backend) else Backend.coerce(backend)
+    localizer = normalize_localizer(localizer)
     cells = tuple(
         record
         if isinstance(record, PoseDirectionCell)
-        else PoseDirectionCell.from_dict(record, default_backend=backend_value)
+        else PoseDirectionCell.from_dict(record, default_localizer=localizer)
         for record in records
     )
     if model is not None:
         cells = enrich_pose_cells_from_model(cells, model)
     decisions, audits = plan_regions(
         cells,
-        backend_value,
+        localizer,
         thresholds=thresholds,
         capture=capture,
     )
     return {
         "schema_version": 2,
-        "backend": backend_value.value,
+        "localizer": localizer,
         "decisions": [decision.as_dict() for decision in decisions],
         "metric_audit_by_region": {
             region_id: report.as_dict() for region_id, report in audits.items()
@@ -53,7 +53,7 @@ def analyze_pose_cells(
 def attach_recapture_analysis(
     report: Mapping[str, Any],
     *,
-    backend: Backend | str = Backend.GENERIC,
+    localizer: str = "unspecified",
     pose_cells_key: str = "pose_cells",
     output_key: str = "recapture_analysis",
     thresholds: PlannerThresholds | None = None,
@@ -67,7 +67,7 @@ def attach_recapture_analysis(
     result = dict(report)
     result[output_key] = analyze_pose_cells(
         raw,
-        backend=backend,
+        localizer=localizer,
         thresholds=thresholds,
         capture=capture,
         model=model,

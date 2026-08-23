@@ -1,23 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/1122-gggggg/diagnosis_map/blob/main/schemas/localization_result.schema.json",
+  "$id": "https://github.com/1122-gggggg/mapping/blob/main/diagnosis/schemas/localization_result.schema.json",
   "title": "MapDoctor localization result",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "query",
-    "success",
-    "inliers",
-    "inlier_ratio",
-    "reproj_p90_px",
-    "hull_coverage",
-    "grid4_occupancy",
-    "positive_depth_ratio",
-    "pose_consensus"
+    "success"
   ],
   "properties": {
     "query": {"type": "string", "minLength": 1},
     "success": {"type": "boolean"},
+    "localizer": {
+      "description": "Arbitrary provenance label; it never selects diagnosis logic",
+      "type": "string",
+      "minLength": 1,
+      "default": "unspecified"
+    },
     "inliers": {"type": "integer", "minimum": 0},
     "inlier_ratio": {"type": "number", "minimum": 0, "maximum": 1},
     "reproj_p90_px": {
@@ -33,6 +32,13 @@
     "y": {"type": "number"},
     "z": {"type": "number"},
     "position_error_m": {"type": "number", "minimum": 0},
-    "rotation_error_deg": {"type": "number", "minimum": 0}
+    "rotation_error_deg": {"type": "number", "minimum": 0},
+    "metrics": {
+      "description": "Optional method-specific evidence retained as provenance",
+      "type": "object",
+      "additionalProperties": {
+        "type": ["number", "integer", "string", "boolean", "null"]
+      }
+    }
   }
 }

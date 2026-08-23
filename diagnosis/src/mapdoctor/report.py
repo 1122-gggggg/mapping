@@ -76,7 +76,7 @@ def write_analysis_bundle(
     rows = "".join(
         f"<tr><th>{html.escape(key)}</th><td>{html.escape(str(value))}</td></tr>"
         for key, value in [
-            ("Backend", metrics.source),
+            ("Map adapter", metrics.source),
             ("Format", metrics.format),
             ("Registered images", metrics.registered_images),
             ("3D points", metrics.points3d),

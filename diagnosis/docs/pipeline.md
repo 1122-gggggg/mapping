@@ -68,7 +68,7 @@ Runs only when `--logs` is given.
 
 This stage does not run a localizer. The CSV is an already-computed result log.
 It also does not prove that the log is held out: reports explicitly emit
-`heldout_provenance_verified=false`. S0/S9 content hashes or an equivalent external
+`heldout_provenance_verified=false`. Immutable content hashes or an equivalent external
 manifest must establish that contract before a release claim.
 
 If `--logs` is omitted, Stage 2 is skipped and `overall_status` is `MAP_SCREENED_LOCALIZATION_UNCHECKED` (or `MAP_SCREENING_FAILED`).
@@ -84,5 +84,5 @@ Exit 0 for `READY`, `READY_WITH_MAP_WARNINGS`, and
 localization target passed while one or more advisory map-health heuristics did not; the
 report preserves those warnings instead of letting them override downstream localization
 evidence. A structural-integrity failure can never receive this status, and an external
-S0/S9 contract must still prove the log is untouched held-out data.
+deployment contract must still prove the log is untouched held-out data.
 (`select-sessions` is outside this table and always exits 0 after writing.)

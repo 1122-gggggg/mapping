@@ -61,4 +61,4 @@ comparison/
 
 Because all input data is generated from source code, this example can run in CI and can be reproduced by users without accepting a dataset license or downloading large assets.
 
-For real-world scale and motivation, see `docs/CASE_STUDY_TARGET_SITE.md`. For external/localizer interoperability, see the hloc exporter in `docs/INTEGRATIONS.md`.
+For a real deployment, keep map/query/config identities immutable and export each localizer into the method-agnostic result contract described in the project README.

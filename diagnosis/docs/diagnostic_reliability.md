@@ -195,8 +195,8 @@ calibration/certification split.
 ### 6.1 Map-only screen
 
 ```bash
-sfm-qa analyze /path/to/sparse/0 --backend gluemap --output qa-out
-mapdoctor graph-fragility /path/to/sparse/0 --backend gluemap \
+sfm-qa analyze /path/to/map --map-adapter gluemap --output qa-out
+mapdoctor graph-fragility /path/to/map --map-adapter gluemap \
   --minimum-shared-landmarks 15 --output graph.json
 ```
 

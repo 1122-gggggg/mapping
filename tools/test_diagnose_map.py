@@ -35,11 +35,20 @@ def test_missing_diagnosis_install_message(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setitem(sys.modules, "sfm_qa", None)
     monkeypatch.setitem(sys.modules, "sfm_qa.pipeline", None)
     with pytest.raises(SystemExit, match="pip install") as excinfo:
-        diagnose_map.main(["--model", str(model), "--output", str(tmp_path / "out")])
+        diagnose_map.main(
+            [
+                "--model",
+                str(model),
+                "--map-adapter",
+                "colmap",
+                "--output",
+                str(tmp_path / "out"),
+            ]
+        )
     assert "Diagnosis packages" in str(excinfo.value)
 
 
-def test_nested_model_is_resolved(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_adapter_receives_unmodified_map_input(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     parent = tmp_path / "sparse"
     nested = parent / "0"
     nested.mkdir(parents=True)
@@ -48,10 +57,19 @@ def test_nested_model_is_resolved(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     captured: list[dict] = []
     _install_fake_analyze(monkeypatch, captured)
 
-    rc = diagnose_map.main(["--model", str(parent), "--output", str(output), "--backend", "colmap"])
+    rc = diagnose_map.main(
+        [
+            "--model",
+            str(parent),
+            "--output",
+            str(output),
+            "--map-adapter",
+            "colmap",
+        ]
+    )
 
     assert rc == 0
-    assert captured[0]["model_path"] == nested
+    assert captured[0]["model_path"] == parent
     assert captured[0]["backend"] == "colmap"
     assert captured[0]["output_dir"] == output
 
@@ -59,8 +77,17 @@ def test_nested_model_is_resolved(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 def test_missing_model_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: list[dict] = []
     _install_fake_analyze(monkeypatch, captured)
-    with pytest.raises(SystemExit, match="cameras"):
-        diagnose_map.main(["--model", str(tmp_path / "missing"), "--output", str(tmp_path / "out")])
+    with pytest.raises(SystemExit, match="does not exist"):
+        diagnose_map.main(
+            [
+                "--model",
+                str(tmp_path / "missing"),
+                "--map-adapter",
+                "colmap",
+                "--output",
+                str(tmp_path / "out"),
+            ]
+        )
     assert captured == []
 
 
@@ -70,5 +97,14 @@ def test_failed_status_exits_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     (model / "cameras.bin").touch()
     captured: list[dict] = []
     _install_fake_analyze(monkeypatch, captured, status="MAP_SCREENING_FAILED")
-    rc = diagnose_map.main(["--model", str(model), "--output", str(tmp_path / "out")])
+    rc = diagnose_map.main(
+        [
+            "--model",
+            str(model),
+            "--map-adapter",
+            "colmap",
+            "--output",
+            str(tmp_path / "out"),
+        ]
+    )
     assert rc == 1

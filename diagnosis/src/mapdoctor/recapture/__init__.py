@@ -13,18 +13,17 @@ from .planner import plan_regions
 from .profiles import CaptureGeometry, PlannerThresholds, profile_for
 from .types import (
     Availability,
-    Backend,
     CaptureMode,
     CapturePass,
     DecisionStatus,
     MetricValue,
     PoseDirectionCell,
     RecaptureDecision,
+    normalize_localizer,
 )
 
 __all__ = [
     "Availability",
-    "Backend",
     "CaptureGeometry",
     "CaptureMode",
     "CapturePass",
@@ -45,6 +44,7 @@ __all__ = [
     "enrich_pose_cells_from_model",
     "fim_summary",
     "map_producer_from_model",
+    "normalize_localizer",
     "plan_regions",
     "profile_for",
     "summarize_existing_data_counterfactual",

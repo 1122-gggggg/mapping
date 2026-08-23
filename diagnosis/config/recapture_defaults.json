@@ -18,8 +18,6 @@
     "min_view_direction_entropy": 0.35,
     "max_reprojection_p90_px": 3.0,
     "min_track_length_p50": 3.0,
-    "min_backend_stage_survival": 0.55,
-    "min_backend_association_ratio": 0.45,
     "min_condition_match_score": 0.45,
     "min_illumination_ratio": 0.35,
     "min_existing_data_repairability": 0.55,

@@ -8,9 +8,8 @@ from .profiles import (
     COMMON_INTEGRITY,
     COMMON_RECAPTURE_AUTHORIZATION,
     COMMON_RECOMMENDED,
-    PROFILES,
+    DEFAULT_PROFILE,
 )
-from .types import Backend
 
 
 @dataclass(frozen=True)
@@ -84,9 +83,8 @@ _SPECIAL = {
 
 _names = set(COMMON_INTEGRITY + COMMON_RECAPTURE_AUTHORIZATION + COMMON_DIAGNOSTIC + COMMON_RECOMMENDED)
 _names.update({"existing_data_repairability", "existing_data_counterfactual_complete"})
-for profile in PROFILES.values():
-    _names.update(profile.diagnostic_metrics)
-    _names.update(profile.recommended_metrics)
+_names.update(DEFAULT_PROFILE.diagnostic_metrics)
+_names.update(DEFAULT_PROFILE.recommended_metrics)
 
 _specs: list[MetricSpec] = []
 for name in sorted(_names):
@@ -126,19 +124,18 @@ def canonical_metric_name(name: str) -> str:
 
 
 def required_metrics(
-    backend: Backend | str,
+    localizer: str | None = None,
     *,
     hard_only: bool = False,
     map_producer: str | None = None,
 ) -> tuple[MetricSpec, ...]:
-    """Return metrics relevant to a localizer and optional map producer.
+    """Return method-agnostic metrics and optional map-producer diagnostics.
 
     GLUEMAP-only diagnostics are not reported as missing for COLMAP/GLOMAP
     maps. This function intentionally distinguishes map producer from the
-    downstream localization backend.
+    downstream localization method. ``localizer`` is provenance only.
     """
-    key = backend if isinstance(backend, Backend) else Backend.coerce(backend)
-    profile = PROFILES[key]
+    profile = DEFAULT_PROFILE
     names = set(
         profile.integrity_metrics
         + profile.recapture_authorization_metrics

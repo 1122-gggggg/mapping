@@ -26,6 +26,7 @@ class LocalizationThresholds:
     min_positive_depth_ratio: float = 1.0
     min_pose_consensus: float = 0.67
     min_strict_success_rate: float = 0.95
+    required_metrics: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.min_strict_success_rate, bool):
@@ -38,6 +39,23 @@ class LocalizationThresholds:
             ) from exc
         if not math.isfinite(rate) or not 0.0 <= rate <= 1.0:
             raise ValueError("min_strict_success_rate must be finite and in [0, 1]")
+        supported = {
+            "inliers",
+            "inlier_ratio",
+            "reproj_p90_px",
+            "hull_coverage",
+            "grid4_occupancy",
+            "positive_depth_ratio",
+            "pose_consensus",
+        }
+        required = tuple(str(name) for name in self.required_metrics)
+        unknown = set(required) - supported
+        if unknown:
+            raise ValueError(
+                "Unknown required localization metrics: "
+                + ", ".join(sorted(unknown))
+            )
+        object.__setattr__(self, "required_metrics", required)
 
 
 @dataclass(frozen=True)

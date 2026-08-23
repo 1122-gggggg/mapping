@@ -26,10 +26,14 @@ _ROLES_FALLBACK = (
 def _add_common(parser: argparse.ArgumentParser, *, logs_required: bool) -> None:
     parser.add_argument("model", type=Path, help="Sparse model directory, e.g. sparse/0")
     parser.add_argument(
+        "--map-adapter",
         "--backend",
-        choices=("colmap", "glomap", "gluemap"),
+        dest="backend",
         required=True,
-        help="Map producer interface used to load the reconstruction",
+        help=(
+            "Map input adapter: a built-in name or "
+            "package.module:AdapterClass"
+        ),
     )
     parser.add_argument(
         "--logs",

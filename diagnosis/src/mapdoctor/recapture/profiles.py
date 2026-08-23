@@ -5,9 +5,6 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .types import Backend
-
-
 @dataclass(frozen=True)
 class PlannerThresholds:
     """Project defaults, not universal SfM constants.
@@ -35,8 +32,6 @@ class PlannerThresholds:
     min_view_direction_entropy: float = 0.35
     max_reprojection_p90_px: float = 3.0
     min_track_length_p50: float = 3.0
-    min_backend_stage_survival: float = 0.55
-    min_backend_association_ratio: float = 0.45
     min_condition_match_score: float = 0.45
     min_illumination_ratio: float = 0.35
     min_existing_data_repairability: float = 0.55
@@ -60,8 +55,7 @@ class CaptureGeometry:
 
 
 @dataclass(frozen=True)
-class BackendProfile:
-    backend: Backend
+class LocalizerProfile:
     integrity_metrics: tuple[str, ...]
     recapture_authorization_metrics: tuple[str, ...]
     diagnostic_metrics: tuple[str, ...]
@@ -94,7 +88,7 @@ COMMON_RECAPTURE_AUTHORIZATION = (
 
 COMMON_DIAGNOSTIC = (
     "effective_landmark_count",
-    "backend_usable_landmark_ratio",
+    "localizer_usable_landmark_ratio",
     "view_support_score",
     "image_spatial_entropy",
     "bearing_isotropy",
@@ -213,124 +207,26 @@ COMMON_RECOMMENDED = (
 )
 
 
-PROFILES: dict[Backend, BackendProfile] = {
-    Backend.GENERIC: BackendProfile(
-        backend=Backend.GENERIC,
-        integrity_metrics=COMMON_INTEGRITY,
-        recapture_authorization_metrics=COMMON_RECAPTURE_AUTHORIZATION,
-        diagnostic_metrics=COMMON_DIAGNOSTIC,
-        recommended_metrics=COMMON_RECOMMENDED,
-        earliest_stage_order=("map_support", "geometry", "pnp"),
-        repair_actions={
-            "map_support": ("rebuild active reference set", "repair track payload"),
-            "geometry": ("targeted rematching", "retriangulation", "anchored local BA"),
-            "pnp": ("covariance-aware PnP", "multi-reference consensus"),
-        },
-    ),
-    Backend.HLOC: BackendProfile(
-        backend=Backend.HLOC,
-        integrity_metrics=COMMON_INTEGRITY,
-        recapture_authorization_metrics=COMMON_RECAPTURE_AUTHORIZATION,
-        diagnostic_metrics=COMMON_DIAGNOSTIC
-        + (
-            "retrieval_recall_at_k",
-            "retrieval_top1_margin",
-            "descriptor_matchability",
-            "retrieval_stage_success",
-            "verification_stage_survival",
-            "lifting_2d3d_ratio",
+DEFAULT_PROFILE = LocalizerProfile(
+    integrity_metrics=COMMON_INTEGRITY,
+    recapture_authorization_metrics=COMMON_RECAPTURE_AUTHORIZATION,
+    diagnostic_metrics=COMMON_DIAGNOSTIC,
+    recommended_metrics=COMMON_RECOMMENDED,
+    earliest_stage_order=("map_support", "localizer", "geometry"),
+    repair_actions={
+        "map_support": ("rebuild active reference set", "repair track payload"),
+        "localizer": (
+            "trace the localizer's own stages on the frozen query set",
+            "repair the earliest measured failing stage",
         ),
-        recommended_metrics=COMMON_RECOMMENDED,
-        earliest_stage_order=("retrieval", "verification", "lifting", "pnp", "geometry"),
-        repair_actions={
-            "retrieval": (
-                "rebuild/reindex retrieval descriptors",
-                "add existing operational-view references",
-                "increase reference-direction coverage without changing geometry",
-            ),
-            "verification": (
-                "targeted strong matching on weak/anchor and cross-route pairs",
-                "quarantine repeated-structure edges",
-            ),
-            "lifting": (
-                "repair observation-to-landmark associations",
-                "merge fragmented tracks under multi-view consistency gates",
-            ),
-            "pnp": ("spatially balanced PnP", "multi-reference pose consensus"),
-            "geometry": ("retriangulate existing observations", "anchored local BA"),
-        },
-    ),
-    Backend.EDM: BackendProfile(
-        backend=Backend.EDM,
-        integrity_metrics=COMMON_INTEGRITY,
-        recapture_authorization_metrics=COMMON_RECAPTURE_AUTHORIZATION,
-        diagnostic_metrics=COMMON_DIAGNOSTIC
-        + (
-            "retrieval_recall_at_k",
-            "retrieval_top1_margin",
-            "descriptor_matchability",
-            "dense_match_count_p50",
-            "dense_match_coverage",
-            "dense_match_confidence_p50",
-            "dense_to_3d_snap_ratio",
-            "edm_bundle_reference_coverage",
-            "correspondence_multimodality_risk",
-        ),
-        recommended_metrics=COMMON_RECOMMENDED,
-        earliest_stage_order=("retrieval", "dense_matching", "map_association", "pnp", "geometry"),
-        repair_actions={
-            "retrieval": (
-                "rebuild/reindex retrieval descriptors",
-                "add existing operational-view references to the EDM bundle",
-            ),
-            "dense_matching": (
-                "targeted EDM/RoMa matching on weak/anchor and cross-route pairs",
-                "inspect spatial coverage and confidence instead of raw match count only",
-            ),
-            "map_association": (
-                "repair dense-to-track snapping",
-                "rebuild EDM observation/track bundle",
-                "add bridge tracks before creating new geometry",
-            ),
-            "pnp": ("reject multimodal pose hypotheses", "multi-reference consensus"),
-            "geometry": ("retriangulate existing observations", "anchored local BA"),
-        },
-    ),
-    Backend.SCR: BackendProfile(
-        backend=Backend.SCR,
-        integrity_metrics=COMMON_INTEGRITY,
-        recapture_authorization_metrics=COMMON_RECAPTURE_AUTHORIZATION,
-        diagnostic_metrics=COMMON_DIAGNOSTIC
-        + (
-            "scene_coordinate_valid_ratio",
-            "scene_coordinate_reprojection_consistency",
-            "scene_coordinate_spatial_coverage",
-            "scr_confidence_p50",
-            "scr_ood_score",
-            "scr_pnp_inlier_ratio",
-        ),
-        recommended_metrics=COMMON_RECOMMENDED,
-        earliest_stage_order=("scr_prediction", "scr_geometry", "pnp", "geometry"),
-        repair_actions={
-            "scr_prediction": (
-                "add condition/view-balanced training references",
-                "retrain or fine-tune the scene-coordinate model",
-                "apply OOD gating",
-            ),
-            "scr_geometry": (
-                "enforce scene-coordinate reprojection consistency",
-                "increase valid-coordinate image coverage",
-            ),
-            "pnp": ("confidence-weighted PnP", "spatial and cheirality gates"),
-            "geometry": ("repair the underlying SfM supervision map",),
-        },
-    ),
-}
+        "geometry": ("targeted rematching", "retriangulation", "anchored local BA"),
+    },
+)
 
 
-def profile_for(backend: Backend | str) -> BackendProfile:
-    key = backend if isinstance(backend, Backend) else Backend.coerce(backend)
-    return PROFILES[key]
+def profile_for(localizer: str | None = None) -> LocalizerProfile:
+    """Return one method-agnostic contract; ``localizer`` is provenance only."""
+    return DEFAULT_PROFILE
 
 
 def _replace_dataclass(instance: Any, values: Mapping[str, Any], section: str) -> Any:

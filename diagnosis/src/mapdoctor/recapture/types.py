@@ -17,24 +17,10 @@ class Availability(str, Enum):
     NOT_APPLICABLE = "not_applicable"
 
 
-class Backend(str, Enum):
-    """Downstream localization backend, not the map producer."""
-
-    GENERIC = "generic"
-    HLOC = "hloc"
-    EDM = "edm"
-    SCR = "scr"
-
-    @classmethod
-    def coerce(cls, value: str | None) -> "Backend":
-        token = (value or "generic").strip().lower().replace("-", "_")
-        if token in {"hloc", "hloc_sparse", "sparse", "superpoint_hloc"}:
-            return cls.HLOC
-        if token in {"edm", "hloc_edm", "dense", "dense_matching"}:
-            return cls.EDM
-        if token in {"scr", "scene_coordinate_regression", "rscore", "ace"}:
-            return cls.SCR
-        return cls.GENERIC
+def normalize_localizer(value: str | None) -> str:
+    """Keep a localizer name as provenance, never as a logic selector."""
+    token = str(value or "unspecified").strip()
+    return token or "unspecified"
 
 
 class DecisionStatus(str, Enum):
@@ -170,7 +156,7 @@ class PoseDirectionCell:
     position: tuple[float, float, float]
     yaw_deg: float
     pitch_deg: float
-    backend: Backend
+    localizer: str
     metrics: Mapping[str, MetricValue] = field(default_factory=dict)
     root_causes: tuple[str, ...] = ()
     condition: str = "default"
@@ -184,7 +170,12 @@ class PoseDirectionCell:
     map_producer: str = "unknown"
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any], *, default_backend: Backend = Backend.GENERIC) -> "PoseDirectionCell":
+    def from_dict(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        default_localizer: str = "unspecified",
+    ) -> "PoseDirectionCell":
         if not isinstance(data, Mapping):
             raise ValueError("pose-direction record must be an object")
 
@@ -220,7 +211,9 @@ class PoseDirectionCell:
             data.get("map_up_vector", data.get("map_up")),
             "map_up_vector",
         )
-        backend = Backend.coerce(str(data.get("backend", default_backend.value)))
+        localizer = normalize_localizer(
+            data.get("localizer", data.get("backend", default_localizer))
+        )
 
         def optional_float(*names: str) -> float | None:
             for name in names:
@@ -247,7 +240,7 @@ class PoseDirectionCell:
             position=position,
             yaw_deg=yaw_deg,
             pitch_deg=pitch_deg,
-            backend=backend,
+            localizer=localizer,
             metrics=metrics,
             root_causes=causes,
             condition=str(data.get("condition", "default")),
@@ -274,7 +267,7 @@ class PoseDirectionCell:
             "position": list(self.position),
             "yaw_deg": self.yaw_deg,
             "pitch_deg": self.pitch_deg,
-            "backend": self.backend.value,
+            "localizer": self.localizer,
             "map_producer": self.map_producer,
             "condition": self.condition,
             "root_causes": list(self.root_causes),
@@ -319,7 +312,7 @@ class CapturePass:
     poses: tuple[CapturePose, ...]
     rationale: tuple[str, ...]
     expected_gain: Mapping[str, MetricValue]
-    backend_actions: tuple[str, ...] = ()
+    localizer_actions: tuple[str, ...] = ()
     acceptance_gates: tuple[str, ...] = ()
     safety_status: Availability = Availability.UNAVAILABLE
     safety_reason: str = "collision/geofence/dynamics not checked"
@@ -335,7 +328,7 @@ class CapturePass:
             "poses": [pose.as_dict() for pose in self.poses],
             "rationale": list(self.rationale),
             "expected_gain": {name: value.as_dict() for name, value in sorted(self.expected_gain.items())},
-            "backend_actions": list(self.backend_actions),
+            "localizer_actions": list(self.localizer_actions),
             "acceptance_gates": list(self.acceptance_gates),
             "safety_status": self.safety_status.value,
             "safety_reason": self.safety_reason,
@@ -346,7 +339,7 @@ class CapturePass:
 @dataclass(frozen=True)
 class RecaptureDecision:
     region_id: str
-    backend: Backend
+    localizer: str
     status: DecisionStatus
     recapture_required: bool
     confidence: float
@@ -361,7 +354,7 @@ class RecaptureDecision:
     def as_dict(self) -> dict[str, Any]:
         return {
             "region_id": self.region_id,
-            "backend": self.backend.value,
+            "localizer": self.localizer,
             "status": self.status.value,
             "recapture_required": self.recapture_required,
             "confidence": self.confidence,

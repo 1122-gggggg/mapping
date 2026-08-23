@@ -6,12 +6,14 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from mapdoctor.adapters import get_adapter
 from scipy.spatial.transform import Rotation
+from sfm_qa.bridge import map_model_to_map_data
 
 from .diagnose import diagnose_pose, thresholds_from_dict
 from .evidence import load_build_evidence
 from .heatmap import HeatmapConfig, build_heatmap, save_heatmap
-from .io import load_gluemap, write_json
+from .io import write_json
 from .logs import LocalizationHistory
 from .matchability import (
     matchability_config_from_dict,
@@ -42,13 +44,13 @@ def main(argv: list[str] | None = None) -> int:
     thresholds = thresholds_from_dict(cfg.get("thresholds", {}))
 
     if args.command == "inspect":
-        m = load_gluemap(args.model)
+        m = _load_map(args)
         result = map_health_summary(m)
         _emit(result, args.output)
         return 0
 
     if args.command == "analyze":
-        m = load_gluemap(args.model)
+        m = _load_map(args)
         region_cfg = dict(cfg.get("weak_regions", {}))
         for key, value in {
             "cluster_radius": args.cluster_radius,
@@ -151,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "matchability":
-        m = load_gluemap(args.model)
+        m = _load_map(args)
         match_cfg = matchability_config_from_dict(cfg.get("matchability", {}))
         table = load_matchability_source(args.events, m, config=match_cfg)
         path = save_landmark_matchability(args.output, table)
@@ -169,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
 
-    m = load_gluemap(args.model)
+    m = _load_map(args)
     history = LocalizationHistory.load(args.logs) if getattr(args, "logs", None) else None
     occlusion, illumination = _environment(args)
     match_cfg = matchability_config_from_dict(cfg.get("matchability", {}))
@@ -272,16 +274,17 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="sfm-diagnosis",
-        description="GlueMap-first diagnostics for SfM localizability and map repair.",
+        description="Adapter-based diagnostics for map localizability and repair.",
     )
     p.add_argument("--config", help="YAML config; defaults are built in")
     sub = p.add_subparsers(dest="command", required=True)
 
     inspect = sub.add_parser(
         "inspect",
-        help="Audit global GlueMap/COLMAP reconstruction health",
+        help="Audit global reconstruction health through a map adapter",
     )
     inspect.add_argument("model")
+    _add_map_adapter_arg(inspect)
     inspect.add_argument("--output", help="write JSON instead of stdout")
 
     analyze = sub.add_parser(
@@ -289,6 +292,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Locate weak SfM regions, explain root causes, and generate a repair plan",
     )
     analyze.add_argument("model")
+    _add_map_adapter_arg(analyze)
     analyze.add_argument("--output", required=True, help="output directory")
     analyze.add_argument(
         "--database",
@@ -378,7 +382,8 @@ def _parser() -> argparse.ArgumentParser:
         help="Build a per-landmark historical matchability table from correspondence events",
     )
     matchability.add_argument("events", help="CSV/JSON/JSONL query-landmark events")
-    matchability.add_argument("--model", required=True, help="GlueMap/COLMAP model")
+    matchability.add_argument("--model", required=True, help="map input")
+    _add_map_adapter_arg(matchability)
     matchability.add_argument("--output", required=True, help="output directory")
 
 
@@ -394,6 +399,7 @@ def _parser() -> argparse.ArgumentParser:
 
     heat = sub.add_parser("heatmap", help="Build position/view localizability heatmaps")
     heat.add_argument("model")
+    _add_map_adapter_arg(heat)
     heat.add_argument("--output", required=True, help="output directory")
     heat.add_argument("--logs")
     heat.add_argument("--spacing", type=float)
@@ -426,8 +432,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def _add_model_pose_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("model")
+    _add_map_adapter_arg(p)
     g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--image-id", type=int, help="use a registered GlueMap image pose")
+    g.add_argument("--image-id", type=int, help="use a registered map image pose")
     g.add_argument(
         "--pose",
         nargs=7,
@@ -435,6 +442,21 @@ def _add_model_pose_args(p: argparse.ArgumentParser) -> None:
         metavar=("X", "Y", "Z", "QX", "QY", "QZ", "QW"),
         help="camera center + camera-to-world quaternion (xyzw)",
     )
+
+
+def _add_map_adapter_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--map-adapter",
+        "--backend",
+        dest="map_adapter",
+        required=True,
+        help="Map input adapter: a built-in name or package.module:AdapterClass",
+    )
+
+
+def _load_map(args: argparse.Namespace) -> MapData:
+    model = get_adapter(args.map_adapter).load(args.model)
+    return map_model_to_map_data(model)
 
 
 def _add_history_environment_args(p: argparse.ArgumentParser) -> None:

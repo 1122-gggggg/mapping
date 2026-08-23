@@ -6,12 +6,14 @@ from mapdoctor.recapture.audit import AuditStatus, audit_cells
 from mapdoctor.recapture.planner import plan_regions
 from mapdoctor.recapture.types import (
     Availability,
-    Backend,
     CaptureMode,
     DecisionStatus,
     MetricValue,
     PoseDirectionCell,
 )
+
+
+LOCALIZER = "arbitrary-localizer"
 
 
 def _metrics(
@@ -62,7 +64,7 @@ def _cells(
             (10.0, 20.0, 3.0),
             0.0,
             0.0,
-            Backend.EDM,
+            LOCALIZER,
             metrics,
             directional_health=health[0],
             route_tangent=route_tangent,
@@ -75,7 +77,7 @@ def _cells(
             (10.0, 20.0, 3.0),
             90.0,
             0.0,
-            Backend.EDM,
+            LOCALIZER,
             metrics,
             directional_health=health[1],
             route_tangent=route_tangent,
@@ -88,7 +90,7 @@ def _cells(
 def test_estimated_hard_fim_cannot_authorize_recapture() -> None:
     metrics = _metrics(weak=True, repairability=0.1)
     metrics["fim_rank"] = MetricValue(6, Availability.ESTIMATED)
-    report = audit_cells(_cells("r", metrics), Backend.EDM)
+    report = audit_cells(_cells("r", metrics), LOCALIZER)
     assert report.item("fim_rank").status == AuditStatus.ESTIMATED_ONLY
     assert not report.authorization_ready
 
@@ -96,7 +98,7 @@ def test_estimated_hard_fim_cannot_authorize_recapture() -> None:
 def test_orientation_sensitive_region_uses_navigation_policy() -> None:
     decisions, _ = plan_regions(
         _cells("orient", _metrics(repairability=0.1), health=(0.95, 0.2)),
-        Backend.EDM,
+        LOCALIZER,
     )
     assert decisions[0].status == DecisionStatus.NAVIGATION_POLICY_ONLY
     assert not decisions[0].recapture_required
@@ -109,26 +111,38 @@ def test_orientation_sensitive_region_requires_holdout_evidence() -> None:
     del metrics["localization_success_rate"]
     decisions, _ = plan_regions(
         _cells("orient-no-holdout", metrics, health=(0.95, 0.2)),
-        Backend.EDM,
+        LOCALIZER,
     )
     assert decisions[0].status == DecisionStatus.EVIDENCE_CAPTURE_ONLY
     assert not decisions[0].recapture_required
 
 
-def test_backend_association_failure_repairs_existing_data_first() -> None:
+def test_method_specific_metric_does_not_select_diagnosis_logic() -> None:
     decisions, _ = plan_regions(
         _cells("backend", _metrics(weak=True, snap=0.2)),
-        Backend.EDM,
+        LOCALIZER,
     )
     assert decisions[0].status == DecisionStatus.EXISTING_DATA_REPAIR_FIRST
-    assert decisions[0].existing_data_repairability == pytest.approx(0.9)
-    assert any("dense-to-track" in action for action in decisions[0].non_capture_actions)
+    assert decisions[0].existing_data_repairability is None
+    assert not any("dense" in action.lower() for action in decisions[0].non_capture_actions)
+
+
+def test_localizer_label_is_provenance_only() -> None:
+    cells = _cells("agnostic", _metrics(weak=True, repairability=0.1))
+
+    first, _ = plan_regions(cells, "method-a")
+    second, _ = plan_regions(cells, "method-b")
+
+    assert first[0].status == second[0].status
+    assert first[0].capture_passes == second[0].capture_passes
+    assert first[0].localizer == "method-a"
+    assert second[0].localizer == "method-b"
 
 
 def test_measured_low_repairability_is_not_overridden_by_stage_heuristics() -> None:
     decisions, _ = plan_regions(
         _cells("measured", _metrics(weak=True, snap=0.2, repairability=0.1)),
-        Backend.EDM,
+        LOCALIZER,
     )
     decision = decisions[0]
     assert decision.status == DecisionStatus.TARGETED_RECAPTURE_REQUIRED
@@ -139,7 +153,7 @@ def test_measured_low_repairability_is_not_overridden_by_stage_heuristics() -> N
 def test_unknown_repairability_never_authorizes_recapture() -> None:
     decisions, audits = plan_regions(
         _cells("unknown", _metrics(weak=True)),
-        Backend.EDM,
+        LOCALIZER,
     )
     decision = decisions[0]
     assert decision.status == DecisionStatus.EXISTING_DATA_REPAIR_FIRST
@@ -152,7 +166,7 @@ def test_unknown_repairability_never_authorizes_recapture() -> None:
 def test_incomplete_counterfactual_cannot_authorize_recapture() -> None:
     metrics = _metrics(weak=True, repairability=0.1)
     metrics["existing_data_counterfactual_complete"] = MetricValue(False, Availability.DERIVED)
-    decisions, audits = plan_regions(_cells("incomplete", metrics), Backend.EDM)
+    decisions, audits = plan_regions(_cells("incomplete", metrics), LOCALIZER)
     assert not audits["incomplete"].authorization_ready
     assert decisions[0].status == DecisionStatus.EVIDENCE_CAPTURE_ONLY
     assert not decisions[0].recapture_required
@@ -162,7 +176,7 @@ def test_incomplete_counterfactual_cannot_authorize_recapture() -> None:
 def test_intrinsic_weakness_generates_targeted_diverse_capture() -> None:
     decisions, audits = plan_regions(
         _cells("recap", _metrics(weak=True, repairability=0.1)),
-        Backend.EDM,
+        LOCALIZER,
     )
     decision = decisions[0]
     assert audits["recap"].authorization_ready
@@ -189,7 +203,7 @@ def test_intrinsic_weakness_generates_targeted_diverse_capture() -> None:
 def test_capture_offsets_follow_route_not_world_x_axis() -> None:
     decisions, _ = plan_regions(
         _cells("route", _metrics(weak=True, repairability=0.1), route_tangent=(0.0, 1.0, 0.0)),
-        Backend.EDM,
+        LOCALIZER,
     )
     anchor = next(
         capture_pass for capture_pass in decisions[0].capture_passes if capture_pass.mode == CaptureMode.ANCHOR_BRIDGE
@@ -218,7 +232,7 @@ def test_non_z_up_map_uses_explicit_up_vector() -> None:
             route_tangent=(1.0, 0.0, 0.0),
             map_up_vector=(0.0, 1.0, 0.0),
         ),
-        Backend.EDM,
+        LOCALIZER,
     )
     lateral = next(
         capture_pass
@@ -242,7 +256,7 @@ def test_missing_route_frame_does_not_invent_capture_coordinates() -> None:
                 route_tangent=route_tangent,
                 map_up_vector=map_up_vector,
             ),
-            Backend.EDM,
+            LOCALIZER,
         )
         decision = decisions[0]
         assert decision.status == DecisionStatus.TARGETED_RECAPTURE_REQUIRED
@@ -254,7 +268,7 @@ def test_missing_route_frame_does_not_invent_capture_coordinates() -> None:
 def test_non_gluemap_map_does_not_require_gluemap_diagnostics() -> None:
     report = audit_cells(
         _cells("colmap", _metrics(repairability=0.1), producer="colmap"),
-        Backend.EDM,
+        LOCALIZER,
     )
     assert report.item("gluemap_retrieval_degree_p50") is None
 
@@ -262,7 +276,7 @@ def test_non_gluemap_map_does_not_require_gluemap_diagnostics() -> None:
 def test_gluemap_map_enables_gluemap_diagnostic_audit() -> None:
     report = audit_cells(
         _cells("gluemap", _metrics(repairability=0.1), producer="gluemap"),
-        Backend.EDM,
+        LOCALIZER,
     )
     item = report.item("gluemap_retrieval_degree_p50")
     assert item is not None
@@ -287,4 +301,3 @@ def test_pose_cell_parses_false_operational_direction() -> None:
         }
     )
     assert cell.operational_direction is False
-

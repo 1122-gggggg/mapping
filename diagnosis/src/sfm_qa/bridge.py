@@ -125,12 +125,16 @@ def mapdoctor_rows_to_history_rows(results: list[QueryLocalizationResult]) -> li
             "y": float(result.y),
             "z": float(result.z),
             "success": result.success,
-            "pnp_inliers": int(result.inliers),
-            "inlier_ratio": float(result.inlier_ratio),
-            "grid_occupancy": int(result.grid4_occupancy),
-            "hull_coverage": float(result.hull_coverage),
-            "positive_depth_ratio": float(result.positive_depth_ratio),
         }
+        for source, target, cast in (
+            (result.inliers, "pnp_inliers", int),
+            (result.inlier_ratio, "inlier_ratio", float),
+            (result.grid4_occupancy, "grid_occupancy", int),
+            (result.hull_coverage, "hull_coverage", float),
+            (result.positive_depth_ratio, "positive_depth_ratio", float),
+        ):
+            if source is not None:
+                row[target] = cast(source)
         if result.reproj_p90_px is not None:
             row["reproj_p90"] = float(result.reproj_p90_px)
         rows.append(row)

@@ -1,8 +1,11 @@
 import shutil
+import sys
 from pathlib import Path
+from types import ModuleType
 
 from mapdoctor import ColmapAdapter, GlomapAdapter, GluemapAdapter, load_colmap, load_glomap, load_gluemap
-from mapdoctor.adapters import get_adapter, list_adapters
+from mapdoctor.adapters import AdapterInspection, MapAdapter, get_adapter, list_adapters
+from mapdoctor.cli import main as mapdoctor_main
 from mapdoctor.metrics import analyze
 
 FIXTURE = Path(__file__).parent / "fixtures" / "colmap_text"
@@ -23,6 +26,42 @@ def test_convenience_loaders_preserve_provenance():
     assert load_colmap(FIXTURE).source == "colmap"
     assert load_glomap(FIXTURE).source == "glomap"
     assert load_gluemap(FIXTURE).source == "gluemap"
+
+
+def test_external_adapter_can_run_full_diagnosis_without_core_changes(monkeypatch, tmp_path):
+    class ExternalAdapter(MapAdapter):
+        backend = "external"
+        display_name = "External test map"
+
+        def inspect(self, path):
+            return AdapterInspection(self.backend, Path(path), "external")
+
+        def load(self, path):
+            model = ColmapAdapter().load(path)
+            model.source = self.backend
+            model.format = "external"
+            return model
+
+    module = ModuleType("mapdoctor_test_external_adapter")
+    module.ExternalAdapter = ExternalAdapter
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    adapter = get_adapter(f"{module.__name__}:ExternalAdapter")
+
+    assert isinstance(adapter, ExternalAdapter)
+    assert adapter.load(FIXTURE).format == "external"
+    output = tmp_path / "external-report"
+    assert mapdoctor_main(
+        [
+            "analyze",
+            str(FIXTURE),
+            "--map-adapter",
+            f"{module.__name__}:ExternalAdapter",
+            "--output",
+            str(output),
+        ]
+    ) == 0
+    assert (output / "report.json").exists()
 
 
 def test_gluemap_sparse_only_provenance():

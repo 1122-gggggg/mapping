@@ -24,10 +24,14 @@ def _add_map_args(parser: argparse.ArgumentParser, include_backend: bool) -> Non
     )
     if include_backend:
         parser.add_argument(
+            "--map-adapter",
             "--backend",
-            choices=list_adapters(),
+            dest="backend",
             required=True,
-            help="Map producer interface",
+            help=(
+                "Map input adapter: a built-in name or "
+                "package.module:AdapterClass"
+            ),
         )
     parser.add_argument(
         "--config",
@@ -47,8 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mapdoctor",
         description=(
-            "Diagnose, benchmark, and regression-test COLMAP/GLOMAP/GLUEMAP "
-            "localization maps."
+            "Diagnose, benchmark, and regression-test maps through a common "
+            "MapModel contract."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -217,9 +221,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     graph_parser.add_argument("model", type=Path)
     graph_parser.add_argument(
+        "--map-adapter",
         "--backend",
-        choices=list_adapters(),
+        dest="backend",
         required=True,
+        help="Map input adapter: a built-in name or package.module:AdapterClass",
     )
     graph_parser.add_argument(
         "--minimum-shared-landmarks",
