@@ -46,6 +46,27 @@ def _empty_histogram() -> dict[str, int]:
     return {name: 0 for name in MOTION_CLASSES}
 
 
+def _finite_median(rows: list[dict[str, Any]], key: str, *, require_tracks: bool = False) -> float | None:
+    values: list[float] = []
+    for row in rows:
+        if require_tracks and int(row.get("tracked_count") or 0) < int(
+            MOTION_THRESHOLDS["minimum_tracked_features"]
+        ):
+            continue
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(number):
+            values.append(number)
+    if not values:
+        return None
+    return float(np.median(np.asarray(values, dtype=float)))
+
+
 def _result(
     histogram: Mapping[str, int],
     *,
@@ -62,14 +83,34 @@ def _result(
     dominant = "unproven"
     if total:
         dominant = max(hist.items(), key=lambda item: (item[1], item[0] == "unproven"))[0]
-    payload = {
+    measured_rows = list(rows or ())
+    payload: dict[str, Any] = {
         "histogram": hist,
         "classes": hist,
         "intervals": total,
         "dominant": dominant,
         "parallax_ratio": (hist["parallax"] / total) if total else 0.0,
+        "low_parallax_ratio": (hist["low_parallax"] / total) if total else 0.0,
+        "hover_ratio": (hist["hover"] / total) if total else 0.0,
+        "pure_rotation_ratio": (hist["pure_rotation"] / total) if total else 0.0,
+        "fast_motion_ratio": (hist["fast_motion"] / total) if total else 0.0,
+        "unproven_ratio": (hist["unproven"] / total) if total else 1.0,
+        "epipolar_outlier_ratio_median": _finite_median(
+            measured_rows, "epipolar_outlier_ratio", require_tracks=True
+        ),
+        "essential_inlier_ratio_median": _finite_median(
+            measured_rows, "essential_inlier_ratio", require_tracks=True
+        ),
+        "homography_inlier_ratio_median": _finite_median(
+            measured_rows, "homography_inlier_ratio", require_tracks=True
+        ),
+        "flow_median_px": _finite_median(measured_rows, "flow_median_px", require_tracks=True),
+        "flow_mad_px": _finite_median(measured_rows, "flow_mad_px", require_tracks=True),
+        "motion_parallax_median_px": _finite_median(
+            measured_rows, "parallax_px", require_tracks=True
+        ),
         "reasons": reasons,
-        "rows": list(rows or ()),
+        "rows": measured_rows,
     }
     payload.update(hist)
     return payload
@@ -137,21 +178,29 @@ def _default_camera_matrix(width: int, height: int) -> np.ndarray:
     )
 
 
+def _base_evidence(*, blur: float = 0.0) -> dict[str, Any]:
+    return {
+        "tracked_count": 0,
+        "flow_median_px": 0.0,
+        "flow_mad_px": 0.0,
+        "blur_variance": float(blur),
+        "homography_inliers": 0,
+        "homography_inlier_ratio": None,
+        "essential_inliers": 0,
+        "essential_inlier_ratio": None,
+        "epipolar_outlier_ratio": None,
+        "rotation_degrees": 0.0,
+        "parallax_px": 0.0,
+    }
+
+
 def _motion_evidence(
     previous: np.ndarray,
     current: np.ndarray,
     camera_matrix: np.ndarray,
 ) -> dict[str, Any]:
     if cv2 is None:
-        return {
-            "tracked_count": 0,
-            "flow_median_px": 0.0,
-            "blur_variance": 0.0,
-            "homography_inliers": 0,
-            "essential_inliers": 0,
-            "rotation_degrees": 0.0,
-            "parallax_px": 0.0,
-        }
+        return _base_evidence()
     corners = cv2.goodFeaturesToTrack(
         previous,
         maxCorners=int(MOTION_THRESHOLDS["feature_max_corners"]),
@@ -160,15 +209,7 @@ def _motion_evidence(
         blockSize=7,
     )
     blur = float(cv2.Laplacian(current, cv2.CV_64F).var())
-    empty = {
-        "tracked_count": 0,
-        "flow_median_px": 0.0,
-        "blur_variance": blur,
-        "homography_inliers": 0,
-        "essential_inliers": 0,
-        "rotation_degrees": 0.0,
-        "parallax_px": 0.0,
-    }
+    empty = _base_evidence(blur=blur)
     if corners is None or len(corners) == 0:
         return empty
     tracked, status, _ = cv2.calcOpticalFlowPyrLK(
@@ -188,7 +229,11 @@ def _motion_evidence(
     count = len(previous_xy)
     if not count:
         return empty
+
     flow = np.linalg.norm(current_xy - previous_xy, axis=1)
+    flow_median = float(np.median(flow))
+    flow_mad = float(np.median(np.abs(flow - flow_median)))
+
     homography = None
     homography_mask = None
     if count >= 4:
@@ -198,14 +243,20 @@ def _motion_evidence(
             cv2.RANSAC,
             float(MOTION_THRESHOLDS["ransac_threshold_px"]),
         )
-    homography_inliers = int(homography_mask.sum()) if homography_mask is not None else 0
-    parallax = float(np.median(flow))
+    # OpenCV masks can be 0/1 or 0/255. count_nonzero is the only safe count.
+    homography_inliers = int(np.count_nonzero(homography_mask)) if homography_mask is not None else 0
+    homography_ratio = (homography_inliers / count) if count else None
+
+    parallax = flow_median
     if homography is not None and homography_mask is not None and homography_inliers:
-        predicted = cv2.perspectiveTransform(previous_xy.reshape(-1, 1, 2), homography).reshape(-1, 2)
+        predicted = cv2.perspectiveTransform(
+            previous_xy.reshape(-1, 1, 2), homography
+        ).reshape(-1, 2)
         residual = np.linalg.norm(current_xy - predicted, axis=1)
         inlier = homography_mask.reshape(-1).astype(bool)
         if inlier.any():
             parallax = float(np.median(residual[inlier]))
+
     essential_mask = None
     rotation_degrees = 0.0
     if count >= 5:
@@ -231,12 +282,24 @@ def _motion_evidence(
                 rotation_degrees = float(np.degrees(np.arccos(cosine)))
         except cv2.error:
             essential_mask = None
+
+    essential_inliers = int(np.count_nonzero(essential_mask)) if essential_mask is not None else 0
+    essential_ratio = (essential_inliers / count) if count else None
+    epipolar_outlier = (
+        max(0.0, min(1.0, 1.0 - essential_ratio))
+        if essential_ratio is not None and essential_inliers > 0
+        else None
+    )
     return {
         "tracked_count": count,
-        "flow_median_px": float(np.median(flow)),
+        "flow_median_px": flow_median,
+        "flow_mad_px": flow_mad,
         "blur_variance": blur,
         "homography_inliers": homography_inliers,
-        "essential_inliers": int(essential_mask.sum()) if essential_mask is not None else 0,
+        "homography_inlier_ratio": homography_ratio,
+        "essential_inliers": essential_inliers,
+        "essential_inlier_ratio": essential_ratio,
+        "epipolar_outlier_ratio": epipolar_outlier,
         "rotation_degrees": rotation_degrees,
         "parallax_px": parallax,
     }
@@ -284,15 +347,9 @@ def scan_video(path: str | Path, interval_seconds: float = 0.5) -> dict[str, Any
             height, width = gray.shape[:2]
             camera = _default_camera_matrix(int(width), int(height))
             if previous_gray is None:
-                evidence = {
-                    "tracked_count": 0,
-                    "flow_median_px": 0.0,
-                    "blur_variance": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
-                    "homography_inliers": 0,
-                    "essential_inliers": 0,
-                    "rotation_degrees": 0.0,
-                    "parallax_px": 0.0,
-                }
+                evidence = _base_evidence(
+                    blur=float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                )
             else:
                 evidence = _motion_evidence(previous_gray, gray, camera)
             classified = classify_interval(evidence)
