@@ -18,6 +18,13 @@ from .objective import (
     efficiency_coverage,
     efficiency_info,
 )
+from .prebuild import (
+    camera_triplet_scores,
+    motion_profile_distance,
+    propose_prebuild_set,
+    video_admission_score,
+    video_risk,
+)
 from .select_core import connection_is_admissible, greedy_select_core, seed_session
 from .types import (
     ROLES,
@@ -55,4 +62,9 @@ __all__ = [
     "efficiency_info",
     "classify_leftover_vs_frozen_base",
     "classify_session_edge",
+    "camera_triplet_scores",
+    "motion_profile_distance",
+    "propose_prebuild_set",
+    "video_admission_score",
+    "video_risk",
 ]
