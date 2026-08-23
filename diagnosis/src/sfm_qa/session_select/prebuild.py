@@ -334,7 +334,12 @@ def propose_prebuild_set(
         return covered
 
     remaining = [sid for sid in eligible if sid != seed]
-    budget = min(max_sessions, len(eligible))
+    # Preserve an untouched validation candidate whenever the pool is large enough.
+    # This is proposal-stage isolation only; the final S0 corpus lock still owns
+    # the authoritative build/test split and content-hash proof.
+    reserve = validation_count if len(eligible) > min_base else 0
+    proposal_capacity = max(min_base, len(eligible) - max(0, reserve))
+    budget = min(max_sessions, proposal_capacity, len(eligible))
     if not graph_available:
         budget = min(budget, max_no_graph)
 
