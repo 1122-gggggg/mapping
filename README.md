@@ -103,19 +103,6 @@ python sites/target_site/tools/run_mapdoctor_qa.py \
 
 ---
 
-## 場域狀態
-
-| 場域 | 地圖 | 結果 | 可交付？ |
-|---|---|---|---|
-| **target_site** | `runs/target_site_v1/final_model` | 1390/1414 registered、388,353 pts、1.4436 px；S0–S9 + G6.1–G6.4 全過 | ✅ 唯一通過完整 release 合約 |
-| **football_field** | `runs/ff_a1/final_model` | 509/515、82,264 pts、1.5657 px | ⚠️ 走簡化 route A，**沒有 held-out** |
-| **fuhe_bridge** | `runs/fuhe_bridge_probe_v5/.../final_fixed` | 239/240、0.9265 px | ❌ **G6.1 鬼影幾何未過**。是研究紀錄，不是定位圖 |
-
-fuhe_bridge 的 `tools/` 裡多了 `probe_hotspot_loftr.py` 與
-`audit_hotspot_repair_reachability.py`，就是在追那個鬼影。
-
----
-
 ## 踩過的坑（這些是這套流程存在的理由）
 
 **MegaLoc 對「同一條航線的正反向」是可測量地盲目的。**
