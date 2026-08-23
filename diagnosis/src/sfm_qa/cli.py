@@ -54,6 +54,15 @@ def _add_select_sessions(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--videos", type=Path, required=True, help="Directory of input videos")
     parser.add_argument("--output", type=Path, required=True, help="Write Stage 0 selection reports here")
     parser.add_argument("--maps", type=Path, default=None, help="Optional existing maps directory")
+    parser.add_argument(
+        "--vpr-candidates",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON session-pair retrieval candidates. Used only to rank "
+            "pre-build geometry verification; never treated as a geometric edge."
+        ),
+    )
     parser.add_argument("--config", type=Path, default=None, help="Optional session_select YAML overlay")
 
 
@@ -73,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(loc_p, logs_required=True)
     select_p = sub.add_parser(
         "select-sessions",
-        help="Stage 0: assign multi-session roles before initial SfM (advisory)",
+        help="Stage 0: propose videos, then assign verified multi-session roles",
     )
     _add_select_sessions(select_p)
     return parser
@@ -136,7 +145,21 @@ def _iter_role_values(report: Any) -> list[str]:
 
 
 def _print_select_summary(report: Any, output_dir: Path) -> None:
-    print("=== Stage 0: session selection ===")
+    print("=== Stage 0A: pre-build proposal ===")
+    if isinstance(report, Mapping):
+        prebuild = report.get("prebuild") or {}
+        if isinstance(prebuild, Mapping):
+            print(f"proposal_confidence: {prebuild.get('proposal_confidence', 'NONE')}")
+            print(
+                "proposed_for_geometry: "
+                + ", ".join(str(item) for item in (prebuild.get("proposed_base_sessions") or ()))
+            )
+            print(
+                "reserved_validation: "
+                + ", ".join(str(item) for item in (prebuild.get("validation_candidates") or ()))
+            )
+            print(f"geometry_pair_queue: {len(prebuild.get('verification_pairs') or ())}")
+    print("=== Stage 0B: verified role assignment ===")
     counted = Counter(_iter_role_values(report))
     for role in _role_names():
         print(f"{role}: {counted.get(role, 0)}")
@@ -156,6 +179,7 @@ def _run_select_sessions(args: argparse.Namespace) -> int:
         output_dir=args.output,
         config=args.config,
         maps_dir=args.maps,
+        vpr_candidates=args.vpr_candidates,
     )
     _print_select_summary(report, args.output)
     return 0
