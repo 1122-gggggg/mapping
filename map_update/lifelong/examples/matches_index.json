@@ -1,0 +1,5 @@
+{
+  "pairs": {
+    "historical/session_01/frame_000100.jpg\ncurrent/000230.jpg": "matches/frame_000100__000230.npz"
+  }
+}

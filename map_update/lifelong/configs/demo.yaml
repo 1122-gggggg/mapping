@@ -1,0 +1,7 @@
+paths:
+  output_root: runs/demo
+adapters:
+  retrieval_type: precomputed
+  matcher_type: precomputed
+  top_k: 2
+random_seed: 7

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/update-map/lifelong-memory.schema.json",
+  "title": "Predictive/adaptive feature memory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "records"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "feature_id",
+          "point3d_id",
+          "descriptor",
+          "score",
+          "state",
+          "verified_current_geometry",
+          "correct_count",
+          "incorrect_count",
+          "unmatched_count",
+          "observations",
+          "metadata"
+        ],
+        "properties": {
+          "feature_id": {"type": "string", "minLength": 1},
+          "point3d_id": {"type": ["integer", "null"]},
+          "descriptor": {
+            "oneOf": [
+              {"type": "null"},
+              {"type": "array", "items": {"type": "number"}}
+            ]
+          },
+          "score": {"type": "number"},
+          "state": {"enum": ["active", "retired", "quarantined"]},
+          "verified_current_geometry": {"type": "boolean"},
+          "correct_count": {"type": "integer", "minimum": 0},
+          "incorrect_count": {"type": "integer", "minimum": 0},
+          "unmatched_count": {"type": "integer", "minimum": 0},
+          "observations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["timestamp_days", "event", "value"],
+              "properties": {
+                "timestamp_days": {"type": "number"},
+                "event": {"enum": ["correct", "incorrect", "unmatched"]},
+                "value": {"type": "number"}
+              }
+            }
+          },
+          "metadata": {"type": "object"}
+        }
+      }
+    }
+  }
+}

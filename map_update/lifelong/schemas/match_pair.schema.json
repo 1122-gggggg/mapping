@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EDM match pair metadata",
+  "type": "object",
+  "required": ["query_id", "reference_id", "npz_path"],
+  "properties": {
+    "query_id": {"type": "string"},
+    "reference_id": {"type": "string"},
+    "npz_path": {"type": "string"},
+    "model_version": {"type": "string"},
+    "preprocessing_version": {"type": "string"},
+    "query_resolution": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "reference_resolution": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "minItems": 2,
+      "maxItems": 2
+    }
+  },
+  "additionalProperties": true
+}
