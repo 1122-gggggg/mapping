@@ -1,5 +1,9 @@
 # Optimization Changelog 2026-07-10
 
+> Historical record. The legacy one-click wrapper, aggregate gate contract and their
+> commands were retired on 2026-08-23. Use the site-specific S0-S9 tools for current
+> builds; commands below are retained only as provenance.
+
 This records the gate/tooling changes made after the July 2026 map-build,
 localization, update-map, deployment, and data-governance review.
 

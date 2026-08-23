@@ -17,28 +17,12 @@ pip install -e '.[dev]'
 
 ---
 
-## ⚠️ 先讀這段：這裡有兩代建圖系統
+## 現行建圖入口
 
-| | 位置 | 狀態 |
-|---|---|---|
-| **現行** | `sites/<site>/tools/` 的 **S0–S9** | ✅ 活的。target_site 1390/1414、388,353 pts、1.4436 px 就是這條建出來的 |
-| 舊「一鍵建圖」 | `pipeline/build_pipeline.py` + `pipeline/stage_gate_contract.py` | ⚠️ **半死** |
+`sites/<site>/tools/` 的 **S0–S9** 是唯一正式建圖與 release 流程。舊的一鍵 wrapper、
+其專屬 gate/config/test 與不可執行文件已移除，避免新場域誤走已失效的外部路徑。
 
-`build_pipeline.py` 引用的這些路徑在現在的磁碟上**都不存在**：
-
-```
-sfm_system/tools/verify_package.py
-sfm_system/tools/system_verify.py
-sfm_system/定位/pipeline/localize_pipeline.py
-sfm_system/建圖/runs/          (實際是 建圖/<site>/runs/)
-sfm_system/建圖/outputs/
-```
-
-`docs/mapping/ONE_CLICK_MAP_BUILD_GATES.md` 描述的也是這一代。它的**驗收哲學仍然有效**
-（gate 分級、promotion rule、「多做檢查可以接受，少做檢查不接受」），但裡面的命令跑不起來。
-
-`pipeline/stage_gate_contract.py`（94 KB）本身是獨立的 gate 彙總器，只吃 `--run-dir`，
-這支還是可用的。`pipeline/run_fuhe_gluemap_build.py`、
+`pipeline/run_fuhe_gluemap_build.py`、
 `pipeline/run_football_gluemap_from_motion_manifest.py`、
 `pipeline/repair_fuhe_gluemap_fixed_ba.py` 也都是實際跑過的活程式。
 
@@ -330,7 +314,7 @@ image identity，不新增 ID、不更新 `last_seen_session`、不進 held-out 
 | EDM | https://github.com/chicleee/EDM | (在定位 repo) |
 | GlueMap | https://github.com/colmap/gluemap | — |
 
-`pipeline/preflight_research_backends.py` 會檢查這些後端在不在。
+`sites/target_site/tools/preflight_research_backends.py` 會檢查這些後端在不在。
 
 ---
 

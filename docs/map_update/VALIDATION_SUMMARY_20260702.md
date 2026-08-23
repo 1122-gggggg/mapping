@@ -1,5 +1,9 @@
 # Validation Summary - 2026-07-02
 
+> Archived snapshot. References to the former operator/one-click build pipeline describe
+> the 2026-07-02 external workspace and are not current repository entrypoints. Current
+> builds use the site-specific S0-S9 tools.
+
 ## Package
 
 Command:

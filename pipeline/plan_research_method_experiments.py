@@ -104,11 +104,10 @@ def build_plan(args: argparse.Namespace) -> dict:
             "Doppelgangers++ filters visually aliased pairs before dense matching; useful for repeated structures.",
             [
                 args.python,
-                str(BUILD_ROOT / "pipeline" / "build_pipeline.py"),
+                str(BUILD_ROOT / "pipeline" / "build_localizable_map_core.py"),
                 "--site-name", "fuhe_dgpp_experiment_20260710",
                 "--work-dir", str(dg_out),
                 "--image-root", str(image_root),
-                "--handoff-profile", "candidate",
                 "--resume",
                 "--doppelgangers-root", str(dg_root),
                 "--doppelgangers-checkpoint", str(dg_ckpt),
@@ -119,6 +118,7 @@ def build_plan(args: argparse.Namespace) -> dict:
             [
                 f"Source paper: {DGPP_PAPER_URL}",
                 "This is a front-end experiment and may rerun expensive matching.",
+                "The preserved core is called directly; the removed one-click wrapper is not used.",
                 "Use only after DB-reuse/LFOE variants are measured.",
             ],
         ),
@@ -175,7 +175,7 @@ def build_plan(args: argparse.Namespace) -> dict:
         "process_policy": [
             "Original production outputs and symlinks stay unchanged.",
             "Each method writes to its own experiment subdirectory.",
-            "A method is promoted only after build gates, holdout localization, and production-stream replay pass.",
+            "A method is promoted only after the active site's S0-S9 release gates pass.",
             "DB/H5 artifacts are preserved throughout the experiment.",
         ],
     }

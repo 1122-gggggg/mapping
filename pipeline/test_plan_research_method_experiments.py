@@ -62,14 +62,14 @@ def test_doppelgangers_step_has_image_root_and_checkpoint(tmp_path: Path):
     assert any("doppelgangers_plusplus.pdf" in note for note in step["notes"])
 
 
-def test_doppelgangers_step_is_candidate_not_field_handoff(tmp_path: Path):
+def test_doppelgangers_step_calls_preserved_core_without_removed_wrapper(tmp_path: Path):
     plan = build_plan(make_args(tmp_path))
     step = next(item for item in plan["steps"] if item["name"] == "doppelgangers_pp_pair_filter")
 
     command = step["command"]
 
-    assert "--handoff-profile" in command
-    assert command[command.index("--handoff-profile") + 1] == "candidate"
+    assert command[1].endswith("/pipeline/build_localizable_map_core.py")
+    assert "--handoff-profile" not in command
 
 
 def test_research_method_plan_blocks_missing_optional_tools(tmp_path: Path):

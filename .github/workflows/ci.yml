@@ -2,7 +2,7 @@ name: Core CI
 
 on:
   push:
-    branches: [main, system-opt-20260823]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -47,3 +47,11 @@ jobs:
           PYTHONPATH=map_update/core pytest -q \
             map_update/core/test_point_evidence_ledger.py \
             map_update/core/test_point_evidence_recency.py
+      - name: Test live pipeline utilities
+        run: |
+          PYTHONPATH=pipeline pytest -q \
+            pipeline/test_build_gravity_alignment.py \
+            pipeline/test_intrinsics_holdout_gate.py \
+            pipeline/test_plan_db_reuse_sweep.py \
+            pipeline/test_plan_research_method_experiments.py \
+            pipeline/test_recompute_site_scale.py
