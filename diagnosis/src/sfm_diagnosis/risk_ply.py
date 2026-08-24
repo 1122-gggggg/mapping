@@ -575,22 +575,41 @@ def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
 
 
 def camera_nearest_spacing(centers: np.ndarray) -> float:
-    """Median nearest-neighbor spacing among finite camera centers."""
+    """Median true nearest-neighbor spacing; KD-tree, order-independent at any n."""
 
     points = np.asarray(centers, dtype=float).reshape(-1, 3)
     finite = points[np.isfinite(points).all(axis=1)]
     if len(finite) < 2:
         return 0.0
-    if len(finite) <= 1024:
-        delta = finite[:, None, :] - finite[None, :, :]
-        dist = np.linalg.norm(delta, axis=2)
-        np.fill_diagonal(dist, np.inf)
-        nearest = dist.min(axis=1)
-        positive = nearest[np.isfinite(nearest) & (nearest > 0)]
-        return float(np.median(positive)) if len(positive) else 0.0
-    sequential = np.linalg.norm(np.diff(finite, axis=0), axis=1)
-    positive = sequential[sequential > 0]
+    from scipy.spatial import cKDTree
+
+    distances, _ = cKDTree(finite).query(finite, k=2)
+    nearest = np.asarray(distances[:, 1], dtype=float)
+    positive = nearest[np.isfinite(nearest) & (nearest > 0)]
     return float(np.median(positive)) if len(positive) else 0.0
+
+
+def _robust_radius(
+    xyz: np.ndarray,
+    *,
+    hi_quantile: float,
+    iqr_k: float,
+    guard_extrema: bool = False,
+) -> tuple[np.ndarray, float, str, np.ndarray]:
+    """Distance from coordinate-wise median; MAD-guarded when tails are extrema."""
+
+    cloud = np.asarray(xyz, dtype=float).reshape(-1, 3)
+    center = np.median(cloud, axis=0)
+    dist = np.linalg.norm(cloud - center, axis=1)
+    dmed = float(np.median(dist))
+    dmad = float(np.median(np.abs(dist - dmed)))
+    mad_radius = dmed + iqr_k * max(dmad, 1e-12)
+    if len(cloud) >= 64:
+        q_radius = float(np.quantile(dist, hi_quantile))
+        if guard_extrema and q_radius > 4.0 * max(mad_radius, 1e-12):
+            return center, mad_radius, "distance_mad_guarded", dist
+        return center, q_radius, "distance_quantile", dist
+    return center, mad_radius, "distance_mad", dist
 
 
 def visible_map_rgb(rgb: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
@@ -628,7 +647,7 @@ def robust_spatial_clip(
     hi_quantile: float = CLIP_HI_QUANTILE,
     iqr_k: float = CLIP_IQR_K,
 ) -> dict[str, Any]:
-    """Finite-point clip box from robust map/camera scale, not archival extrema."""
+    """Finite-point clip box from robust map/camera percentiles, never camera max extent."""
 
     points = np.asarray(xyz, dtype=float).reshape(-1, 3)
     finite = np.isfinite(points).all(axis=1)
@@ -637,9 +656,20 @@ def robust_spatial_clip(
         raw_cams = np.asarray(camera_xyz, dtype=float).reshape(-1, 3)
         cams = raw_cams[np.isfinite(raw_cams).all(axis=1)]
     camera_nn = camera_nearest_spacing(cams) if len(cams) >= 2 else 0.0
-    camera_diagonal = (
+    camera_diagonal_full = (
         float(np.linalg.norm(cams.max(axis=0) - cams.min(axis=0))) if len(cams) else 0.0
     )
+    camera_radius = 0.0
+    camera_method = "empty"
+    if len(cams):
+        _cam_center, camera_radius, camera_method, _cam_dist = _robust_radius(
+            cams,
+            hi_quantile=hi_quantile,
+            iqr_k=iqr_k,
+            guard_extrema=True,
+        )
+    # Robust cube diagonal from camera percentile/MAD radius; full AABB is archival only.
+    camera_diagonal = float(2.0 * camera_radius * math.sqrt(3.0)) if camera_radius else 0.0
     work = points[finite]
     scale_source = "points"
     if len(work) == 0:
@@ -665,6 +695,9 @@ def robust_spatial_clip(
             "scale_source": scale_source,
             "camera_nn": camera_nn,
             "camera_diagonal": camera_diagonal,
+            "camera_diagonal_full": camera_diagonal_full,
+            "camera_radius": camera_radius,
+            "camera_method": camera_method,
             "robust_diagonal": float(np.linalg.norm(clip_max - clip_min)),
             "full_min": clip_min.copy(),
             "full_max": clip_max.copy(),
@@ -675,18 +708,14 @@ def robust_spatial_clip(
             "excluded_count": int(len(points)),
         }
 
-    center = np.median(work, axis=0)
-    dist = np.linalg.norm(work - center, axis=1)
-    if len(work) >= 64:
-        radius = float(np.quantile(dist, hi_quantile))
-        method = "distance_quantile"
-    else:
-        dmed = float(np.median(dist))
-        dmad = float(np.median(np.abs(dist - dmed)))
-        radius = dmed + iqr_k * max(dmad, 1e-12)
-        method = "distance_mad"
+    center, radius, method, _dist = _robust_radius(
+        work,
+        hi_quantile=hi_quantile,
+        iqr_k=iqr_k,
+        guard_extrema=scale_source == "cameras",
+    )
     if len(cams):
-        radius = max(radius, float(np.max(np.linalg.norm(cams - center, axis=1))))
+        radius = max(radius, camera_radius)
     q_lo = np.quantile(work, lo_quantile, axis=0)
     q_hi = np.quantile(work, hi_quantile, axis=0)
     pad = max(0.15 * radius, 4.0 * camera_nn, 0.05 * camera_diagonal, 1e-6)
@@ -712,6 +741,9 @@ def robust_spatial_clip(
         "scale_source": scale_source,
         "camera_nn": float(camera_nn),
         "camera_diagonal": float(camera_diagonal),
+        "camera_diagonal_full": float(camera_diagonal_full),
+        "camera_radius": float(camera_radius),
+        "camera_method": camera_method,
         "robust_diagonal": float(np.linalg.norm(clip_max - clip_min)),
         "full_min": full_min,
         "full_max": full_max,
@@ -1081,6 +1113,9 @@ def write_risk_ply(
         },
         "camera_nn": float(clip["camera_nn"]),
         "camera_diagonal": float(clip["camera_diagonal"]),
+        "camera_diagonal_full": float(clip.get("camera_diagonal_full") or 0.0),
+        "camera_radius": float(clip.get("camera_radius") or 0.0),
+        "camera_method": clip.get("camera_method"),
         "robust_diagonal": robust_diag,
         "full_diagonal": full_diag,
         "robust_diagonal_not_dominated_by_extrema": bool(

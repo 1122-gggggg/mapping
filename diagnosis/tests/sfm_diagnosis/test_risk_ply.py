@@ -15,8 +15,10 @@ from sfm_diagnosis.risk_ply import (
     MARKER_RADIUS_ABS_FLOOR,
     MARKER_RADIUS_DIAG_FRACTION,
     VISIBLE_MAP_RGB,
+    camera_nearest_spacing,
     load_jsonl_rows,
     load_rows,
+    robust_spatial_clip,
     write_risk_ply,
 )
 from test_diagnose import healthy_map
@@ -470,4 +472,59 @@ def test_marker_radius_floor_without_override(tmp_path: Path):
     assert receipt["sphere_radius"] >= MARKER_RADIUS_ABS_FLOOR
     assert receipt["sphere_radius"] >= MARKER_RADIUS_DIAG_FRACTION * receipt["clip"]["robust_diagonal"]
     assert receipt["sphere_samples"] >= 96
+
+
+def test_bad_finite_camera_does_not_dominate_clip(tmp_path: Path):
+    base = _tiny_map()
+    points = np.vstack([base.points_xyz, np.array([[1.0e6, 0.0, 0.0]])])
+    rgb = np.vstack([base.point_rgb, np.array([[9, 9, 9]], dtype=np.uint8)])
+    cameras = np.vstack([base.image_centers, np.array([[5.0e5, 5.0e5, 5.0e5]])])
+    names = list(base.image_names) + ["bad.jpg"]
+    n = len(points)
+    spoiled = MapData(
+        point_ids=np.arange(n),
+        points_xyz=points,
+        point_rgb=rgb,
+        point_errors=np.full(n, 0.4),
+        track_lengths=np.full(n, 2, dtype=int),
+        track_image_ids=[np.array([0, 1]) for _ in range(n)],
+        image_ids=np.arange(len(cameras)),
+        image_names=names,
+        image_camera_ids=np.zeros(len(cameras), dtype=int),
+        image_centers=cameras,
+        image_R_wc=np.repeat(np.eye(3)[None], len(cameras), axis=0),
+        cameras=base.cameras,
+    )
+    receipt = write_risk_ply(spoiled, tmp_path / "badcam", sphere_samples=8, filename="badcam.ply")
+    clip = receipt["clip"]
+    assert clip["camera_diagonal_full"] > 1.0e5
+    assert clip["camera_diagonal"] < 100.0
+    assert clip["robust_diagonal"] < 100.0
+    assert 3 in set(clip["excluded_point_ids"])
+    cc_xyz, _cc_rgb = _read_vertices(Path(receipt["ply"]))
+    assert cc_xyz.max() < 100.0
+
+
+def test_camera_nearest_spacing_ignores_input_order():
+    rng = np.random.default_rng(0)
+    path = np.cumsum(np.full((1205, 3), 0.25), axis=0)
+    path += rng.normal(0.0, 0.01, size=path.shape)
+    shuffled = path[rng.permutation(len(path))]
+    spaced = camera_nearest_spacing(shuffled)
+    ordered = camera_nearest_spacing(path)
+    assert spaced == pytest.approx(ordered, rel=1e-6, abs=1e-9)
+    sequential = float(np.median(np.linalg.norm(np.diff(shuffled, axis=0), axis=1)))
+    assert sequential > 2.0 * spaced
+    compact = robust_spatial_clip(
+        path[:10],
+        camera_xyz=np.vstack([path[:20], [[1.0e6, 0.0, 0.0]]]),
+    )
+    assert compact["camera_diagonal"] < 50.0
+    assert compact["camera_diagonal_full"] > 1.0e5
+    assert compact["pad"] < 50.0
+    baseline = robust_spatial_clip(path[:10], camera_xyz=path)
+    spoiled = robust_spatial_clip(path[:10], camera_xyz=np.vstack([path, [[1.0e6, 0.0, 0.0]]]))
+    assert spoiled["camera_diagonal"] == pytest.approx(baseline["camera_diagonal"], rel=0.05)
+    assert spoiled["camera_diagonal_full"] > 1.0e5
+    assert spoiled["camera_method"] in {"distance_quantile", "distance_mad", "distance_mad_guarded"}
 
