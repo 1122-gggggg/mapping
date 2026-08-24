@@ -639,6 +639,13 @@ def visible_map_rgb(rgb: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
     }
 
 
+def _xyz_in_clip(xyz: Sequence[float], clip_min: np.ndarray, clip_max: np.ndarray) -> bool:
+    point = np.asarray(xyz, dtype=float).reshape(3)
+    if not np.isfinite(point).all():
+        return False
+    return bool(np.all(point >= clip_min) and np.all(point <= clip_max))
+
+
 def robust_spatial_clip(
     xyz: np.ndarray,
     *,
@@ -897,6 +904,8 @@ def _write_legend_md(path: Path, receipt: Mapping[str, Any]) -> Path:
         f"- Format: `{cc.get('format', CLOUDCOMPARE_FORMAT)}` with RGB uchar properties.",
         f"- Map vertices full/retained/excluded: `{receipt.get('map_vertices')}` / "
         f"`{receipt.get('map_vertices_retained')}` / `{receipt.get('map_vertices_excluded')}`",
+        f"- Markers total/CloudCompare/excluded: `{receipt.get('marker_spheres')}` / "
+        f"`{receipt.get('marker_spheres_cloudcompare')}` / `{receipt.get('marker_spheres_excluded')}`",
         f"- Robust bounds diagonal: `{clip.get('robust_diagonal')}`",
         f"- Full bounds diagonal: `{clip.get('full_diagonal')}`",
         f"- Marker radius / samples: `{receipt.get('sphere_radius')}` / `{receipt.get('sphere_samples')}`",
@@ -1026,27 +1035,52 @@ def write_risk_ply(
     clip_max = np.asarray(clip["clip_max"], dtype=float)
     full_marker_xyz: list[np.ndarray] = []
     full_marker_rgb: list[np.ndarray] = []
+    cc_marker_xyz: list[np.ndarray] = []
+    cc_marker_rgb: list[np.ndarray] = []
     mesh_xyz: list[np.ndarray] = []
     mesh_rgb: list[np.ndarray] = []
     mesh_faces: list[np.ndarray] = []
     counts: dict[str, int] = {name: 0 for name in ISSUE_COLORS}
+    excluded_markers: list[dict[str, Any]] = []
+    excluded_marker_classes: dict[str, int] = {}
     mesh_offset = 0
+    unit_shell = sphere_points((0.0, 0.0, 0.0), 1.0, sphere_samples)
+    unit_mesh_xyz, unit_mesh_faces = sphere_mesh((0.0, 0.0, 0.0), 1.0)
     for index, row in enumerate(markers):
         issue = str(row["issue_class"])
         counts[issue] = counts.get(issue, 0) + 1
         color = np.asarray(_rgb(issue), dtype=np.uint8)
         center = (row["x"], row["y"], row["z"])
-        shell = sphere_points(center, sphere_radius, sphere_samples)
+        in_clip = _xyz_in_clip(center, clip_min, clip_max)
+        origin = np.asarray(center, dtype=float).reshape(3)
+        shell = unit_shell * sphere_radius + origin
         shell_rgb = np.repeat(color.reshape(1, 3), len(shell), axis=0)
         full_marker_xyz.append(shell)
         full_marker_rgb.append(shell_rgb)
         row["sphere_index"] = index
-        row["in_cloudcompare_clip"] = True
-        verts, faces = sphere_mesh(center, sphere_radius)
+        row["in_cloudcompare_clip"] = in_clip
+        verts = unit_mesh_xyz * sphere_radius + origin
         mesh_xyz.append(verts)
         mesh_rgb.append(np.repeat(color.reshape(1, 3), len(verts), axis=0))
-        mesh_faces.append(faces + mesh_offset)
+        mesh_faces.append(unit_mesh_faces + mesh_offset)
         mesh_offset += len(verts)
+        if in_clip:
+            cc_marker_xyz.append(shell)
+            cc_marker_rgb.append(shell_rgb)
+            continue
+        excluded_marker_classes[issue] = excluded_marker_classes.get(issue, 0) + 1
+        image_id = _as_int(row.get("image_id"))
+        excluded_markers.append(
+            {
+                "sphere_index": index,
+                "image_id": image_id,
+                "image_name": row.get("image_name"),
+                "issue_class": issue,
+                "x": float(center[0]),
+                "y": float(center[1]),
+                "z": float(center[2]),
+            }
+        )
 
     finite_map = np.isfinite(map_xyz).all(axis=1)
     full_xyz, full_rgb = _stack_xyz_rgb(
@@ -1055,7 +1089,12 @@ def write_risk_ply(
         full_marker_xyz,
         full_marker_rgb,
     )
-    cc_xyz, cc_rgb = _stack_xyz_rgb(retained_xyz, cc_map_rgb, full_marker_xyz, full_marker_rgb)
+    cc_xyz, cc_rgb = _stack_xyz_rgb(retained_xyz, cc_map_rgb, cc_marker_xyz, cc_marker_rgb)
+    excluded_marker_ids = [
+        int(item["image_id"]) if item["image_id"] is not None else int(item["sphere_index"])
+        for item in excluded_markers
+    ]
+    marker_spheres_cc = int(len(cc_marker_xyz))
     paths = _artifact_paths(out, filename)
     comments = (
         "sfm-diagnosis CloudCompare-ready robust-clipped risk PLY",
@@ -1127,6 +1166,10 @@ def write_risk_ply(
         "excluded_count": int(clip["excluded_count"]),
         "excluded_indices": [int(v) for v in excluded_idx],
         "excluded_point_ids": excluded_ids,
+        "excluded_marker_count": int(len(excluded_markers)),
+        "excluded_marker_ids": excluded_marker_ids,
+        "excluded_marker_classes": dict(excluded_marker_classes),
+        "excluded_markers": excluded_markers,
     }
     cloudcompare = {
         "ply": str(ply_path),
@@ -1135,7 +1178,9 @@ def write_risk_ply(
         "vertex_count": int(len(cc_xyz)),
         "map_vertices_retained": int(len(retained_xyz)),
         "map_vertices_excluded": int(clip["excluded_count"]),
-        "marker_spheres": int(len(markers)),
+        "marker_spheres": marker_spheres_cc,
+        "marker_spheres_total": int(len(markers)),
+        "marker_spheres_excluded": int(len(excluded_markers)),
         "sphere_radius": float(sphere_radius),
         "sphere_samples": int(sphere_samples),
         "robust_bounds": clip_payload["robust_bounds"],
@@ -1153,7 +1198,8 @@ def write_risk_ply(
         "map_vertices_retained": int(len(retained_xyz)),
         "map_vertices_excluded": int(clip["excluded_count"]),
         "marker_spheres": int(len(markers)),
-        "marker_spheres_cloudcompare": int(len(markers)),
+        "marker_spheres_cloudcompare": marker_spheres_cc,
+        "marker_spheres_excluded": int(len(excluded_markers)),
         "sphere_samples": int(sphere_samples),
         "sphere_radius": float(sphere_radius),
         "sphere_radius_auto": float(auto_radius),

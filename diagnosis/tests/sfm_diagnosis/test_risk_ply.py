@@ -19,6 +19,8 @@ from sfm_diagnosis.risk_ply import (
     load_jsonl_rows,
     load_rows,
     robust_spatial_clip,
+    sphere_mesh,
+    sphere_points,
     write_risk_ply,
 )
 from test_diagnose import healthy_map
@@ -75,6 +77,18 @@ def _read_vertices(path: Path) -> tuple[np.ndarray, np.ndarray]:
     xyz = np.column_stack([verts["x"], verts["y"], verts["z"]]).astype(float)
     rgb = np.column_stack([verts["r"], verts["g"], verts["b"]]).astype(np.uint8)
     return xyz, rgb
+
+
+def _read_faces(path: Path) -> np.ndarray:
+    meta = _parse_ply(path)
+    n_vertices = int(meta["vertex"])
+    n_faces = int(meta.get("face") or 0)
+    rec = np.dtype([("n", "u1"), ("i0", "<i4"), ("i1", "<i4"), ("i2", "<i4")])
+    faces = np.frombuffer(meta["payload"][n_vertices * 15 :], dtype=rec)
+    assert rec.itemsize == 13
+    assert len(faces) == n_faces
+    return np.column_stack([faces["i0"], faces["i1"], faces["i2"]])
+
 
 
 def test_risk_ply_header_map_vertices_and_colored_spheres(tmp_path: Path):
@@ -503,6 +517,48 @@ def test_bad_finite_camera_does_not_dominate_clip(tmp_path: Path):
     assert 3 in set(clip["excluded_point_ids"])
     cc_xyz, _cc_rgb = _read_vertices(Path(receipt["ply"]))
     assert cc_xyz.max() < 100.0
+    assert receipt["marker_spheres_excluded"] >= 1
+    assert receipt["marker_spheres_cloudcompare"] < receipt["marker_spheres"]
+    assert clip["excluded_marker_count"] >= 1
+    assert 4 in set(clip["excluded_marker_ids"])
+    assert clip["excluded_marker_classes"].get("unverified_bridge_pose", 0) >= 1
+    assert any(not row["in_cloudcompare_clip"] and row.get("image_name") == "bad.jpg" for row in receipt["markers"])
+    full_xyz, _full_rgb = _read_vertices(Path(receipt["ply_full"]))
+    assert full_xyz.max() > 1.0e5
+    mesh_xyz, _mesh_rgb = _read_vertices(Path(receipt["ply_mesh"]))
+    assert mesh_xyz.max() > 1.0e5
+
+
+def test_extreme_zero_obs_marker_excluded_from_cloudcompare(tmp_path: Path):
+    base = _tiny_map()
+    cameras = np.vstack([base.image_centers, np.array([[5.0e5, 5.0e5, 5.0e5]])])
+    spoiled = MapData(
+        point_ids=base.point_ids,
+        points_xyz=base.points_xyz,
+        point_rgb=base.point_rgb,
+        point_errors=base.point_errors,
+        track_lengths=base.track_lengths,
+        track_image_ids=base.track_image_ids,
+        image_ids=np.arange(len(cameras)),
+        image_names=list(base.image_names) + ["bad.jpg"],
+        image_camera_ids=np.zeros(len(cameras), dtype=int),
+        image_centers=cameras,
+        image_R_wc=np.repeat(np.eye(3)[None], len(cameras), axis=0),
+        cameras=base.cameras,
+    )
+    receipt = write_risk_ply(spoiled, tmp_path / "badmark", sphere_samples=8, filename="badmark.ply")
+    clip = receipt["clip"]
+    cc_xyz, _cc_rgb = _read_vertices(Path(receipt["ply"]))
+    assert cc_xyz.max() < 100.0
+    assert receipt["marker_spheres_cloudcompare"] == receipt["marker_spheres"] - 1
+    assert clip["excluded_marker_count"] == 1
+    assert clip["excluded_marker_ids"] == [4]
+    assert clip["excluded_marker_classes"] == {"unverified_bridge_pose": 1}
+    assert clip["excluded_markers"][0]["image_name"] == "bad.jpg"
+    full_xyz, _full_rgb = _read_vertices(Path(receipt["ply_full"]))
+    assert full_xyz.max() > 1.0e5
+    mesh_xyz, _mesh_rgb = _read_vertices(Path(receipt["ply_mesh"]))
+    assert mesh_xyz.max() > 1.0e5
 
 
 def test_camera_nearest_spacing_ignores_input_order():
@@ -527,4 +583,91 @@ def test_camera_nearest_spacing_ignores_input_order():
     assert spoiled["camera_diagonal"] == pytest.approx(baseline["camera_diagonal"], rel=0.05)
     assert spoiled["camera_diagonal_full"] > 1.0e5
     assert spoiled["camera_method"] in {"distance_quantile", "distance_mad", "distance_mad_guarded"}
+
+
+
+def test_write_risk_ply_instances_shared_sphere_templates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    extras = [
+        {"issue_class": "coverage_hole", "x": 0.4, "y": 0.2, "z": 0.9},
+        {"issue_class": "fim_weak", "x": 1.1, "y": -0.3, "z": 1.2},
+        {"issue_class": "weak_region", "x": 250.0, "y": -80.0, "z": 40.0},
+    ]
+    samples = 24
+    radius = 0.25
+    unit_shell = sphere_points((0.0, 0.0, 0.0), 1.0, samples)
+    unit_mesh, unit_faces = sphere_mesh((0.0, 0.0, 0.0), 1.0)
+    calls = {"points": 0, "mesh": 0}
+    real_points = sphere_points
+    real_mesh = sphere_mesh
+
+    def counted_points(*args, **kwargs):
+        calls["points"] += 1
+        return real_points(*args, **kwargs)
+
+    def counted_mesh(*args, **kwargs):
+        calls["mesh"] += 1
+        return real_mesh(*args, **kwargs)
+
+    monkeypatch.setattr("sfm_diagnosis.risk_ply.sphere_points", counted_points)
+    monkeypatch.setattr("sfm_diagnosis.risk_ply.sphere_mesh", counted_mesh)
+
+    receipt = write_risk_ply(
+        _tiny_map(),
+        tmp_path / "templates",
+        extra_markers=extras,
+        sphere_radius=radius,
+        sphere_samples=samples,
+        filename="templates.ply",
+    )
+    assert calls["points"] == 1
+    assert calls["mesh"] == 1
+
+    markers = receipt["markers"]
+    n_markers = len(markers)
+    assert n_markers >= len(extras)
+    n_mesh = len(unit_mesh)
+    n_faces = len(unit_faces)
+    assert receipt["sphere_samples"] == samples
+    assert receipt["marker_spheres"] == n_markers
+    assert receipt["vertex_count_full"] == receipt["map_vertices"] + n_markers * samples
+    assert receipt["mesh_vertex_count"] == n_markers * n_mesh
+    assert receipt["mesh_face_count"] == n_markers * n_faces
+
+    full_xyz, _ = _read_vertices(Path(receipt["ply_full"]))
+    mesh_xyz, _ = _read_vertices(Path(receipt["ply_mesh"]))
+    mesh_faces = _read_faces(Path(receipt["ply_mesh"]))
+    marker_xyz = full_xyz[int(receipt["map_vertices"]) :]
+    assert len(marker_xyz) == n_markers * samples
+    assert len(mesh_xyz) == n_markers * n_mesh
+    assert len(mesh_faces) == n_markers * n_faces
+
+    written_shells: list[np.ndarray] = []
+    for index, row in enumerate(markers):
+        center = np.asarray((row["x"], row["y"], row["z"]), dtype=float)
+        assert row["sphere_index"] == index
+        shell = marker_xyz[index * samples : (index + 1) * samples]
+        mesh = mesh_xyz[index * n_mesh : (index + 1) * n_mesh]
+        faces = mesh_faces[index * n_faces : (index + 1) * n_faces]
+        np.testing.assert_allclose(shell, unit_shell * radius + center, rtol=0.0, atol=1e-5)
+        np.testing.assert_allclose(mesh, unit_mesh * radius + center, rtol=0.0, atol=1e-5)
+        np.testing.assert_array_equal(faces, unit_faces + index * n_mesh)
+        written_shells.append(shell)
+
+    extra_rows = markers[-len(extras) :]
+    extra_centers = [
+        np.asarray((row["x"], row["y"], row["z"]), dtype=float) for row in extra_rows
+    ]
+    for expected, row, center in zip(extras, extra_rows, extra_centers):
+        assert row["issue_class"] == expected["issue_class"]
+        np.testing.assert_allclose(center, (expected["x"], expected["y"], expected["z"]))
+    assert not np.allclose(extra_centers[0], extra_centers[1])
+    assert not np.allclose(extra_centers[1], extra_centers[2])
+    first = written_shells[n_markers - 3]
+    second = written_shells[n_markers - 2]
+    third = written_shells[n_markers - 1]
+    assert not np.allclose(first, second)
+    assert not np.allclose(second, third)
+    assert not np.allclose(first, third)
 
