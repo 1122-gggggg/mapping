@@ -43,6 +43,10 @@ _NO_SPARSIFY_ROUTES = {
     "observation-only",
 }
 _NO_SPARSIFY_STATUSES = {"qa_only", "needs_tile_replace"}
+_PNP_ONLY_ROUTES = {"register", "skip_high_overlap"}
+_TILE_REPLACE_ROUTES = {"changed", "changed-region", "tile_replace"}
+_DELIVERY_CLOSEOUT_FIELDS = ("site_profile", "t_align_gravity", "gauge_invariance")
+
 
 
 def required_inrepo_scripts() -> dict[str, Path]:
@@ -257,12 +261,123 @@ def validate_prepared_frames(work_dir: Path, frames_root: Path, connector_root: 
     )
 
 
+def delivery_closeout_path(out_dir: Path) -> Path:
+    return Path(out_dir) / "gates" / "delivery_closeout.json"
+
+
+def _row_route(row: dict) -> str:
+    return str(row.get("route", ""))
+
+
+def _row_status(row: dict) -> str:
+    status = row.get("status")
+    return "" if status is None else str(status)
+
+
+def _row_seq(row: dict) -> str:
+    return str(row.get("seq", "<unknown>"))
+
+
+def _is_tile_replace_row(row: dict) -> bool:
+    return _row_route(row) in _TILE_REPLACE_ROUTES or _row_status(row) == "needs_tile_replace"
+
+
+def _is_successful_submap_row(row: dict) -> bool:
+    return _row_route(row) == "submap" and _row_status(row) in {"", "ok"}
+
+
+def _pnp_route_invented_points(row: dict) -> bool:
+    if _row_route(row) not in _PNP_ONLY_ROUTES:
+        return False
+    raw = row.get("points_added", 0)
+    if raw is None:
+        return False
+    try:
+        return int(raw) != 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _iter_summary_rows(rows) -> list[dict]:
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def load_delivery_closeout(out_dir: Path) -> tuple[dict, list[str]]:
+    path = delivery_closeout_path(out_dir)
+    detail: dict = {"path": str(path), "exists": path.exists()}
+    if not path.exists():
+        return detail, ["delivery_closeout.json missing"]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        detail["load_error"] = repr(exc)
+        return detail, [f"cannot load delivery_closeout.json: {exc}"]
+    if not isinstance(data, dict):
+        return detail, ["delivery_closeout.json must be an object"]
+    detail.update({
+        "site_profile": data.get("site_profile"),
+        "t_align_gravity": data.get("t_align_gravity"),
+        "gauge_invariance": data.get("gauge_invariance"),
+        "deployable": data.get("deployable"),
+        "reasons": data.get("reasons"),
+    })
+    missing = [key for key in _DELIVERY_CLOSEOUT_FIELDS if key not in data]
+    if missing:
+        return detail, [f"delivery_closeout.json missing {', '.join(missing)}"]
+    return detail, []
+
+
+def write_delivery_closeout(out_dir: Path) -> dict:
+    """Honesty receipt only. Never invoke scale/gravity binaries."""
+    out_dir = Path(out_dir)
+    summary = out_dir / "update_summary.json"
+    successful_submaps: list[str] = []
+    unfinished: list[str] = []
+    if summary.exists():
+        try:
+            data = json.loads(summary.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        rows = data.get("rows", []) if isinstance(data, dict) else []
+        if isinstance(rows, list):
+            for row in _iter_summary_rows(rows):
+                seq = _row_seq(row)
+                if _is_successful_submap_row(row):
+                    successful_submaps.append(seq)
+                if _is_tile_replace_row(row):
+                    unfinished.append(seq)
+    reasons: list[str] = []
+    if successful_submaps:
+        reasons.append(
+            "successful submap is gauge-changing and requires an explicit delivery closeout "
+            "(site_profile, T_align_gravity, G-U1); those gates were not run: "
+            + ", ".join(successful_submaps)
+        )
+    if unfinished:
+        reasons.append(
+            "changed/tile_replace route needs tile replacement but tile replacement is not implemented: "
+            + ", ".join(unfinished)
+        )
+    payload = {
+        "site_profile": "NOT_RUN",
+        "t_align_gravity": "NOT_RUN",
+        "gauge_invariance": "NOT_RUN",
+        "deployable": not successful_submaps and not unfinished,
+        "reasons": reasons,
+    }
+    path = delivery_closeout_path(out_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return payload
+
+
 def validate_update_outputs(out_dir: Path, require_ply: bool) -> None:
     bundle = out_dir / "reloc_map_updated.pt"
     report = out_dir / "update_report.md"
     ply = out_dir / "latest_map_realrgb.ply"
     flight_detail, flight_reasons = inspect_flight_bundle(bundle)
     summary_detail, summary_reasons = inspect_update_summary(out_dir)
+    closeout_detail, _closeout_reasons = load_delivery_closeout(out_dir)
     metrics = {
         "bundle": str(bundle),
         "bundle_bytes": bundle.stat().st_size if bundle.exists() else 0,
@@ -272,6 +387,9 @@ def validate_update_outputs(out_dir: Path, require_ply: bool) -> None:
         "ply_bytes": ply.stat().st_size if ply.exists() else 0,
         "flight_bundle": flight_detail,
         "update_summary": summary_detail,
+        "delivery_closeout": closeout_detail.get("path"),
+        "delivery_closeout_exists": bool(closeout_detail.get("exists")),
+        "delivery_closeout_metrics": closeout_detail,
     }
     reasons = []
     if metrics["bundle_bytes"] <= 1000:
@@ -287,7 +405,13 @@ def validate_update_outputs(out_dir: Path, require_ply: bool) -> None:
 
 def inspect_update_summary(out_dir: Path) -> tuple[dict, list[str]]:
     summary = out_dir / "update_summary.json"
-    detail: dict = {"path": str(summary), "summary_exists": summary.exists()}
+    closeout_detail, closeout_reasons = load_delivery_closeout(out_dir)
+    detail: dict = {
+        "path": str(summary),
+        "summary_exists": summary.exists(),
+        "delivery_closeout": closeout_detail.get("path"),
+        "delivery_closeout_exists": bool(closeout_detail.get("exists")),
+    }
     reasons: list[str] = []
     if not summary.exists():
         return detail, reasons
@@ -301,17 +425,36 @@ def inspect_update_summary(out_dir: Path) -> tuple[dict, list[str]]:
     if not isinstance(rows, list):
         return detail, ["update_summary rows must be a list"]
     unfinished = []
-    for row in rows:
-        route = str(row.get("route", ""))
-        status = str(row.get("status", ""))
-        if route in {"changed", "changed-region", "tile_replace"} or status == "needs_tile_replace":
-            unfinished.append(str(row.get("seq", "<unknown>")))
+    invented_points = []
+    needs_closeout = []
+    closeout_invalid = bool(closeout_reasons)
+    for row in _iter_summary_rows(rows):
+        seq = _row_seq(row)
+        if _is_tile_replace_row(row):
+            unfinished.append(seq)
+        if _pnp_route_invented_points(row):
+            invented_points.append(seq)
+        if _is_successful_submap_row(row) and closeout_invalid:
+            needs_closeout.append(seq)
     if unfinished:
         reasons.append(
             "changed/tile_replace route needs tile replacement but tile replacement is not implemented: "
             + ", ".join(unfinished)
         )
+    if invented_points:
+        reasons.append(
+            "register is PnP-only and must not invent 3D points: "
+            + ", ".join(invented_points)
+        )
+    if needs_closeout:
+        reasons.append(
+            "gauge-changing submap requires an explicit delivery closeout "
+            "(site_profile, T_align_gravity, G-U1): "
+            + ", ".join(needs_closeout)
+        )
     return detail, reasons
+
+
 
 
 def validate_slim_bundle(out_dir: Path, bundle: Path) -> None:
@@ -494,6 +637,7 @@ def main() -> None:
         cmd += ["--connector-data", str(connector_root)]
     cmd += passthrough
     run(cmd)
+    write_delivery_closeout(out_dir)
     if not args.disable_stage_gates:
         validate_update_outputs(out_dir, require_ply="--no-ply" not in passthrough)
 

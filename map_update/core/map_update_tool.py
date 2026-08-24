@@ -120,7 +120,7 @@ from megaloc_cache import (
     write_megaloc_cache,
 )
 from stability_scores import build_ref_stability, rerank_indices_by_stability, stability_summary
-from update_quality_gates import bridge_quality_warnings, matched_warnings
+from update_quality_gates import bridge_hard_fail_reasons, bridge_quality_checks, bridge_quality_warnings, matched_warnings
 
 def find_system_root(start: Path) -> Path:
     for p in [start, *start.parents]:
@@ -136,6 +136,14 @@ DEF_REPO   = str(DEF_REPO_PATH)
 DEF_BUNDLE = str(DEF_REPO_PATH / "deploy" / "reloc_map_xfeat_tri.pt")
 DEF_MODEL  = str(DEF_REPO_PATH / "glomap_fused" / "0")
 DEF_IMAGES = str(DEF_REPO_PATH / "update_from_reshot25_build_20260701" / "base_images_fused")
+
+def require_explicit_if_default_missing(flag, provided, default):
+    if provided:
+        return provided
+    default_path=Path(default)
+    if not default_path.exists():
+        raise SystemExit(f"{flag} default is missing ({default_path}); pass {flag} explicitly")
+    return str(default_path)
 
 FIXED_INTRINSICS = {
     # width, height: SIMPLE_RADIAL params [f, cx, cy, k1]
@@ -267,7 +275,7 @@ def parse_float_list(text):
 def main():
     ap=argparse.ArgumentParser(add_help=False)
     ap.add_argument("-h","--help",action="store_true")
-    ap.add_argument("--repo",default=DEF_REPO)
+    ap.add_argument("--repo",default=None)
     ap.add_argument("--matcher",choices=["edm","xfeat"],default="edm",
                     help="Update-time correspondence frontend. Default edm, matching the "
                          "deployed localizer. xfeat is legacy and feeds a bundle format that "
@@ -278,9 +286,9 @@ def main():
     ap.add_argument("--edm-deploy",default=None,
                     help="EDM deploy dir (reloc_localizer_edm.py / edm_matcher.py). "
                          "Defaults to <repo>/../EDM定位測試/deploy.")
-    ap.add_argument("--base-bundle",default=DEF_BUNDLE)
-    ap.add_argument("--base-model",default=DEF_MODEL)
-    ap.add_argument("--base-images",default=DEF_IMAGES)
+    ap.add_argument("--base-bundle",default=None)
+    ap.add_argument("--base-model",default=None)
+    ap.add_argument("--base-images",default=None)
     ap.add_argument("--base-megaloc-cache",default="",
                     help="optional precomputed base MegaLoc npz cache; copied/reused instead of extracting base refs")
     ap.add_argument("--new-data",default=str(SYSTEM_ROOT / "更新地圖" / "source" / "sfm_reshot25" / "images"))
@@ -354,6 +362,10 @@ def main():
     a=ap.parse_args()
     if a.help:
         print(__doc__); return
+    a.repo=require_explicit_if_default_missing("--repo",a.repo,Path(DEF_REPO))
+    a.base_bundle=require_explicit_if_default_missing("--base-bundle",a.base_bundle,Path(DEF_BUNDLE))
+    a.base_model=require_explicit_if_default_missing("--base-model",a.base_model,Path(DEF_MODEL))
+    a.base_images=require_explicit_if_default_missing("--base-images",a.base_images,Path(DEF_IMAGES))
 
     sys.path.insert(0, a.repo+"/deploy"); sys.path.insert(0, a.repo+"/scripts")
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -836,7 +848,16 @@ def main():
             med_bridge_area=float(bridge_best['bridge_median_support_area'])
             sub_pose_spread=float(np.median(np.linalg.norm(src_arr-src_arr.mean(0),axis=1))) if len(src_arr)>1 else 0.0
             base_pose_spread=float(np.median(np.linalg.norm(dst_arr-dst_arr.mean(0),axis=1))) if len(dst_arr)>1 else 0.0
-            bridge_warnings=[]
+            bridge_checks=bridge_quality_checks(
+                bridge_geometry=bridge_geom,
+                total_bridges=len(src),
+                median_inlier_ratio=med_bridge_ratio,
+                median_support_area=med_bridge_area,
+                min_inlier_ratio=a.bridge_min_inlier_ratio,
+                min_support_area=a.bridge_min_support_area,
+                min_geometry=a.bridge_min_geometry,
+                min_geometry_ratio=a.bridge_min_geometry_ratio,
+            )
             bridge_warnings=bridge_quality_warnings(
                 bridge_geometry=bridge_geom,
                 total_bridges=len(src),
@@ -847,11 +868,14 @@ def main():
                 min_geometry=a.bridge_min_geometry,
                 min_geometry_ratio=a.bridge_min_geometry_ratio,
             )
+            hard_fail_reasons=bridge_hard_fail_reasons(bridge_checks)
+            (out/f"bridge_quality_{seq}.json").write_text(json.dumps({'seq':seq,'selected_attempt':bridge_best['label'],'bridges':bridge_quality,'attempts':[{k:v for k,v in x.items() if k not in {'src','dst','sim3_R','sim3_t'}} for x in bridge_attempts],'checks':bridge_checks},indent=2),encoding='utf-8')
             log(f"[{seq}] Sim3 s={s:.3f} bridges={len(src)} ({bridge_geom} geometry, {bridge_conn} connector) resid={resid:.3f}u, bridge_ratio={med_bridge_ratio:.2f}, bridge_area={med_bridge_area:.3f}, attempt={bridge_best['label']} qk={bridge_best['qk']} topk={bridge_best['topk']} conf={bridge_best['min_conf']}")
-            if bridge_warnings and a.bridge_gate_quality:
-                log(f"[{seq}] bridge quality gate failed: {','.join(bridge_warnings)}")
+            if hard_fail_reasons or (bridge_warnings and a.bridge_gate_quality):
+                skip_reasons=bridge_warnings if a.bridge_gate_quality else hard_fail_reasons
+                log(f"[{seq}] bridge quality gate failed: {','.join(skip_reasons)}")
                 rollback_new_state(seq_state)
-                report.append({'seq':seq,'route':'submap','status':"skipped_bridge_quality:"+",".join(bridge_warnings),'register_rate':rr,'geometry_frames':len(fr),'connector_frames':len(cfr),'keyframes_added':0,'connector_keyframes_added':0,'connector_keyframes_rolled_back':cn,'connector_median_inliers':cmed,'points_added':0,'bridges':len(src),'bridge_geometry':bridge_geom,'bridge_connector':bridge_conn,'bridge_median_inlier_ratio':med_bridge_ratio,'bridge_median_support_area':med_bridge_area,'bridge_sub_pose_spread':sub_pose_spread,'bridge_base_pose_spread':base_pose_spread,'bridge_attempt':bridge_best['label'],'bridge_qk':bridge_best['qk'],'bridge_topk':bridge_best['topk'],'bridge_min_conf':bridge_best['min_conf'],'sim3_resid_u':resid,**classify_metrics}); continue
+                report.append({'seq':seq,'route':'submap','status':"skipped_bridge_quality:"+",".join(skip_reasons),'register_rate':rr,'geometry_frames':len(fr),'connector_frames':len(cfr),'keyframes_added':0,'connector_keyframes_added':0,'connector_keyframes_rolled_back':cn,'connector_median_inliers':cmed,'points_added':0,'bridges':len(src),'bridge_geometry':bridge_geom,'bridge_connector':bridge_conn,'bridge_median_inlier_ratio':med_bridge_ratio,'bridge_median_support_area':med_bridge_area,'bridge_sub_pose_spread':sub_pose_spread,'bridge_base_pose_spread':base_pose_spread,'bridge_attempt':bridge_best['label'],'bridge_qk':bridge_best['qk'],'bridge_topk':bridge_best['topk'],'bridge_min_conf':bridge_best['min_conf'],'sim3_resid_u':resid,**classify_metrics}); continue
             geom_obs_by_pid={}
             valid_point_ids=set()
             for pid,p3 in rec.points3D.items():
@@ -887,7 +911,7 @@ def main():
                 if len(sxyz): ply_xyz.append(s*(sxyz@R.T)+t); ply_rgb.append(srgb); npt=len(sxyz)
             status=quarantine_status or classify_metrics.get('classify_warnings') or (";".join(bridge_warnings) if bridge_warnings else 'ok')
             report.append({'seq':seq,'route':'submap','status':status,'register_rate':rr,'geometry_frames':len(fr),'connector_frames':len(cfr),'sim3_scale':float(s),'bridges':len(src),'bridge_geometry':bridge_geom,'bridge_connector':bridge_conn,'bridge_median_inlier_ratio':med_bridge_ratio,'bridge_median_support_area':med_bridge_area,'bridge_sub_pose_spread':sub_pose_spread,'bridge_base_pose_spread':base_pose_spread,'bridge_attempt':bridge_best['label'],'bridge_qk':bridge_best['qk'],'bridge_topk':bridge_best['topk'],'bridge_min_conf':bridge_best['min_conf'],'sim3_resid_u':resid,'keyframes_added':nkf+cn,'submap_keyframes_added':nkf,'connector_keyframes_added':cn,'connector_median_inliers':cmed,'points_added':npt,'raw_submap_points':rec.num_points3D(),'geometry_supported_points':len(valid_point_ids),**classify_metrics})
-            (out/f"bridge_quality_{seq}.json").write_text(json.dumps({'seq':seq,'selected_attempt':bridge_best['label'],'bridges':bridge_quality,'attempts':[{k:v for k,v in x.items() if k not in {'src','dst','sim3_R','sim3_t'}} for x in bridge_attempts]},indent=2),encoding='utf-8')
+            (out/f"bridge_quality_{seq}.json").write_text(json.dumps({'seq':seq,'selected_attempt':bridge_best['label'],'bridges':bridge_quality,'attempts':[{k:v for k,v in x.items() if k not in {'src','dst','sim3_R','sim3_t'}} for x in bridge_attempts],'checks':bridge_checks},indent=2),encoding='utf-8')
             log(f"[{seq}] SUBMAP done: +{nkf} submap keyframes, +{cn} connector keyframes, +{npt} points")
 
     # ---- write observation / old-point-health stats ----

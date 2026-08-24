@@ -262,8 +262,9 @@ def bridge_quality_checks(
 ) -> list[dict]:
     """Structured per-check receipts for bridge quality.
 
-    Records are review diagnostics. Merge refuse/allow still uses
-    ``bridge_quality_warnings``. Invalid or non-finite evidence is
+    ``HARD_FAIL`` receipts always refuse the merge. ``QUALITY_SHORTFALL``
+    still flows through ``bridge_quality_warnings`` and the optional
+    ``bridge_gate_quality`` switch. Invalid or non-finite evidence is
     ``HARD_FAIL`` / ``INSUFFICIENT_EVIDENCE`` so it cannot silently pass.
     """
     return [
@@ -319,4 +320,21 @@ def bridge_quality_warnings(
             min_geometry_ratio=min_geometry_ratio,
         )
         if check["reason"]
+    ]
+
+
+def bridge_hard_fail_reasons(checks_or_kwargs) -> list[str]:
+    """Reasons whose receipts have ``hard_status == HARD_FAIL``.
+
+    Accepts either the structured list from ``bridge_quality_checks`` or
+    the same keyword mapping that function takes.
+    """
+    if isinstance(checks_or_kwargs, dict):
+        checks = bridge_quality_checks(**checks_or_kwargs)
+    else:
+        checks = checks_or_kwargs
+    return [
+        check["reason"]
+        for check in checks
+        if check.get("hard_status") == "HARD_FAIL" and check.get("reason")
     ]

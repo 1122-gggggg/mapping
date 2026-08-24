@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from update_quality_gates import (
+    bridge_hard_fail_reasons,
     bridge_quality_checks,
     bridge_quality_warnings,
     matched_warnings,
@@ -104,6 +105,14 @@ def test_nonfinite_bridge_metric_is_hard_fail():
     assert "invalid_bridge_support_area" in warnings
     assert "low_bridge_inlier_ratio" not in warnings
     assert warnings != []
+    assert bridge_hard_fail_reasons(nan_kwargs) == [
+        "invalid_bridge_inlier_ratio",
+        "invalid_bridge_support_area",
+    ]
+    assert bridge_hard_fail_reasons(bridge_quality_checks(**nan_kwargs)) == [
+        "invalid_bridge_inlier_ratio",
+        "invalid_bridge_support_area",
+    ]
 
     checks = {check["name"]: check for check in bridge_quality_checks(**nan_kwargs)}
     assert checks["bridge_inlier_ratio"]["finite"] is False
@@ -126,6 +135,7 @@ def test_negative_bridge_counts_are_invalid():
         "invalid_bridge_geometry_count",
         "invalid_bridge_geometry_ratio",
     ]
+    assert bridge_hard_fail_reasons(kwargs) == warnings
     checks = {check["name"]: check for check in bridge_quality_checks(**kwargs)}
     assert checks["bridge_geometry_count"]["hard_status"] == "HARD_FAIL"
     assert checks["bridge_geometry_ratio"]["hard_status"] == "HARD_FAIL"
@@ -199,3 +209,19 @@ def test_zero_total_bridges_preserves_existing_ratio_denominator():
     assert checks["bridge_geometry_ratio"]["value"] == 1.0
     assert checks["bridge_geometry_ratio"]["passed"] is True
     assert bridge_quality_warnings(**kwargs) == []
+
+
+def test_valid_low_ratio_is_warning_not_hard_fail():
+    kwargs = _bridge_kwargs()
+    warnings = bridge_quality_warnings(**kwargs)
+    assert warnings == [
+        "low_bridge_inlier_ratio",
+        "low_bridge_support_area",
+        "low_bridge_geometry_count",
+        "low_bridge_geometry_ratio",
+    ]
+    assert bridge_hard_fail_reasons(kwargs) == []
+    assert bridge_hard_fail_reasons(bridge_quality_checks(**kwargs)) == []
+    for check in bridge_quality_checks(**kwargs):
+        assert check["hard_status"] == "VALID"
+        assert check["evidence_status"] == "QUALITY_SHORTFALL"

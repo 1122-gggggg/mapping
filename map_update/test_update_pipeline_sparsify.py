@@ -18,8 +18,12 @@ from update_pipeline import (
     inspect_update_summary,
     should_run_sparsify,
     update_requires_sparsify,
+    validate_update_outputs,
+    write_delivery_closeout,
     write_quality_report,
 )
+
+
 
 
 def test_frame_preparation_defaults_match_validated_split_run():
@@ -170,4 +174,74 @@ def test_no_sparsify_flag_wins_over_register_summary(tmp_path: Path):
     _write_summary(tmp_path, [{"seq": "P1", "route": "register", "keyframes_added": 3}])
     args = Namespace(sparsify=True, no_sparsify=True)
     assert should_run_sparsify(args, tmp_path) is False
+
+
+@pytest.mark.parametrize("route", ["register", "skip_high_overlap"])
+def test_inspect_update_summary_rejects_pnp_route_invented_points(tmp_path: Path, route: str):
+    _write_summary(tmp_path, [{"seq": "P1", "route": route, "status": "ok", "points_added": 4}])
+    _detail, reasons = inspect_update_summary(tmp_path)
+    assert any("PnP-only" in reason and "must not invent 3D points" in reason for reason in reasons)
+
+
+def test_inspect_update_summary_rejects_submap_without_closeout(tmp_path: Path):
+    _write_summary(tmp_path, [{"seq": "P2", "route": "submap", "status": "ok", "points_added": 12}])
+    _detail, reasons = inspect_update_summary(tmp_path)
+    assert any(
+        "delivery closeout" in reason and "site_profile" in reason and "G-U1" in reason
+        for reason in reasons
+    )
+
+
+def test_inspect_update_summary_rejects_submap_with_invalid_closeout(tmp_path: Path):
+    _write_summary(tmp_path, [{"seq": "P2", "route": "submap", "status": "ok", "points_added": 12}])
+    closeout = tmp_path / "gates" / "delivery_closeout.json"
+    closeout.parent.mkdir(parents=True, exist_ok=True)
+    closeout.write_text("{}", encoding="utf-8")
+    _detail, reasons = inspect_update_summary(tmp_path)
+    assert any("delivery closeout" in reason for reason in reasons)
+
+
+def test_write_delivery_closeout_marks_submap_gates_not_run(tmp_path: Path):
+    _write_summary(tmp_path, [{"seq": "P2", "route": "submap", "status": "ok", "points_added": 12}])
+    payload = write_delivery_closeout(tmp_path)
+    assert payload["site_profile"] == "NOT_RUN"
+    assert payload["t_align_gravity"] == "NOT_RUN"
+    assert payload["gauge_invariance"] == "NOT_RUN"
+    assert payload["deployable"] is False
+    assert payload["reasons"]
+    saved = json.loads((tmp_path / "gates" / "delivery_closeout.json").read_text(encoding="utf-8"))
+    assert saved["site_profile"] == "NOT_RUN"
+    assert saved["t_align_gravity"] == "NOT_RUN"
+    assert saved["gauge_invariance"] == "NOT_RUN"
+    assert saved["deployable"] is False
+    _detail, reasons = inspect_update_summary(tmp_path)
+    assert not any("delivery closeout" in reason for reason in reasons)
+
+
+def test_write_delivery_closeout_register_only_is_deployable(tmp_path: Path):
+    _write_summary(tmp_path, [{"seq": "P1", "route": "register", "status": "ok", "points_added": 0}])
+    payload = write_delivery_closeout(tmp_path)
+    assert payload["site_profile"] == "NOT_RUN"
+    assert payload["t_align_gravity"] == "NOT_RUN"
+    assert payload["gauge_invariance"] == "NOT_RUN"
+    assert payload["deployable"] is True
+    assert payload["reasons"] == []
+
+
+def test_validate_update_outputs_includes_closeout_path_and_metrics(tmp_path: Path):
+    _write_summary(tmp_path, [{"seq": "P1", "route": "register", "status": "ok", "points_added": 0}])
+    write_delivery_closeout(tmp_path)
+    (tmp_path / "update_report.md").write_text("ok", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        validate_update_outputs(tmp_path, require_ply=False)
+    gate = json.loads((tmp_path / "gates" / "update_outputs.json").read_text(encoding="utf-8"))
+    metrics = gate["metrics"]
+    closeout = tmp_path / "gates" / "delivery_closeout.json"
+    assert metrics["delivery_closeout_exists"] is True
+    assert metrics["delivery_closeout"] == str(closeout)
+    assert metrics["delivery_closeout_metrics"]["site_profile"] == "NOT_RUN"
+    assert metrics["delivery_closeout_metrics"]["t_align_gravity"] == "NOT_RUN"
+    assert metrics["delivery_closeout_metrics"]["gauge_invariance"] == "NOT_RUN"
+
+
 

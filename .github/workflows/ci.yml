@@ -37,6 +37,7 @@ jobs:
             diagnosis/src/sfm_qa/cli.py \
             diagnosis/src/sfm_qa/bridge.py \
             diagnosis/src/sfm_qa/pipeline.py \
+            diagnosis/src/sfm_qa/gate_attachments.py \
             diagnosis/src/sfm_qa/relative_quality.py \
             diagnosis/src/sfm_qa/session_select \
             diagnosis/tests/sfm_diagnosis/test_graph.py \
@@ -51,15 +52,22 @@ jobs:
             tools
       - name: Test session selection and diagnosis contracts
         run: |
-          pytest -q diagnosis/tests tools/test_diagnose_map.py tools/test_diagnosis_layout.py
+          pytest -q diagnosis/tests tools/test_diagnose_map.py tools/test_diagnosis_layout.py tools/test_diagnose_update.py
       - name: Test point-evidence maintenance
         run: |
           PYTHONPATH=map_update/core pytest -q \
             map_update/core/test_point_evidence_ledger.py \
-            map_update/core/test_point_evidence_recency.py
+            map_update/core/test_point_evidence_recency.py \
+            map_update/core/test_update_quality_gates.py \
+            map_update/core/test_changed_region_evidence.py
       - name: Test lightweight lifelong map update
         run: |
           PYTHONPATH=map_update/lifelong/src pytest -q map_update/lifelong/tests
+      - name: Test map update path contracts
+        run: |
+          PYTHONPATH=map_update pytest -q \
+            map_update/test_inrepo_path_contracts.py \
+            map_update/test_update_pipeline_sparsify.py
       - name: Test live pipeline utilities
         run: |
           PYTHONPATH=pipeline pytest -q \
@@ -68,4 +76,9 @@ jobs:
             pipeline/test_plan_db_reuse_sweep.py \
             pipeline/test_plan_research_method_experiments.py \
             pipeline/test_recompute_site_scale.py \
-            pipeline/test_build_localizable_map_core.py::PairGraphPerformanceTests
+            pipeline/test_verify_gauge_invariance.py \
+            pipeline/test_build_localizable_map_core.py::PairGraphPerformanceTests \
+            pipeline/test_build_localizable_map_core.py::MotionClassificationTests \
+            pipeline/test_build_localizable_map_core.py::PaperMethodIntegrationTests \
+            pipeline/test_build_localizable_map_core.py::PycolmapDatabaseCompatTests \
+            pipeline/test_build_localizable_map_core.py::ColmapSqliteSummaryTests

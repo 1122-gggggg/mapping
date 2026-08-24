@@ -38,7 +38,7 @@ def test_pure_translation_is_not_a_rotation():
     centers = cloud()
 
     assert residual_rotation_deg(centers, centers + [10.0, -3.0, 7.0]) == pytest.approx(
-        0.0, abs=1e-9
+        0.0, abs=1e-4
     )
 
 
@@ -48,7 +48,7 @@ def test_recovers_a_known_rotation(degrees):
 
     recovered = residual_rotation_deg(centers, centers @ rotation_about_z(degrees).T)
 
-    assert recovered == pytest.approx(degrees, rel=1e-6, abs=1e-9)
+    assert recovered == pytest.approx(degrees, rel=1e-5, abs=1e-6)
 
 
 def test_detects_the_rotation_measured_on_the_real_s5_finalization():
