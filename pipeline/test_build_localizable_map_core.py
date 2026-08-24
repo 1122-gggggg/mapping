@@ -12,7 +12,22 @@ from unittest import mock
 import numpy as np
 
 
-MODULE_PATH = Path(__file__).with_name("build_localizable_map_core.py")
+def _core_module_path() -> Path:
+    link = Path(__file__).with_name("build_localizable_map_core.py")
+    target = Path(__file__).resolve().parents[1] / "map_update" / "build_localizable_map.py"
+    try:
+        if link.is_symlink():
+            return link.resolve()
+    except OSError:
+        pass
+    if target.is_file():
+        first = link.read_text(encoding="utf-8", errors="replace")[:120]
+        if "build_localizable_map.py" in first and "def " not in first:
+            return target
+    return link
+
+
+MODULE_PATH = _core_module_path()
 SPEC = importlib.util.spec_from_file_location("build_localizable_map_core", MODULE_PATH)
 assert SPEC and SPEC.loader
 core = importlib.util.module_from_spec(SPEC)

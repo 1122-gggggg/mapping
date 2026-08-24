@@ -25,6 +25,7 @@ from sfm_diagnosis.evidence import load_build_evidence
 from sfm_diagnosis.weak_regions import analyze_weak_regions
 
 from .bridge import map_model_to_map_data, mapdoctor_rows_to_history_rows, nearest_mapping_rotation
+from .gate_attachments import load_run_attachments
 from .relative_quality import percentile_ranks, weighted_observed_score
 
 MAP_LIMITED_CODES = {
@@ -615,6 +616,7 @@ def analyze(
     pairs: str | Path | None = None,
     images_manifest: str | Path | None = None,
     images_dir: str | Path | None = None,
+    run_dir: str | Path | None = None,
 ) -> dict:
     """Diagnose the map first, then optionally attribute localization logs."""
     model = get_adapter(backend).load(model_path)
@@ -640,17 +642,18 @@ def analyze(
             map_data=map_data,
             model=model,
         )
-    payload = jsonable(
-        {
-            "overall_status": _overall_status(
-                map_report["readiness"]["map_ok"],
-                loc_report,
-                map_integrity_ok=map_report["readiness"]["map_integrity_ok"],
-            ),
-            "map": map_report,
-            "localization": loc_report,
-        }
-    )
+    body: dict[str, Any] = {
+        "overall_status": _overall_status(
+            map_report["readiness"]["map_ok"],
+            loc_report,
+            map_integrity_ok=map_report["readiness"]["map_integrity_ok"],
+        ),
+        "map": map_report,
+        "localization": loc_report,
+    }
+    if run_dir is not None:
+        body["gate_attachments"] = load_run_attachments(run_dir)
+    payload = jsonable(body)
     if output_dir is not None:
         out = Path(output_dir)
         map_dir = out / "map"
@@ -684,6 +687,7 @@ def check(
     pairs: str | Path | None = None,
     images_manifest: str | Path | None = None,
     images_dir: str | Path | None = None,
+    run_dir: str | Path | None = None,
 ) -> dict:
     """Compatibility alias for ``analyze``."""
     return analyze(
@@ -696,6 +700,7 @@ def check(
         pairs=pairs,
         images_manifest=images_manifest,
         images_dir=images_dir,
+        run_dir=run_dir,
     )
 
 

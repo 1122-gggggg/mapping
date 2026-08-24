@@ -54,6 +54,15 @@ def _add_common(parser: argparse.ArgumentParser, *, logs_required: bool) -> None
     parser.add_argument("--images-dir", type=Path, default=None, help="Optional image directory for quality evidence")
 
 
+def _add_run_dir(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Existing S0-S9 run directory; attach gate JSON without recomputing",
+    )
+
+
 def _add_select_sessions(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--videos", type=Path, required=True, help="Directory of input videos")
     parser.add_argument("--output", type=Path, required=True, help="Write Stage 0 selection reports here")
@@ -87,10 +96,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     analyze_p = sub.add_parser("analyze", help="Stage 1 map diagnosis, then Stage 2 if --logs is given")
     _add_common(analyze_p, logs_required=False)
+    _add_run_dir(analyze_p)
     check_p = sub.add_parser("check", help="Alias for analyze")
     _add_common(check_p, logs_required=False)
+    _add_run_dir(check_p)
     map_p = sub.add_parser("check-map", help="Screen the reconstruction only")
     _add_common(map_p, logs_required=False)
+    _add_run_dir(map_p)
     loc_p = sub.add_parser("check-localize", help="Screen the map and require localization logs")
     _add_common(loc_p, logs_required=True)
     select_p = sub.add_parser(
@@ -249,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         pairs=args.pairs,
         images_manifest=args.images_manifest,
         images_dir=args.images_dir,
+        run_dir=getattr(args, "run_dir", None),
     )
     _print_summary(report, args.output, logs_given=logs_path is not None)
     return 0 if is_success_status(report["overall_status"]) else 1
