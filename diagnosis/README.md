@@ -142,10 +142,17 @@ mapdoctor --help
 sfm-diagnosis --help
 
 # Colored risk spheres from a map plus optional heatmap / weak-region / logs.
-# Does not recompute FIM.
+# Does not recompute FIM. `.jsonl` logs are one JSON object per non-blank line.
 sfm-diagnosis risk-ply /path/to/map --map-adapter colmap --output ./risk \
-  [--heatmap ./heatmap] [--weak-regions ./qa-out] [--logs loc.jsonl]
+  [--heatmap ./heatmap] [--weak-regions ./qa-out] [--logs loc.jsonl] \
+  [--image-roles frame_manifest.json]
 ```
+
+Optional `--image-roles` distinguishes zero-observation `bridge_only` cameras
+(`unverified_bridge_pose`) from zero-observation triangulation cameras
+(`zero_triangulation`). Wrapper extra markers for those images are not
+double-counted. JSONL rows that are not objects fail closed and are never
+parsed as CSV.
 
 FIM observability is not a calibrated success probability. Retrieval proxies
 for no-pose failures are not ground truth. ActLoc

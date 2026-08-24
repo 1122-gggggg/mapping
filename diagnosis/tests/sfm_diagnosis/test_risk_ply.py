@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+from sfm_diagnosis.cli import main as risk_ply_cli
 from sfm_diagnosis.models import CameraIntrinsics, MapData
-from sfm_diagnosis.risk_ply import ISSUE_COLORS, write_risk_ply
+from sfm_diagnosis.risk_ply import ISSUE_COLORS, load_jsonl_rows, load_rows, write_risk_ply
 from test_diagnose import healthy_map
 
 
@@ -21,11 +24,11 @@ def _tiny_map() -> MapData:
         point_errors=np.full(3, 0.4),
         track_lengths=np.array([2, 2, 0], dtype=int),
         track_image_ids=[np.array([0, 1]), np.array([0, 1]), np.array([], dtype=int)],
-        image_ids=np.array([0, 1, 2]),
-        image_names=["im_0.jpg", "im_1.jpg", "bridge.jpg"],
-        image_camera_ids=np.zeros(3, dtype=int),
-        image_centers=np.array([[0, 0, 0], [1, 0, 0], [4, 0, 0]], dtype=float),
-        image_R_wc=np.repeat(np.eye(3)[None], 3, axis=0),
+        image_ids=np.array([0, 1, 2, 3]),
+        image_names=["im_0.jpg", "im_1.jpg", "bridge.jpg", "tri.jpg"],
+        image_camera_ids=np.zeros(4, dtype=int),
+        image_centers=np.array([[0, 0, 0], [1, 0, 0], [4, 0, 0], [5, 0, 0]], dtype=float),
+        image_R_wc=np.repeat(np.eye(3)[None], 4, axis=0),
         cameras={0: CameraIntrinsics(0, "PINHOLE", 1000, 800, 500, 500, 500, 400)},
     )
 
@@ -81,6 +84,154 @@ def test_risk_ply_header_map_vertices_and_colored_spheres(tmp_path: Path):
     assert "FIM observability" not in legend or True
     assert "heldout_geometry_weak" in legend
     assert "ActLoc" in Path(tmp_path / "risk_ply_receipt.json").read_text(encoding="utf-8")
+
+
+def test_load_rows_jsonl_objects_not_csv(tmp_path: Path):
+    path = tmp_path / "loc.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "query": "q1",
+                        "status": "GEOMETRY_WEAK",
+                        "x": 1.0,
+                        "y": 2.0,
+                        "z": 3.0,
+                    }
+                ),
+                "",
+                json.dumps(
+                    {
+                        "query": "q2",
+                        "status": "DIRECT_PROVISIONAL",
+                        "pose": {"x": 4.0, "y": 5.0, "z": 6.0},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = load_rows(path)
+    assert [row["query"] for row in rows] == ["q1", "q2"]
+    assert rows[0]["x"] == 1.0
+    assert "query" in rows[0]
+    assert list(rows[0]) != [path.read_text(encoding="utf-8").splitlines()[0]]
+
+
+def test_load_jsonl_rejects_non_object(tmp_path: Path):
+    path = tmp_path / "bad.jsonl"
+    path.write_text("[1, 2, 3]\n{\"ok\": true}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        load_jsonl_rows(path)
+
+
+def test_write_risk_ply_jsonl_path(tmp_path: Path):
+    logs = tmp_path / "heldout.jsonl"
+    logs.write_text(
+        json.dumps({"query": "q1", "status": "GEOMETRY_WEAK", "x": 2.0, "y": 0.0, "z": 0.0})
+        + "\n",
+        encoding="utf-8",
+    )
+    receipt = write_risk_ply(
+        _tiny_map(),
+        tmp_path / "from_jsonl",
+        localization=logs,
+        sphere_samples=8,
+        filename="from_jsonl.ply",
+    )
+    assert receipt["fim_recomputed"] is False
+    assert receipt["inputs"]["localization_rows"] == 1
+    assert receipt["counts"]["heldout_geometry_weak"] == 1
+
+
+def test_cli_risk_ply_jsonl_logs(tmp_path: Path):
+    fixture = Path(__file__).resolve().parents[1] / "mapdoctor" / "fixtures" / "colmap_text"
+    logs = tmp_path / "loc.jsonl"
+    logs.write_text(
+        json.dumps({"query": "q1", "status": "GEOMETRY_WEAK", "x": 0.0, "y": 0.0, "z": 0.0})
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "cli-risk"
+    code = risk_ply_cli(
+        [
+            "risk-ply",
+            str(fixture),
+            "--map-adapter",
+            "colmap",
+            "--output",
+            str(out),
+            "--logs",
+            str(logs),
+        ]
+    )
+    assert code == 0
+    receipt = json.loads((out / "risk_ply_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["inputs"]["localization_rows"] == 1
+    assert receipt["fim_recomputed"] is False
+    assert receipt["counts"]["heldout_geometry_weak"] == 1
+
+
+def test_zero_observation_roles_and_no_double_count(tmp_path: Path):
+    receipt = write_risk_ply(
+        _tiny_map(),
+        tmp_path / "roles",
+        image_roles={"bridge.jpg": "bridge_only", "tri.jpg": "triangulation"},
+        extra_markers=[
+            {
+                "issue_class": "zero_triangulation",
+                "x": 5.0,
+                "y": 0.0,
+                "z": 0.0,
+                "image_name": "tri.jpg",
+            }
+        ],
+        sphere_samples=8,
+        filename="roles.ply",
+    )
+    assert receipt["counts"]["unverified_bridge_pose"] == 1
+    assert receipt["counts"]["zero_triangulation"] == 1
+    assert receipt["fim_recomputed"] is False
+    assert "zero_triangulation" in ISSUE_COLORS
+
+
+def test_heldout_uses_nested_accept_not_outer_direct_strong(tmp_path: Path):
+    receipt = write_risk_ply(
+        _tiny_map(),
+        tmp_path / "accept",
+        localization=[
+            {
+                "query": "accepted",
+                "status": "DIRECT_STRONG",
+                "decision": {"status": "ACCEPT"},
+                "x": 1.0,
+                "y": 0.0,
+                "z": 0.0,
+            },
+            {
+                "query": "leaked",
+                "status": "DIRECT_STRONG",
+                "decision": {"status": "REJECT_UNVERIFIED_SUPPORT"},
+                "x": 2.0,
+                "y": 0.0,
+                "z": 0.0,
+            },
+        ],
+        image_roles={"bridge.jpg": "bridge_only", "tri.jpg": "triangulation"},
+        sphere_samples=8,
+        filename="accept.ply",
+    )
+    queries = {
+        marker.get("query"): marker.get("issue_class")
+        for marker in receipt["markers"]
+        if marker.get("query")
+    }
+    assert "accepted" not in queries
+    assert queries["leaked"] == "heldout_geometry_weak"
+    assert receipt["counts"]["heldout_geometry_weak"] == 1
+    assert receipt["fim_recomputed"] is False
 
 
 def test_healthy_map_fixture_still_imports():

@@ -9,7 +9,7 @@ from __future__ import annotations
 import csv
 import json
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ ISSUE_COLORS: dict[str, tuple[int, int, int]] = {
     "fim_weak": (255, 140, 0),
     "direction_sensitive": (255, 215, 0),
     "unverified_bridge_pose": (148, 0, 211),
+    "zero_triangulation": (0, 110, 70),
     "weak_region": (255, 64, 64),
     "heldout_geometry_weak": (180, 0, 0),
     "heldout_provisional": (0, 180, 200),
@@ -38,6 +39,9 @@ ISSUE_LEGEND: dict[str, str] = {
     "fim_weak": "Consumed heatmap marks weak FIM isotropy/condition. This is observability, not success probability.",
     "direction_sensitive": "Consumed heatmap health changes sharply across orientations at one position.",
     "unverified_bridge_pose": "Registered camera has zero 3D observations; pose is not localization evidence.",
+    "zero_triangulation": (
+        "Registered triangulation camera has zero 3D observations; the pose is unsupported by map tracks."
+    ),
     "weak_region": "Weak-region centroid from sfm-diagnosis analyze. Not a calibrated failure location.",
     "heldout_geometry_weak": "Optional localization log has a pose but failed the provided success flag.",
     "heldout_provisional": "Optional localization log marked provisional; not a deployable success.",
@@ -52,6 +56,36 @@ CAVEATS = (
     "shadow diagnostics only; they are not an authorized ActLoc network and are "
     "not held-out calibrated.",
 )
+
+_JSONL_SUFFIXES = {".jsonl", ".ndjson"}
+_HEATMAP_DIR_NAMES = (
+    "pose_health.csv",
+    "position_health.csv",
+    "weak_regions.json",
+    "summary.json",
+)
+_JSON_ROW_KEYS = (
+    "images",
+    "regions",
+    "rows",
+    "queries",
+    "virtual_camera_rows",
+    "frames",
+)
+_BRIDGE_ROLE_TOKENS = {
+    "bridge",
+    "bridge_only",
+    "pure_rotation",
+    "unverified_bridge_pose",
+}
+_TRIANGULATION_ROLE_TOKENS = {
+    "core",
+    "parallax",
+    "triangulate",
+    "triangulation",
+    "zero_triangulation",
+}
+_ZERO_OBS_ISSUES = {"unverified_bridge_pose", "zero_triangulation"}
 
 
 def _as_float(value: Any) -> float | None:
@@ -92,33 +126,179 @@ def sphere_points(center: Sequence[float], radius: float, count: int = 48) -> np
     return out
 
 
-def _load_rows(path: str | Path | None) -> list[dict[str, Any]]:
+def _mapping_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [dict(row) for row in payload if isinstance(row, Mapping)]
+    if isinstance(payload, Mapping):
+        for key in _JSON_ROW_KEYS:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [dict(row) for row in value if isinstance(row, Mapping)]
+        return [dict(payload)]
+    return []
+
+
+def load_jsonl_rows(path: str | Path) -> list[dict[str, Any]]:
+    """Parse one JSON object per non-blank line. Non-objects fail closed."""
+
+    target = Path(path)
+    rows: list[dict[str, Any]] = []
+    with target.open(encoding="utf-8") as handle:
+        for lineno, line in enumerate(handle, 1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{target}:{lineno} is not valid JSON") from exc
+            if not isinstance(payload, Mapping):
+                raise ValueError(
+                    f"{target}:{lineno} is not a JSON object "
+                    f"(got {type(payload).__name__})"
+                )
+            rows.append(dict(payload))
+    return rows
+
+
+def load_rows(path: str | Path | None) -> list[dict[str, Any]]:
+    """Load diagnosis or localization rows from JSON/JSONL/CSV or a directory."""
+
     if path is None:
         return []
     target = Path(path)
     if target.is_dir():
-        for name in ("pose_health.csv", "position_health.csv", "weak_regions.json", "summary.json"):
+        for name in _HEATMAP_DIR_NAMES:
             candidate = target / name
             if candidate.is_file():
                 target = candidate
                 break
         else:
-            return []
+            jsonl_files = sorted(
+                [
+                    *target.glob("*.jsonl"),
+                    *target.glob("*.ndjson"),
+                ]
+            )
+            rows: list[dict[str, Any]] = []
+            for candidate in jsonl_files:
+                rows.extend(load_jsonl_rows(candidate))
+            return rows
     if not target.is_file():
         return []
-    if target.suffix.lower() == ".json":
-        payload = json.loads(target.read_text(encoding="utf-8"))
-        if isinstance(payload, list):
-            return [row for row in payload if isinstance(row, Mapping)]
-        if isinstance(payload, Mapping):
-            for key in ("images", "regions", "rows", "queries", "virtual_camera_rows"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return [row for row in value if isinstance(row, Mapping)]
-            return [dict(payload)]
-        return []
+    suffix = target.suffix.lower()
+    if suffix in _JSONL_SUFFIXES:
+        return load_jsonl_rows(target)
+    if suffix == ".json":
+        return _mapping_rows(json.loads(target.read_text(encoding="utf-8")))
     with target.open(encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _load_rows(path: str | Path | None) -> list[dict[str, Any]]:
+    return load_rows(path)
+
+
+def _is_row_sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _coerce_rows(
+    value: str | Path | Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if _is_row_sequence(value):
+        return [dict(row) for row in value if isinstance(row, Mapping)]
+    return load_rows(value)
+
+
+def _image_name(row: Mapping[str, Any]) -> str | None:
+    for key in ("image_name", "output_name", "name"):
+        value = row.get(key)
+        if value is not None and str(value).strip() != "":
+            return str(value)
+    return None
+
+
+def _image_keys(row: Mapping[str, Any]) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    name = _image_name(row)
+    if name is not None:
+        keys.add(("name", name))
+        keys.add(("name", Path(name).name))
+    image_id = _as_int(row.get("image_id"))
+    if image_id is not None:
+        keys.add(("id", str(image_id)))
+    return keys
+
+
+def _normalize_role(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _zero_obs_issue(role: Any) -> str:
+    token = _normalize_role(role)
+    if token in _TRIANGULATION_ROLE_TOKENS:
+        return "zero_triangulation"
+    if token in _BRIDGE_ROLE_TOKENS or token == "":
+        return "unverified_bridge_pose"
+    return "zero_triangulation"
+
+
+def normalize_image_roles(
+    value: str | Path | Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
+) -> dict[str, str]:
+    """Accept a name→role map, row sequence, or JSON/JSONL/CSV path."""
+
+    if value is None:
+        return {}
+    if isinstance(value, (str, bytes, Path)):
+        value = load_rows(value)
+    if isinstance(value, Mapping):
+        if isinstance(value.get("frames"), list):
+            value = value["frames"]
+        elif any(key in value for key in ("role", "image_role", "motion_role")):
+            value = [value]
+        elif all(
+            not isinstance(role, (Mapping, list, tuple)) for role in value.values()
+        ):
+            return {
+                str(key): str(role)
+                for key, role in value.items()
+                if role is not None
+            }
+        else:
+            return {}
+    if not _is_row_sequence(value):
+        return {}
+    roles: dict[str, str] = {}
+    for row in value:
+        if not isinstance(row, Mapping):
+            continue
+        name = _image_name(row)
+        role = row.get("role", row.get("image_role", row.get("motion_role")))
+        if name is None or role is None:
+            continue
+        roles[name] = str(role)
+        base = Path(name).name
+        roles.setdefault(base, str(role))
+    return roles
+
+
+def _role_for_image(
+    name: str,
+    image_id: int,
+    roles: Mapping[str, str],
+) -> str | None:
+    if name in roles:
+        return roles[name]
+    base = Path(name).name
+    if base in roles:
+        return roles[base]
+    if str(image_id) in roles:
+        return roles[str(image_id)]
+    return None
 
 
 def _observation_counts(map_data: MapData) -> np.ndarray:
@@ -132,22 +312,36 @@ def _observation_counts(map_data: MapData) -> np.ndarray:
     return counts
 
 
-def markers_from_map(map_data: MapData) -> list[dict[str, Any]]:
+def markers_from_map(
+    map_data: MapData,
+    image_roles: Mapping[str, str] | None = None,
+    skip_image_keys: set[tuple[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     counts = _observation_counts(map_data)
+    roles = dict(image_roles or {})
+    skip = skip_image_keys or set()
     markers: list[dict[str, Any]] = []
     for index, count in enumerate(counts.tolist()):
         if count > 0:
             continue
+        name = str(map_data.image_names[index])
+        image_id = int(map_data.image_ids[index])
+        keys = {("name", name), ("name", Path(name).name), ("id", str(image_id))}
+        if keys & skip:
+            continue
+        role = _role_for_image(name, image_id, roles)
+        issue = _zero_obs_issue(role)
         center = map_data.image_centers[index]
         markers.append(
             {
-                "issue_class": "unverified_bridge_pose",
+                "issue_class": issue,
                 "x": float(center[0]),
                 "y": float(center[1]),
                 "z": float(center[2]),
                 "source": "map_zero_observations",
-                "image_name": map_data.image_names[index],
-                "image_id": int(map_data.image_ids[index]),
+                "image_name": name,
+                "image_id": image_id,
+                "image_role": role,
             }
         )
     return markers
@@ -167,30 +361,29 @@ def markers_from_heatmap(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, An
         occupancy = _as_float(row.get("grid_occupancy"))
         rank_proxy = _as_float(row.get("fim_lambda_min"))
         condition = _as_float(row.get("fim_condition"))
-        issue = None
+        issues: list[str] = []
         if "DATA_SPARSE" in codes or primary == "DATA_SPARSE" or (
             visible is not None and visible < 40
         ) or (occupancy is not None and occupancy < 6):
-            issue = "coverage_hole"
-        elif rank_proxy is not None and rank_proxy <= 1e-12:
-            issue = "fim_rank_deficient"
-        elif "GEOMETRY_WEAK" in codes or primary == "GEOMETRY_WEAK" or (
+            issues.append("coverage_hole")
+        if rank_proxy is not None and rank_proxy <= 1e-12:
+            issues.append("fim_rank_deficient")
+        if "GEOMETRY_WEAK" in codes or primary == "GEOMETRY_WEAK" or (
             condition is not None and condition > 1e6
         ):
-            issue = "fim_weak"
-        if issue is None:
-            continue
-        markers.append(
-            {
-                "issue_class": issue,
-                "x": x,
-                "y": y,
-                "z": z,
-                "source": "heatmap",
-                "primary": primary,
-                "codes": codes,
-            }
-        )
+            issues.append("fim_weak")
+        for issue in issues:
+            markers.append(
+                {
+                    "issue_class": issue,
+                    "x": x,
+                    "y": y,
+                    "z": z,
+                    "source": "heatmap",
+                    "primary": primary,
+                    "codes": codes,
+                }
+            )
     for (x, y, z), group in by_position.items():
         scores = [_as_float(row.get("health_score") or row.get("best_health")) for row in group]
         finite = [value for value in scores if value is not None]
@@ -256,13 +449,35 @@ def _pose_center(value: Any) -> tuple[float, float, float] | None:
         return float(matrix[0]), float(matrix[1]), float(matrix[2])
     return None
 
+
+def _nested_decision(row: Mapping[str, Any]) -> tuple[str, bool, bool]:
+    decision = row.get("decision")
+    if not isinstance(decision, Mapping):
+        return "", False, False
+    nested = str(decision.get("status") or "").strip().upper()
+    accept_flag = decision.get("accept")
+    if accept_flag is None:
+        accept_flag = decision.get("accepted")
+    accepted = nested == "ACCEPT" or accept_flag in {1, True, "1", "true", "True"}
+    present = bool(nested) or accept_flag is not None
+    return nested, accepted, present
+
+
 def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     markers: list[dict[str, Any]] = []
     for row in rows:
         success = row.get("success")
-        status = str(row.get("status") or row.get("decision", {}).get("status") or "")
+        nested_status, nested_accepted, has_nested = _nested_decision(row)
+        status = str(row.get("status") or nested_status or "")
         token = status.upper()
-        strong = success in {1, True, "1", "true", "True"} or "DIRECT_STRONG" in token or token == "STRONG"
+        if has_nested:
+            strong = nested_accepted
+        else:
+            strong = (
+                success in {1, True, "1", "true", "True"}
+                or "DIRECT_STRONG" in token
+                or token == "STRONG"
+            )
         provisional = bool(
             row.get("provisional")
             or "PROVISIONAL" in token
@@ -286,6 +501,7 @@ def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
                     "source": "localization_retrieval_proxy",
                     "query": row.get("query") or row.get("query_name"),
                     "status": status,
+                    "nested_decision": nested_status or None,
                 }
             )
             continue
@@ -299,6 +515,7 @@ def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
                 "source": "localization_log",
                 "query": row.get("query") or row.get("query_name"),
                 "status": status,
+                "nested_decision": nested_status or None,
             }
         )
     return markers
@@ -342,6 +559,7 @@ def write_risk_ply(
     weak_regions: str | Path | Sequence[Mapping[str, Any]] | None = None,
     localization: str | Path | Sequence[Mapping[str, Any]] | None = None,
     extra_markers: Sequence[Mapping[str, Any]] | None = None,
+    image_roles: str | Path | Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
     sphere_radius: float | None = None,
     sphere_samples: int = 48,
     include_actloc_shadow: bool = False,
@@ -351,24 +569,24 @@ def write_risk_ply(
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    heatmap_rows = list(heatmap) if isinstance(heatmap, Sequence) and not isinstance(heatmap, (str, bytes)) else _load_rows(heatmap)
-    weak_rows = (
-        list(weak_regions)
-        if isinstance(weak_regions, Sequence) and not isinstance(weak_regions, (str, bytes))
-        else _load_rows(weak_regions)
-    )
-    loc_rows = (
-        list(localization)
-        if isinstance(localization, Sequence) and not isinstance(localization, (str, bytes))
-        else _load_rows(localization)
-    )
-    markers = markers_from_map(map_data)
-    markers.extend(markers_from_heatmap(heatmap_rows))
-    markers.extend(markers_from_weak_regions(weak_rows))
-    markers.extend(markers_from_localization(loc_rows))
+    heatmap_rows = _coerce_rows(heatmap)
+    weak_rows = _coerce_rows(weak_regions)
+    loc_rows = _coerce_rows(localization)
+    roles = normalize_image_roles(image_roles)
+    skip_keys: set[tuple[str, str]] = set()
+    accepted_extra: list[dict[str, Any]] = []
     for row in extra_markers or ():
         if not isinstance(row, Mapping):
             continue
+        issue = str(row.get("issue_class") or "")
+        if issue in _ZERO_OBS_ISSUES:
+            skip_keys |= _image_keys(row)
+        accepted_extra.append(dict(row))
+    markers = markers_from_map(map_data, image_roles=roles, skip_image_keys=skip_keys)
+    markers.extend(markers_from_heatmap(heatmap_rows))
+    markers.extend(markers_from_weak_regions(weak_rows))
+    markers.extend(markers_from_localization(loc_rows))
+    for row in accepted_extra:
         issue = str(row.get("issue_class") or "")
         if issue not in ISSUE_COLORS:
             continue
@@ -434,6 +652,7 @@ def write_risk_ply(
             "heatmap_rows": len(heatmap_rows),
             "weak_region_rows": len(weak_rows),
             "localization_rows": len(loc_rows),
+            "image_role_rows": len(roles),
         },
         "markers": markers,
     }
@@ -446,10 +665,13 @@ __all__ = [
     "CAVEATS",
     "ISSUE_COLORS",
     "ISSUE_LEGEND",
+    "load_jsonl_rows",
+    "load_rows",
     "markers_from_heatmap",
     "markers_from_localization",
     "markers_from_map",
     "markers_from_weak_regions",
+    "normalize_image_roles",
     "sphere_points",
     "write_ascii_ply",
     "write_risk_ply",

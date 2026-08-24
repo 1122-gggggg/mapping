@@ -179,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
             heatmap=args.heatmap,
             weak_regions=args.weak_regions,
             localization=args.logs,
+            image_roles=getattr(args, "image_roles", None),
             include_actloc_shadow=bool(args.include_actloc_shadow),
         )
         print(
@@ -462,6 +463,10 @@ def _parser() -> argparse.ArgumentParser:
     risk.add_argument("--heatmap", help="pose_health.csv or heatmap directory")
     risk.add_argument("--weak-regions", help="weak-region JSON/CSV or analyze directory")
     risk.add_argument("--logs", help="optional localization CSV/JSON/JSONL")
+    risk.add_argument(
+        "--image-roles",
+        help="optional image-name to role JSON/JSONL/CSV or frame manifest",
+    )
     risk.add_argument(
         "--include-actloc-shadow",
         action="store_true",
