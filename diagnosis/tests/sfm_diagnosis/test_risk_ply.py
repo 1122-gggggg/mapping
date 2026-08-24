@@ -197,7 +197,7 @@ def test_zero_observation_roles_and_no_double_count(tmp_path: Path):
     assert "zero_triangulation" in ISSUE_COLORS
 
 
-def test_heldout_uses_nested_accept_not_outer_direct_strong(tmp_path: Path):
+def test_heldout_success_requires_outer_strong_and_nested_accept(tmp_path: Path):
     receipt = write_risk_ply(
         _tiny_map(),
         tmp_path / "accept",
@@ -211,10 +211,40 @@ def test_heldout_uses_nested_accept_not_outer_direct_strong(tmp_path: Path):
                 "z": 0.0,
             },
             {
+                "query": "weak_accept",
+                "status": "GEOMETRY_WEAK",
+                "decision": {"status": "ACCEPT"},
+                "x": 1.5,
+                "y": 0.0,
+                "z": 0.0,
+            },
+            {
                 "query": "leaked",
                 "status": "DIRECT_STRONG",
                 "decision": {"status": "REJECT_UNVERIFIED_SUPPORT"},
                 "x": 2.0,
+                "y": 0.0,
+                "z": 0.0,
+            },
+            {
+                "query": "provisional_accept",
+                "status": "DIRECT_PROVISIONAL",
+                "decision": {"status": "ACCEPT"},
+                "x": 3.0,
+                "y": 0.0,
+                "z": 0.0,
+            },
+            {
+                "query": "strong_missing_nested",
+                "status": "DIRECT_STRONG",
+                "x": 3.5,
+                "y": 0.0,
+                "z": 0.0,
+            },
+            {
+                "query": "legacy_bool",
+                "success": True,
+                "x": 4.0,
                 "y": 0.0,
                 "z": 0.0,
             },
@@ -229,8 +259,13 @@ def test_heldout_uses_nested_accept_not_outer_direct_strong(tmp_path: Path):
         if marker.get("query")
     }
     assert "accepted" not in queries
+    assert "legacy_bool" not in queries
+    assert queries["weak_accept"] == "heldout_geometry_weak"
     assert queries["leaked"] == "heldout_geometry_weak"
-    assert receipt["counts"]["heldout_geometry_weak"] == 1
+    assert queries["strong_missing_nested"] == "heldout_geometry_weak"
+    assert queries["provisional_accept"] == "heldout_provisional"
+    assert receipt["counts"]["heldout_geometry_weak"] == 3
+    assert receipt["counts"]["heldout_provisional"] == 1
     assert receipt["fim_recomputed"] is False
 
 

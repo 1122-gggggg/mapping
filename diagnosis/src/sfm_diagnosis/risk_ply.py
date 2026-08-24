@@ -2,6 +2,11 @@
 
 This module does not compute a second Fisher information matrix. Heatmap and
 weak-region artifacts are consumed as already-diagnosed evidence.
+
+Held-out success is the conjunction of outer ``DIRECT_STRONG`` and nested
+``decision.status == ACCEPT``. Nested ``REJECT*`` always fails. Outer
+``GEOMETRY_WEAK`` / ``PROVISIONAL`` plus nested ``ACCEPT`` remains a marker.
+Explicit boolean ``success`` is used only when those richer statuses are absent.
 """
 
 from __future__ import annotations
@@ -43,8 +48,15 @@ ISSUE_LEGEND: dict[str, str] = {
         "Registered triangulation camera has zero 3D observations; the pose is unsupported by map tracks."
     ),
     "weak_region": "Weak-region centroid from sfm-diagnosis analyze. Not a calibrated failure location.",
-    "heldout_geometry_weak": "Optional localization log has a pose but failed the provided success flag.",
-    "heldout_provisional": "Optional localization log marked provisional; not a deployable success.",
+    "heldout_geometry_weak": (
+        "Optional localization log has a pose but failed the strict conjunction "
+        "(outer DIRECT_STRONG and nested decision.status ACCEPT). Nested REJECT* "
+        "always fails. Outer GEOMETRY_WEAK/PROVISIONAL plus nested ACCEPT stays a marker."
+    ),
+    "heldout_provisional": (
+        "Optional localization log is outer PROVISIONAL (even with nested ACCEPT); "
+        "not a deployable success."
+    ),
     "failure_retrieval_proxy": "Failed query has no pose; marker is a retrieval reference, not ground truth.",
     "actloc_shadow": "StructuralLocalizabilityProxy shadow marker only. Not an authorized ActLoc network.",
 }
@@ -55,6 +67,10 @@ CAVEATS = (
     "StructuralLocalizabilityProxy and ExternalPredictorAdapter are ActLoc-style "
     "shadow diagnostics only; they are not an authorized ActLoc network and are "
     "not held-out calibrated.",
+    "Held-out success is outer DIRECT_STRONG AND nested decision.status ACCEPT; "
+    "nested REJECT always wins. Outer GEOMETRY_WEAK/PROVISIONAL plus nested "
+    "ACCEPT remains a marker. Boolean success is used only when those statuses "
+    "are absent.",
 )
 
 _JSONL_SUFFIXES = {".jsonl", ".ndjson"}
@@ -464,24 +480,35 @@ def _nested_decision(row: Mapping[str, Any]) -> tuple[str, bool, bool]:
 
 
 def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Emit held-out failure and provisional markers.
+
+    Precedence:
+    1. Compute ``outer_strong`` from the outer ``status`` first. Only the
+       exact token ``DIRECT_STRONG`` counts; ``STRONG`` and substring
+       matches do not.
+    2. When either richer status is present, success is
+       ``outer_token == DIRECT_STRONG and nested_status == ACCEPT``.
+       Missing nested status is failure. Any nested ``REJECT*`` is
+       failure. Outer ``GEOMETRY_WEAK`` or ``PROVISIONAL`` plus nested
+       ``ACCEPT`` stays a weak/provisional marker and is never hidden.
+    3. Explicit boolean ``success`` is used only when the row lacks both
+       richer outer and nested statuses.
+    """
     markers: list[dict[str, Any]] = []
     for row in rows:
-        success = row.get("success")
-        nested_status, nested_accepted, has_nested = _nested_decision(row)
-        status = str(row.get("status") or nested_status or "")
-        token = status.upper()
-        if has_nested:
-            strong = nested_accepted
+        nested_status, _nested_accepted, has_nested = _nested_decision(row)
+        outer_status = str(row.get("status") or "").strip()
+        outer_token = outer_status.upper()
+        outer_strong = outer_token == "DIRECT_STRONG"
+        if has_nested or outer_status:
+            strong = outer_strong and nested_status == "ACCEPT"
         else:
-            strong = (
-                success in {1, True, "1", "true", "True"}
-                or "DIRECT_STRONG" in token
-                or token == "STRONG"
-            )
+            success = row.get("success")
+            strong = success in {1, True, "1", "true", "True"}
         provisional = bool(
             row.get("provisional")
-            or "PROVISIONAL" in token
-            or token in {"HELD_OUT_PROVISIONAL"}
+            or "PROVISIONAL" in outer_token
+            or outer_token in {"HELD_OUT_PROVISIONAL"}
         )
         if strong and not provisional:
             continue
@@ -500,7 +527,7 @@ def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
                     "z": center[2],
                     "source": "localization_retrieval_proxy",
                     "query": row.get("query") or row.get("query_name"),
-                    "status": status,
+                    "status": outer_status or nested_status,
                     "nested_decision": nested_status or None,
                 }
             )
@@ -514,7 +541,7 @@ def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
                 "z": center[2],
                 "source": "localization_log",
                 "query": row.get("query") or row.get("query_name"),
-                "status": status,
+                "status": outer_status or nested_status,
                 "nested_decision": nested_status or None,
             }
         )

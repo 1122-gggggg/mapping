@@ -25,8 +25,11 @@ plus a successful joint reconstruction, not independently graph-authorized.
 
 Do **not** treat FIM as success probability. ActLoc remains shadow-only.
 
-Held-out success for risk-PLY is nested `decision.status == ACCEPT`, not
-outer `DIRECT_STRONG`.
+Held-out success for risk-PLY is the conjunction of outer
+`DIRECT_STRONG` and nested `decision.status == ACCEPT`. Nested `REJECT*`
+always fails. Nested `ACCEPT` alone is not sufficient: outer
+`GEOMETRY_WEAK` or `PROVISIONAL` plus nested `ACCEPT` remains a
+weak/provisional marker.
 
 ## Artifacts opened
 
@@ -51,9 +54,9 @@ those maps.
 ## Held-out localization (outer vs accepted-strict)
 
 Outer `DIRECT_STRONG` is a metric-threshold label. Nested ambiguity
-`decision.status` is the scientific accept.
+`decision.status` is the scientific accept. Strict success is both.
 
-| Session | Queries | Outer `DIRECT_STRONG` | Accepted-strict (`decision.status=ACCEPT`) | Outer provisional | Notes |
+| Session | Queries | Outer `DIRECT_STRONG` | Conjunction-strict (outer `DIRECT_STRONG` and `decision.status=ACCEPT`) | Outer provisional | Notes |
 | --- | --- | --- | --- | --- | --- |
 | P116 | 94 | 38 | **10** | 17 | Nested among the 38 strong: 26 `REJECT_UNVERIFIED_SUPPORT`, 10 `ACCEPT`, 1 `REJECT_LOCAL_DEGENERACY`, 1 `REJECT_LOW_SUPPORT` |
 | P117 | 52 | 0 | **0** | 0 | All `GEOMETRY_WEAK` |
@@ -61,8 +64,9 @@ Outer `DIRECT_STRONG` is a metric-threshold label. Nested ambiguity
 | P167 | 97 | 0 | **0** | 2 | Independent 0/97 agrees with NO_GO |
 
 Do not write “P116 38/94 strict” or “P157 7/129 strict” as accepted-strict
-counts. Those are outer labels. Risk-PLY markers skip only nested `ACCEPT`
-(and still mark provisional rows).
+counts. Those are outer labels. Risk-PLY skips only the conjunction
+outer `DIRECT_STRONG` and nested `ACCEPT` (and still marks provisional
+rows). Nested `ACCEPT` under outer `GEOMETRY_WEAK` is a weak marker.
 
 ## Direct vs inferred
 
@@ -157,7 +161,8 @@ Inferred (not evidence):
    historical.
 7. **Does outer `DIRECT_STRONG` leak rejected ambiguity?** **Yes.** 26/38
    P116 construction rows are `REJECT_UNVERIFIED_SUPPORT`. Risk-PLY now
-   treats only nested `ACCEPT` as success.
+   requires outer `DIRECT_STRONG` and nested `ACCEPT`; nested `REJECT*`
+   always wins.
 8. **Build/test leakage?** P116/P117 were reserved as historical loc holdouts
    and were not in v7 Global BA. This audit did not re-hash every query frame
    against the 418 map names.
@@ -169,8 +174,9 @@ group-disjoint fit/holdout, and complete finite geometry for `STRONG`/`USABLE`.
 `connection_is_admissible` no longer treats `WEAK` as mergeable.
 `sfm-diagnosis risk-ply` writes map RGB + colored spheres + `legend.json` /
 `risk_ply_receipt.json`. `.jsonl` is one object per line. Zero-observation
-`bridge_only` vs triangulation roles are split. Held-out success is nested
-`ACCEPT`. ActLoc remains shadow-only. FIM is not recomputed.
+`bridge_only` vs triangulation roles are split. Held-out success is the
+conjunction of outer `DIRECT_STRONG` and nested `ACCEPT`. Nested
+`REJECT*` always wins. ActLoc remains shadow-only. FIM is not recomputed.
 
 ## Replay / test commands
 
@@ -221,6 +227,8 @@ MAPPING_SRC=/home/cihcilab/sources/mapping/diagnosis/src \
   child. Not v7 product authority.
 
 Refreshed risk-PLY counts: `unverified_bridge_pose=159`,
-`zero_triangulation=2`, `heldout_geometry_weak=300` (outer failures plus
-outer `DIRECT_STRONG` without nested `ACCEPT`), `heldout_provisional=56`,
-`fim_weak=5`, `coverage_hole=5`.
+`zero_triangulation=2`, `heldout_geometry_weak=300` (all 271
+`GEOMETRY_WEAK` plus 29 outer `DIRECT_STRONG` without nested `ACCEPT`;
+this set has 0 `GEOMETRY_WEAK`+`ACCEPT` rows, which would also mark),
+`heldout_provisional=56`, `fim_weak=5`, `coverage_hole=5`. Conjunction
+success is the 16 outer `DIRECT_STRONG` + nested `ACCEPT` rows only.
