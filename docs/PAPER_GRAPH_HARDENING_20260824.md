@@ -51,6 +51,8 @@ present. Missing planar evidence never upgrades an edge.
 
 - VPR/retrieval-only pairs never enter the geometric graph.
 - The stage never upgrades `REJECT`, `WEAK`, or `AMBIGUOUS` to `USABLE/STRONG`.
+- With no authorized geometry, it does not invent an arbitrary Base anchor;
+  unprotected sessions remain quarantined.
 - It never removes an original graph bridge solely because of spectral embedding.
 - Strong disconnected components are retained as new-submap candidates.
 - A pruned `STRONG/USABLE` row is only downgraded to `AMBIGUOUS`; the original
@@ -120,7 +122,7 @@ Multiple hypotheses can be supplied as JSON in `homography_hypotheses`:
     "hypothesis_id": "wall_0",
     "confidence": 0.91,
     "homography_shared_inlier_ratio": 0.78,
-    "plane_normal": [0.02, -0.01, 0.999],
+    "plane_normal_similarity": 0.94,
     "homography_rotation_error_deg": 1.3,
     "inlier_ids": ["q12-r55", "q18-r61"]
   }

@@ -26,19 +26,46 @@ def _communities(
         }
     if not active:
         groups = [{node} for node in sorted(graph)]
-    else:
-        try:
-            groups = list(
-                nx.community.louvain_communities(
-                    active,
-                    weight="weight",
-                    resolution=float(cfg["community"]["resolution"]),
-                    seed=int(cfg["seed"]),
-                )
+        membership = {node: index for index, group in enumerate(groups) for node in group}
+        metrics = []
+        quarantined = []
+        for index, group in enumerate(groups):
+            node = next(iter(group))
+            keep = node in protected
+            if not keep:
+                quarantined.append(node)
+            metrics.append(
+                {
+                    "community_id": index,
+                    "sessions": [node],
+                    "size": 1,
+                    "component_id": None,
+                    "separation_score": None,
+                    "mean_internal_reliability": 0.0,
+                    "external_weight_ratio": 0.0,
+                    "contains_protected_session": keep,
+                    "size_ratio_to_anchor": 0.0,
+                    "role": "PROTECTED_KEEP" if keep else "QUARANTINE_OUTLIER",
+                }
             )
-        except AttributeError:
-            groups = list(nx.community.greedy_modularity_communities(active, weight="weight"))
-        groups.extend({node} for node in sorted(set(graph) - set(active)))
+        return {
+            "communities": metrics,
+            "session_community": membership,
+            "quarantined_sessions": sorted(quarantined),
+            "new_submap_candidates": [],
+        }
+    try:
+        groups = list(
+            nx.community.louvain_communities(
+                active,
+                weight="weight",
+                resolution=float(cfg["community"]["resolution"]),
+                seed=int(cfg["seed"]),
+            )
+        )
+    except AttributeError:
+        groups = list(nx.community.greedy_modularity_communities(active, weight="weight"))
+    groups.extend({node} for node in sorted(set(graph) - set(active)))
     groups = [set(group) for group in groups]
     groups.sort(key=lambda group: (-len(group), sorted(group)))
     membership = {node: index for index, group in enumerate(groups) for node in group}

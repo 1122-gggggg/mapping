@@ -49,6 +49,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "normal_angle_scale_deg": 15.0,
         "minimum_observed_terms": 2,
         "validated_score": 0.65,
+        "maximum_hypotheses_per_pair": 8,
     },
     "community": {
         "resolution": 1.0,
@@ -104,6 +105,7 @@ def harden_session_graph(
     rows = [_row_dict(row) for row in edges]
     sessions = {str(item) for item in session_ids if str(item)}
     protected = {str(item) for item in protected_sessions if str(item)}
+    sessions.update(protected)
     pair_info: dict[tuple[str, str], dict[str, Any]] = {}
 
     for index, row in enumerate(rows):
@@ -234,6 +236,7 @@ def harden_session_graph(
         "invariants": [
             "retrieval-only edges never enter the geometric graph",
             "edge statuses are never promoted",
+            "an empty geometric graph never invents a Base anchor",
             "original graph bridges are not spectrally removed",
             "strong disconnected communities remain new-submap candidates",
             "optimization output is a schedule, not a BA receipt",
@@ -273,7 +276,11 @@ def planar_consistency(
         or row.get("planar_hypotheses")
         or row.get("homographies")
     )
-    candidates = hypotheses if isinstance(hypotheses, list) else [row]
+    candidates = (
+        hypotheses[: int(cfg["maximum_hypotheses_per_pair"])]
+        if isinstance(hypotheses, list)
+        else [row]
+    )
     scores = []
     weights = []
     best_terms: dict[str, float] = {}

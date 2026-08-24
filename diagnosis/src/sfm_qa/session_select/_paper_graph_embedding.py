@@ -9,7 +9,7 @@ from typing import Any
 import networkx as nx
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import eigsh
+from scipy.sparse.linalg import ArpackNoConvergence, eigsh
 
 from ._paper_graph_util import (
     _UnionFind,
@@ -29,7 +29,7 @@ def _component_plan(
 ) -> dict[str, Any]:
     pairs = sorted(_pair(a, b) for a, b in graph.edges)
     pairs = [pair for pair in pairs if pair]
-    embedding = _spectral_embedding(pairs, pair_info, cfg)
+    embedding, embedding_method = _spectral_embedding(pairs, pair_info, cfg)
     anomaly = _feature_anomalies(pairs, pair_info)
     tree, window, exact = _minimum_range_tree(graph, embedding, pair_info, cfg)
     tree_pairs = {_pair(a, b) for a, b in tree.edges} - {None}
@@ -54,6 +54,7 @@ def _component_plan(
     return {
         "component_id": component_id,
         "sessions": sorted(graph),
+        "embedding_method": embedding_method,
         "minimum_range_exact": exact,
         "minimum_range_window": list(window),
         "backbone_pairs": [list(pair) for pair in sorted(tree_pairs)],
@@ -79,10 +80,10 @@ def _spectral_embedding(
     pairs: Sequence[tuple[str, str]],
     pair_info: Mapping[tuple[str, str], Mapping[str, Any]],
     cfg: Mapping[str, Any],
-) -> dict[tuple[str, str], float]:
+) -> tuple[dict[tuple[str, str], float], str]:
     count = len(pairs)
     if count <= 1:
-        return {pair: 0.0 for pair in pairs}
+        return {pair: 0.0 for pair in pairs}, "SINGLE_EDGE"
     rows = []
     cols = []
     values = []
@@ -108,14 +109,30 @@ def _spectral_embedding(
     if count <= int(cfg["embedding"]["dense_eigendecomposition_limit"]):
         eigenvalues, eigenvectors = np.linalg.eigh(laplacian.toarray())
         vector = eigenvectors[:, np.argsort(eigenvalues)[1]]
+        method = "DENSE_EIGH"
     else:
-        _, eigenvectors = eigsh(laplacian, k=2, which="SM")
-        vector = eigenvectors[:, 1]
+        try:
+            eigenvalues, eigenvectors = eigsh(
+                laplacian,
+                k=2,
+                which="SM",
+                v0=np.linspace(1.0, 2.0, count),
+            )
+            vector = eigenvectors[:, np.argsort(eigenvalues)[1]]
+            method = "SPARSE_EIGSH"
+        except (ArpackNoConvergence, RuntimeError, ValueError):
+            # Fail safely: a deterministic reliability ordering keeps the stage
+            # operational without manufacturing spectral confidence.
+            vector = np.asarray([pair_info[pair]["reliability"] for pair in pairs])
+            method = "RELIABILITY_FALLBACK"
     nonzero = np.flatnonzero(np.abs(vector) > 1e-12)
     if len(nonzero) and vector[nonzero[0]] < 0:
         vector = -vector
     vector = _standardize(np.asarray(vector, dtype=float))
-    return {pair: float(value) for pair, value in zip(pairs, vector, strict=True)}
+    return (
+        {pair: float(value) for pair, value in zip(pairs, vector, strict=True)},
+        method,
+    )
 
 
 def _minimum_range_tree(

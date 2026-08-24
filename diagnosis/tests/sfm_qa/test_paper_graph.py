@@ -175,6 +175,19 @@ def test_weak_small_disconnected_community_is_quarantined():
     assert xy["graph_community_quarantined"] is True
 
 
+def test_no_geometry_does_not_invent_a_base_anchor():
+    report = harden_session_graph(
+        ["a", "b"],
+        [],
+        protected_sessions=["frozen"],
+    )
+    assert set(report["sessions"]) == {"a", "b", "frozen"}
+    assert set(report["quarantined_sessions"]) == {"a", "b"}
+    roles = {row["sessions"][0]: row["role"] for row in report["communities"]}
+    assert roles["frozen"] == "PROTECTED_KEEP"
+    assert "BASE_CONNECTED" not in roles.values()
+
+
 def test_schedule_and_output_contract(tmp_path: Path):
     report = harden_session_graph(
         ["a", "b", "c"],
