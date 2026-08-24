@@ -6,7 +6,9 @@ weak-region artifacts are consumed as already-diagnosed evidence.
 Held-out success is the conjunction of outer ``DIRECT_STRONG`` and nested
 ``decision.status == ACCEPT``. Nested ``REJECT*`` always fails. Outer
 ``GEOMETRY_WEAK`` / ``PROVISIONAL`` plus nested ``ACCEPT`` remains a marker.
-Explicit boolean ``success`` is used only when those richer statuses are absent.
+If either richer status is present, boolean ``success`` cannot override;
+missing one side is not strict. Boolean ``success`` is used only when both
+richer statuses are absent.
 """
 
 from __future__ import annotations
@@ -69,8 +71,8 @@ CAVEATS = (
     "not held-out calibrated.",
     "Held-out success is outer DIRECT_STRONG AND nested decision.status ACCEPT; "
     "nested REJECT always wins. Outer GEOMETRY_WEAK/PROVISIONAL plus nested "
-    "ACCEPT remains a marker. Boolean success is used only when those statuses "
-    "are absent.",
+    "ACCEPT remains a marker. If either richer status exists, boolean success "
+    "cannot override; it is used only when both statuses are absent.",
 )
 
 _JSONL_SUFFIXES = {".jsonl", ".ndjson"}
@@ -492,7 +494,8 @@ def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
        failure. Outer ``GEOMETRY_WEAK`` or ``PROVISIONAL`` plus nested
        ``ACCEPT`` stays a weak/provisional marker and is never hidden.
     3. Explicit boolean ``success`` is used only when the row lacks both
-       richer outer and nested statuses.
+       richer outer and nested statuses. If either richer field exists,
+       boolean cannot override the conjunction.
     """
     markers: list[dict[str, Any]] = []
     for row in rows:

@@ -237,12 +237,15 @@ def test_heldout_success_requires_outer_strong_and_nested_accept(tmp_path: Path)
             {
                 "query": "strong_missing_nested",
                 "status": "DIRECT_STRONG",
+                "success": True,
                 "x": 3.5,
                 "y": 0.0,
                 "z": 0.0,
             },
             {
-                "query": "legacy_bool",
+                "query": "weak_bool_override",
+                "status": "GEOMETRY_WEAK",
+                "decision": {"status": "ACCEPT"},
                 "success": True,
                 "x": 4.0,
                 "y": 0.0,
@@ -259,14 +262,47 @@ def test_heldout_success_requires_outer_strong_and_nested_accept(tmp_path: Path)
         if marker.get("query")
     }
     assert "accepted" not in queries
-    assert "legacy_bool" not in queries
     assert queries["weak_accept"] == "heldout_geometry_weak"
     assert queries["leaked"] == "heldout_geometry_weak"
     assert queries["strong_missing_nested"] == "heldout_geometry_weak"
+    assert queries["weak_bool_override"] == "heldout_geometry_weak"
     assert queries["provisional_accept"] == "heldout_provisional"
-    assert receipt["counts"]["heldout_geometry_weak"] == 3
+    assert receipt["counts"]["heldout_geometry_weak"] == 4
     assert receipt["counts"]["heldout_provisional"] == 1
     assert receipt["fim_recomputed"] is False
+
+
+def test_boolean_success_only_without_richer_statuses(tmp_path: Path):
+    receipt = write_risk_ply(
+        _tiny_map(),
+        tmp_path / "legacy",
+        localization=[
+            {
+                "query": "legacy_ok",
+                "success": True,
+                "x": 1.0,
+                "y": 0.0,
+                "z": 0.0,
+            },
+            {
+                "query": "legacy_fail",
+                "success": False,
+                "x": 2.0,
+                "y": 0.0,
+                "z": 0.0,
+            },
+        ],
+        sphere_samples=8,
+        filename="legacy.ply",
+    )
+    queries = {
+        marker.get("query"): marker.get("issue_class")
+        for marker in receipt["markers"]
+        if marker.get("query")
+    }
+    assert "legacy_ok" not in queries
+    assert queries["legacy_fail"] == "heldout_geometry_weak"
+    assert receipt["counts"]["heldout_geometry_weak"] == 1
 
 
 def test_healthy_map_fixture_still_imports():

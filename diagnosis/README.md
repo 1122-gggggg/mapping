@@ -157,7 +157,9 @@ parsed as CSV.
 Held-out success is the conjunction of outer `DIRECT_STRONG` and nested
 `decision.status == ACCEPT`. Nested `REJECT*` always fails. Outer
 `GEOMETRY_WEAK` / `PROVISIONAL` plus nested `ACCEPT` remains a marker.
-Boolean `success` is used only when those richer statuses are absent.
+If either richer status is present, boolean `success` cannot override;
+missing one side is not strict. Boolean `success` is used only when both
+richer statuses are absent.
 FIM observability is not a calibrated success probability. Retrieval proxies
 for no-pose failures are not ground truth. ActLoc
 `StructuralLocalizabilityProxy` / `ExternalPredictorAdapter` remain shadow-only.

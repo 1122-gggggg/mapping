@@ -29,7 +29,9 @@ Held-out success for risk-PLY is the conjunction of outer
 `DIRECT_STRONG` and nested `decision.status == ACCEPT`. Nested `REJECT*`
 always fails. Nested `ACCEPT` alone is not sufficient: outer
 `GEOMETRY_WEAK` or `PROVISIONAL` plus nested `ACCEPT` remains a
-weak/provisional marker.
+weak/provisional marker. If either richer status is present, boolean
+`success` cannot override; missing one side is not strict. Boolean
+`success` applies only when both richer statuses are absent.
 
 ## Artifacts opened
 
