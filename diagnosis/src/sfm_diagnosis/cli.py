@@ -189,6 +189,10 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "output": receipt["ply"],
+                    "ply_base": receipt.get("ply_base"),
+                    "ply_markers": receipt.get("ply_markers"),
+                    "ply_markers_raw": receipt.get("ply_markers_raw"),
+                    "ply_classes": receipt.get("ply_classes"),
                     "ply_full": receipt.get("ply_full"),
                     "ply_mesh": receipt.get("ply_mesh"),
                     "format": receipt.get("format"),
@@ -196,12 +200,22 @@ def main(argv: list[str] | None = None) -> int:
                     "map_vertices_retained": receipt.get("map_vertices_retained"),
                     "map_vertices_excluded": receipt.get("map_vertices_excluded"),
                     "marker_spheres": receipt["marker_spheres"],
+                    "display_spheres": receipt.get("display_spheres"),
                     "sphere_radius": receipt.get("sphere_radius"),
+                    "sphere_radius_source": receipt.get("sphere_radius_source"),
                     "vertex_count": receipt.get("vertex_count"),
                     "counts": receipt["counts"],
+                    "aggregation": {
+                        "radius": (receipt.get("aggregation") or {}).get("radius"),
+                        "cluster_count": (receipt.get("aggregation") or {}).get("cluster_count"),
+                        "raw_marker_count": (receipt.get("aggregation") or {}).get("raw_marker_count"),
+                    },
+                    "visual_balance": receipt.get("visual_balance"),
                     "clip": {
                         "robust_diagonal": (receipt.get("clip") or {}).get("robust_diagonal"),
                         "full_diagonal": (receipt.get("clip") or {}).get("full_diagonal"),
+                        "camera_diagonal": (receipt.get("clip") or {}).get("camera_diagonal"),
+                        "camera_nn": (receipt.get("clip") or {}).get("camera_nn"),
                         "retained_count": (receipt.get("clip") or {}).get("retained_count"),
                         "excluded_count": (receipt.get("clip") or {}).get("excluded_count"),
                     },
@@ -472,7 +486,7 @@ def _parser() -> argparse.ArgumentParser:
 
     risk = sub.add_parser(
         "risk-ply",
-        help="Write map RGB vertices plus colored diagnosis/localization risk spheres",
+        help="Write layered CloudCompare base/marker PLYs plus archival risk spheres",
     )
     risk.add_argument("model")
     _add_map_adapter_arg(risk)
@@ -492,9 +506,12 @@ def _parser() -> argparse.ArgumentParser:
     risk.add_argument(
         "--filename",
         default="localization_risk_spheres.ply",
-        help="base PLY name; writes *_cloudcompare.ply, *_full.ply, and *_markers_mesh.ply",
+        help=(
+            "base PLY name; writes *_cloudcompare_base.ply, per-class overlays, "
+            "aggregated *_cloudcompare.ply, *_full.ply, and *_markers_mesh.ply"
+        ),
     )
-    risk.add_argument("--sphere-radius", type=float, help="override marker radius; default is scale-based")
+    risk.add_argument("--sphere-radius", type=float, help="override marker radius; default is camera-NN capped by camera path diagonal")
     risk.add_argument("--sphere-samples", type=int, help="override marker shell samples")
 
     repair = sub.add_parser(

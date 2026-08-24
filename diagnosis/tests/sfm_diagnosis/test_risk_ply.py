@@ -12,10 +12,10 @@ from sfm_diagnosis.cli import main as risk_ply_cli
 from sfm_diagnosis.models import CameraIntrinsics, MapData
 from sfm_diagnosis.risk_ply import (
     ISSUE_COLORS,
-    MARKER_RADIUS_ABS_FLOOR,
-    MARKER_RADIUS_DIAG_FRACTION,
+    MARKER_RADIUS_CAMERA_DIAG_CAP,
     VISIBLE_MAP_RGB,
     camera_nearest_spacing,
+    class_marker_radius,
     load_jsonl_rows,
     load_rows,
     robust_spatial_clip,
@@ -130,7 +130,7 @@ def test_risk_ply_header_map_vertices_and_colored_spheres(tmp_path: Path):
     assert len(meta["payload"]) == receipt["vertex_count"] * 15
     assert receipt["map_vertices"] == 3
     assert receipt["marker_spheres"] >= 2
-    assert receipt["vertex_count"] == 3 + receipt["marker_spheres"] * 12
+    assert receipt["vertex_count"] == receipt["map_vertices_retained"] + receipt["display_spheres"] * 12
     assert receipt["fim_recomputed"] is False
     assert "unverified_bridge_pose" in receipt["counts"]
     assert "heldout_geometry_weak" in receipt["counts"]
@@ -433,8 +433,9 @@ def test_extreme_outlier_clip_retains_core_rgb_and_full_archive(tmp_path: Path):
     assert full_xyz.max() > 1.0e5
     assert [1, 2, 3] in full_rgb.tolist()
     assert receipt["marker_spheres_cloudcompare"] == receipt["marker_spheres"]
-    assert receipt["sphere_radius"] >= MARKER_RADIUS_ABS_FLOOR
-    assert receipt["sphere_radius"] >= MARKER_RADIUS_DIAG_FRACTION * clip["robust_diagonal"]
+    cap = MARKER_RADIUS_CAMERA_DIAG_CAP * float(clip["camera_diagonal"])
+    assert receipt["sphere_radius"] <= cap + 1e-12
+    assert receipt["sphere_radius"] > 0.0
     meta = _parse_ply(Path(receipt["ply"]))
     assert int(meta["vertex"]) == receipt["vertex_count"]
     assert len(meta["payload"]) == receipt["vertex_count"] * 15
@@ -483,8 +484,10 @@ def test_black_base_rgb_fallback_keeps_marker_colors(tmp_path: Path):
 
 def test_marker_radius_floor_without_override(tmp_path: Path):
     receipt = write_risk_ply(_tiny_map(), tmp_path / "floor", filename="floor.ply")
-    assert receipt["sphere_radius"] >= MARKER_RADIUS_ABS_FLOOR
-    assert receipt["sphere_radius"] >= MARKER_RADIUS_DIAG_FRACTION * receipt["clip"]["robust_diagonal"]
+    cap = MARKER_RADIUS_CAMERA_DIAG_CAP * float(receipt["clip"]["camera_diagonal"])
+    assert receipt["sphere_radius"] <= cap + 1e-12
+    assert receipt["sphere_radius"] > 0.0
+    assert receipt["sphere_radius_source"] in {"camera_nn", "camera_diagonal_cap"}
     assert receipt["sphere_samples"] >= 96
 
 
@@ -650,8 +653,18 @@ def test_write_risk_ply_instances_shared_sphere_templates(
         shell = marker_xyz[index * samples : (index + 1) * samples]
         mesh = mesh_xyz[index * n_mesh : (index + 1) * n_mesh]
         faces = mesh_faces[index * n_faces : (index + 1) * n_faces]
-        np.testing.assert_allclose(shell, unit_shell * radius + center, rtol=0.0, atol=1e-5)
-        np.testing.assert_allclose(mesh, unit_mesh * radius + center, rtol=0.0, atol=1e-5)
+        np.testing.assert_allclose(
+            shell,
+            unit_shell * class_marker_radius(str(row["issue_class"]), radius) + center,
+            rtol=0.0,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            mesh,
+            unit_mesh * class_marker_radius(str(row["issue_class"]), radius) + center,
+            rtol=0.0,
+            atol=1e-5,
+        )
         np.testing.assert_array_equal(faces, unit_faces + index * n_mesh)
         written_shells.append(shell)
 
@@ -670,4 +683,120 @@ def test_write_risk_ply_instances_shared_sphere_templates(
     assert not np.allclose(first, second)
     assert not np.allclose(second, third)
     assert not np.allclose(first, third)
+
+
+def _wide_map(n_points: int = 400) -> MapData:
+    rng = np.random.default_rng(0)
+    points = rng.normal(0.0, 0.25, size=(n_points, 3))
+    points[:, 2] += 1.0
+    rgb = np.column_stack(
+        [
+            np.full(n_points, 10),
+            np.full(n_points, 20),
+            np.full(n_points, 30),
+        ]
+    ).astype(np.uint8)
+    base = _tiny_map()
+    return MapData(
+        point_ids=np.arange(n_points),
+        points_xyz=points,
+        point_rgb=rgb,
+        point_errors=np.full(n_points, 0.4),
+        track_lengths=np.full(n_points, 2, dtype=int),
+        track_image_ids=[np.array([0, 1]) for _ in range(n_points)],
+        image_ids=base.image_ids,
+        image_names=base.image_names,
+        image_camera_ids=base.image_camera_ids,
+        image_centers=base.image_centers,
+        image_R_wc=base.image_R_wc,
+        cameras=base.cameras,
+    )
+
+
+def _assert_header_payload(path: Path, *, faces: bool = False) -> dict[str, object]:
+    meta = _parse_ply(path)
+    n_vertex = int(meta["vertex"])
+    payload = meta["payload"]
+    assert meta["format"] == "binary_little_endian 1.0"
+    assert "property uchar red" in meta["header"]
+    if faces:
+        n_face = int(meta.get("face") or 0)
+        assert len(payload) == n_vertex * 15 + n_face * 13
+    else:
+        assert "element face" not in meta["header"]
+        assert len(payload) == n_vertex * 15
+    return meta
+
+
+def test_colocated_red_markers_aggregate_and_keep_base_visible(tmp_path: Path):
+    samples = 8
+    loc = [
+        {"query": f"q{index}", "status": "GEOMETRY_WEAK", "x": 0.2, "y": 0.0, "z": 0.1}
+        for index in range(300)
+    ]
+    receipt = write_risk_ply(
+        _wide_map(400),
+        tmp_path / "layers",
+        localization=loc,
+        sphere_samples=samples,
+        filename="layers.ply",
+    )
+    assert receipt["counts"]["heldout_geometry_weak"] == 300
+    assert receipt["marker_spheres"] >= 300
+    assert receipt["aggregation"]["raw_marker_count"] == receipt["marker_spheres"]
+    heldout_display = receipt["display_spheres_by_class"]["heldout_geometry_weak"]
+    assert heldout_display < 300
+    assert heldout_display == 1
+    clusters = [
+        row
+        for row in receipt["aggregation"]["clusters"]
+        if row["issue_class"] == "heldout_geometry_weak"
+    ]
+    assert len(clusters) == 1
+    assert clusters[0]["member_count"] == 300
+    assert len(clusters[0]["members"]) == 300
+    assert clusters[0]["aggregation_radius"] > 0.0
+    cap = MARKER_RADIUS_CAMERA_DIAG_CAP * float(receipt["clip"]["camera_diagonal"])
+    assert receipt["sphere_radius"] <= cap + 1e-12
+    assert receipt["visual_balance"]["radius_bounded_by_camera_diagonal"] is True
+
+    combined = Path(receipt["ply"])
+    base = Path(receipt["ply_base"])
+    markers = Path(receipt["ply_markers"])
+    raw = Path(receipt["ply_markers_raw"])
+    class_ply = Path(receipt["ply_classes"]["heldout_geometry_weak"])
+    for path in (combined, base, markers, raw, class_ply, Path(receipt["ply_full"])):
+        _assert_header_payload(path)
+    _assert_header_payload(Path(receipt["ply_mesh"]), faces=True)
+
+    cc_xyz, cc_rgb = _read_vertices(combined)
+    assert len(cc_xyz) == receipt["vertex_count"]
+    assert receipt["vertex_count"] == receipt["map_vertices_retained"] + receipt["display_spheres"] * samples
+    weak = list(ISSUE_COLORS["heldout_geometry_weak"])
+    n_weak = int(np.all(cc_rgb == np.asarray(weak, dtype=np.uint8), axis=1).sum())
+    assert n_weak == samples
+    n_base = int(np.all(cc_rgb == np.array([10, 20, 30], dtype=np.uint8), axis=1).sum())
+    assert n_base == 400
+    assert n_base > n_weak
+    assert receipt["visual_balance"]["base_rgb_majority"] is True
+    assert receipt["visual_balance"]["base_vertex_fraction"] > 0.5
+
+    base_xyz, base_rgb = _read_vertices(base)
+    assert len(base_xyz) == receipt["map_vertices_retained"]
+    assert np.all(base_rgb == np.asarray(VISIBLE_MAP_RGB, dtype=np.uint8))
+
+    class_xyz, class_rgb = _read_vertices(class_ply)
+    assert len(class_xyz) == 300 * samples
+    assert np.all(class_rgb == np.asarray(weak, dtype=np.uint8))
+
+    raw_xyz, raw_rgb = _read_vertices(raw)
+    assert len(raw_xyz) == receipt["marker_spheres_cloudcompare"]
+    assert int(np.all(raw_rgb == np.asarray(weak, dtype=np.uint8), axis=1).sum()) == 300
+
+    legend = (tmp_path / "layers" / "LEGEND.md").read_text(encoding="utf-8")
+    assert "separate entities" in legend.lower()
+    assert "scalar" in legend.lower()
+    assert "2–3" in legend or "2-3" in legend
+
+
 

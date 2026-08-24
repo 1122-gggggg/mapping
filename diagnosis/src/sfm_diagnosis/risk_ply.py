@@ -10,9 +10,11 @@ If either richer status is present, boolean ``success`` cannot override;
 missing one side is not strict. Boolean ``success`` is used only when both
 richer statuses are absent.
 
-CloudCompare export writes a robust-clipped binary little-endian PLY with
-visible base RGB. The full-extent archival PLY keeps original coordinates
-and original map colors, including black.
+CloudCompare export writes a robust-clipped binary little-endian base cloud,
+per-class / all-marker overlays, and an aggregated combined preview. Dense
+held-out query failures are clustered only in the combined file. The
+full-extent archival PLY keeps original coordinates, original map colors
+(including black), and one shell per raw marker.
 """
 
 from __future__ import annotations
@@ -86,16 +88,42 @@ CLIP_IQR_K = 8.0
 MARKER_RADIUS_DIAG_FRACTION = 0.015
 MARKER_RADIUS_NN_FRACTION = 2.0
 MARKER_RADIUS_ABS_FLOOR = 0.05
+MARKER_RADIUS_CAMERA_DIAG_CAP = 0.01
+AGGREGATION_NN_FRACTION = 8.0
+AGGREGATION_CAMERA_DIAG_FRACTION = 0.025
+AGGREGATION_CAMERA_DIAG_CAP = 0.06
 DEFAULT_SPHERE_SAMPLES = 96
 VISIBLE_MAP_RGB = (210, 210, 210)
 SOURCE_RGB_MISSING_MAX = 8
+DENSE_COMBINED_CLASSES = frozenset(
+    {
+        "heldout_geometry_weak",
+        "heldout_provisional",
+        "failure_retrieval_proxy",
+    }
+)
+CLASS_RADIUS_SCALE: dict[str, float] = {
+    "coverage_hole": 0.55,
+    "fim_rank_deficient": 0.65,
+    "fim_weak": 0.65,
+    "direction_sensitive": 0.65,
+    "unverified_bridge_pose": 0.70,
+    "zero_triangulation": 0.80,
+    "weak_region": 0.55,
+    "heldout_geometry_weak": 0.35,
+    "heldout_provisional": 0.45,
+    "failure_retrieval_proxy": 0.45,
+    "actloc_shadow": 0.50,
+}
 VIEWER_INSTRUCTIONS = (
-    "Open the CloudCompare-ready binary PLY first (*_cloudcompare.ply).",
-    "Do not auto-fit the full-extent archival PLY; outliers are retained there on purpose.",
-    "Accept Global Shift / scale if CloudCompare prompts.",
-    "Display RGB, not a scalar field. Set the viewer background to dark navy or mid gray, not pure black.",
-    "Raise point size to 3–6 px so the light-gray core cloud is visible at auto-fit.",
-    "Issue markers keep their class colors. Optional *_markers_mesh.ply adds solid faces if shells look sparse.",
+    "Load CloudCompare layers as separate entities; do not rely on the combined preview alone.",
+    "1. File > Open the robust-clipped base cloud (*_cloudcompare_base.ply). Auto-fit this entity only. It is neutral gray.",
+    "2. File > Open each needed class file (*_cloudcompare_<class>.ply) or the all-markers overlay (*_cloudcompare_markers.ply) as additional entities. Do not merge them into the base.",
+    "3. Optional raw centers: *_cloudcompare_markers_raw.ply. Combined *_cloudcompare.ply is an aggregated preview of dense held-out classes plus the base.",
+    "4. Colors: RGB. Turn every scalar field off. Accept Global Shift / scale if prompted.",
+    "5. Point size: base 2–3 px; marker layers 6–8 px. Background dark navy or mid gray, not pure black.",
+    "6. Do not auto-fit *_full.ply; outliers are retained there on purpose.",
+    "Dense held-out failures are clustered only in the combined preview. Raw marker counts stay in the receipt, class files, and markers_raw.",
 )
 
 _JSONL_SUFFIXES = {".jsonl", ".ndjson"}
@@ -646,6 +674,152 @@ def _xyz_in_clip(xyz: Sequence[float], clip_min: np.ndarray, clip_max: np.ndarra
     return bool(np.all(point >= clip_min) and np.all(point <= clip_max))
 
 
+def class_marker_radius(issue: str, base_radius: float) -> float:
+    """Smaller class-specific display radius; colors stay on ISSUE_COLORS."""
+
+    scale = CLASS_RADIUS_SCALE.get(str(issue), 0.6)
+    return max(float(base_radius) * float(scale), 1e-4)
+
+
+def display_radius_from_clip(
+    clip: Mapping[str, Any],
+    *,
+    override: float | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """Camera-NN / local-spacing radius with a camera-path-diagonal cap.
+
+    Robust point-cloud diagonal is a last-resort fallback only when the
+    camera path is empty. It is never the sole driver when cameras exist.
+    """
+
+    camera_nn = float(clip.get("camera_nn") or 0.0)
+    camera_diag = float(clip.get("camera_diagonal") or 0.0)
+    robust_diag = float(clip.get("robust_diagonal") or 0.0)
+    nn_term = MARKER_RADIUS_NN_FRACTION * camera_nn
+    cap = MARKER_RADIUS_CAMERA_DIAG_CAP * camera_diag if camera_diag > 0.0 else None
+    meta: dict[str, Any] = {
+        "camera_nn": camera_nn,
+        "camera_diagonal": camera_diag,
+        "robust_diagonal": robust_diag,
+        "nn_term": nn_term,
+        "cap": cap,
+        "override": override is not None,
+    }
+    if override is not None:
+        radius = max(float(override), 1e-4)
+        meta["source"] = "override"
+        meta["radius"] = radius
+        return radius, meta
+    if cap is not None:
+        uncapped = nn_term if nn_term > 0.0 else cap
+        radius = min(max(uncapped, 1e-4), cap)
+        if nn_term <= 0.0:
+            meta["source"] = "camera_diagonal_cap"
+        elif nn_term > cap:
+            meta["source"] = "camera_diagonal_cap"
+        else:
+            meta["source"] = "camera_nn"
+    else:
+        radius = max(
+            MARKER_RADIUS_ABS_FLOOR,
+            MARKER_RADIUS_DIAG_FRACTION * robust_diag,
+            nn_term,
+            1e-4,
+        )
+        meta["source"] = "robust_fallback"
+    meta["radius"] = float(radius)
+    return float(radius), meta
+
+
+def aggregation_radius_from_clip(clip: Mapping[str, Any]) -> float:
+    """Deterministic neighborhood used to collapse dense held-out markers."""
+
+    camera_nn = float(clip.get("camera_nn") or 0.0)
+    camera_diag = float(clip.get("camera_diagonal") or 0.0)
+    local = max(
+        AGGREGATION_NN_FRACTION * camera_nn,
+        AGGREGATION_CAMERA_DIAG_FRACTION * camera_diag,
+    )
+    if camera_diag > 0.0:
+        cap = AGGREGATION_CAMERA_DIAG_CAP * camera_diag
+        return float(min(max(local, 1e-4), cap))
+    return float(max(local, MARKER_RADIUS_ABS_FLOOR, 1e-4))
+
+
+def cluster_marker_indices(
+    markers: Sequence[Mapping[str, Any]],
+    indices: Sequence[int],
+    radius: float,
+) -> list[dict[str, Any]]:
+    """Union-find clusters. Sorted seeds make the partition deterministic."""
+
+    idxs = sorted(
+        int(i) for i in indices if 0 <= int(i) < len(markers)
+    )
+    if not idxs:
+        return []
+    radius = max(float(radius), 0.0)
+    points = {
+        i: np.asarray(
+            (markers[i]["x"], markers[i]["y"], markers[i]["z"]),
+            dtype=float,
+        )
+        for i in idxs
+    }
+    parent = {i: i for i in idxs}
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: int, right: int) -> None:
+        root_l, root_r = find(left), find(right)
+        if root_l == root_r:
+            return
+        if root_l < root_r:
+            parent[root_r] = root_l
+        else:
+            parent[root_l] = root_r
+
+    limit2 = radius * radius
+    for offset, left in enumerate(idxs):
+        origin = points[left]
+        for right in idxs[offset + 1 :]:
+            delta = origin - points[right]
+            if float(delta @ delta) <= limit2:
+                union(left, right)
+
+    groups: dict[int, list[int]] = {}
+    for index in idxs:
+        groups.setdefault(find(index), []).append(index)
+    clusters: list[dict[str, Any]] = []
+    for members in groups.values():
+        stacked = np.vstack([points[i] for i in members])
+        center = stacked.mean(axis=0)
+        issue = str(markers[members[0]]["issue_class"])
+        clusters.append(
+            {
+                "issue_class": issue,
+                "center": [float(center[0]), float(center[1]), float(center[2])],
+                "members": list(members),
+                "member_count": int(len(members)),
+                "aggregation_radius": float(radius),
+            }
+        )
+    clusters.sort(
+        key=lambda row: (
+            row["center"][0],
+            row["center"][1],
+            row["center"][2],
+            row["members"][0],
+        )
+    )
+    return clusters
+
+
+
 def robust_spatial_clip(
     xyz: np.ndarray,
     *,
@@ -869,13 +1043,23 @@ def write_binary_ply(
     return dest
 
 
-def _artifact_paths(output_dir: Path, filename: str) -> dict[str, Path]:
+def _artifact_paths(
+    output_dir: Path,
+    filename: str,
+    issues: Sequence[str] = (),
+) -> dict[str, Any]:
     stem = Path(filename).stem
     suffix = Path(filename).suffix or ".ply"
     return {
         "cloudcompare": output_dir / f"{stem}_cloudcompare{suffix}",
         "full": output_dir / f"{stem}_full{suffix}",
         "mesh": output_dir / f"{stem}_markers_mesh{suffix}",
+        "base": output_dir / f"{stem}_cloudcompare_base{suffix}",
+        "markers": output_dir / f"{stem}_cloudcompare_markers{suffix}",
+        "markers_raw": output_dir / f"{stem}_cloudcompare_markers_raw{suffix}",
+        "classes": {
+            issue: output_dir / f"{stem}_cloudcompare_{issue}{suffix}" for issue in issues
+        },
     }
 
 
@@ -895,26 +1079,55 @@ def _stack_xyz_rgb(
 def _write_legend_md(path: Path, receipt: Mapping[str, Any]) -> Path:
     clip = receipt.get("clip") or {}
     cc = receipt.get("cloudcompare") or {}
+    aggregation = receipt.get("aggregation") or {}
+    ply_classes = receipt.get("ply_classes") or {}
     lines = [
         "# Localization risk PLY",
         "",
-        f"- CloudCompare-ready (open this): `{receipt.get('ply')}`",
-        f"- Full-extent archival (do not auto-fit): `{receipt.get('ply_full')}`",
-        f"- Solid marker mesh: `{receipt.get('ply_mesh')}`",
-        f"- Format: `{cc.get('format', CLOUDCOMPARE_FORMAT)}` with RGB uchar properties.",
-        f"- Map vertices full/retained/excluded: `{receipt.get('map_vertices')}` / "
-        f"`{receipt.get('map_vertices_retained')}` / `{receipt.get('map_vertices_excluded')}`",
-        f"- Markers total/CloudCompare/excluded: `{receipt.get('marker_spheres')}` / "
-        f"`{receipt.get('marker_spheres_cloudcompare')}` / `{receipt.get('marker_spheres_excluded')}`",
-        f"- Robust bounds diagonal: `{clip.get('robust_diagonal')}`",
-        f"- Full bounds diagonal: `{clip.get('full_diagonal')}`",
-        f"- Marker radius / samples: `{receipt.get('sphere_radius')}` / `{receipt.get('sphere_samples')}`",
-        f"- Visible base RGB fallback: `{cc.get('visible_rgb')}`",
-        f"- Clipping receipt: `{receipt.get('clipping_receipt')}`",
+        "## CloudCompare load workflow",
         "",
-        "## CloudCompare",
+        "Load **separate entities**. Do not merge. RGB on, scalar fields off.",
         "",
+        f"1. Open base (neutral gray, auto-fit this only): `{receipt.get('ply_base')}`",
+        f"2. Open all-class markers as a new entity: `{receipt.get('ply_markers')}`",
+        "3. Or open one class at a time:",
     ]
+    for issue, class_path in ply_classes.items():
+        lines.append(f"   - `{issue}`: `{class_path}`")
+    if not ply_classes:
+        lines.append("   - (no class files; no in-clip markers)")
+    lines.extend(
+        [
+            f"4. Optional raw centers: `{receipt.get('ply_markers_raw')}`",
+            f"5. Combined aggregated preview (not the primary view): `{receipt.get('ply')}`",
+            f"6. Full-extent archival (do not auto-fit): `{receipt.get('ply_full')}`",
+            f"7. Solid marker mesh: `{receipt.get('ply_mesh')}`",
+            "",
+            "- Point size: base 2–3 px; marker layers 6–8 px.",
+            "- Background: dark navy or mid gray, not pure black.",
+            "- Accept Global Shift / scale if CloudCompare prompts.",
+            "",
+            f"- Format: `{cc.get('format', CLOUDCOMPARE_FORMAT)}` with RGB uchar properties.",
+            f"- Map vertices full/retained/excluded: `{receipt.get('map_vertices')}` / "
+            f"`{receipt.get('map_vertices_retained')}` / `{receipt.get('map_vertices_excluded')}`",
+            f"- Raw markers total/CloudCompare/excluded: `{receipt.get('marker_spheres')}` / "
+            f"`{receipt.get('marker_spheres_cloudcompare')}` / `{receipt.get('marker_spheres_excluded')}`",
+            f"- Combined display spheres (aggregated): `{receipt.get('display_spheres')}`",
+            f"- Aggregation radius / dense cluster count: `{aggregation.get('radius')}` / "
+            f"`{aggregation.get('cluster_count')}`",
+            f"- Robust bounds diagonal: `{clip.get('robust_diagonal')}`",
+            f"- Camera path diagonal / NN: `{clip.get('camera_diagonal')}` / `{clip.get('camera_nn')}`",
+            f"- Full bounds diagonal: `{clip.get('full_diagonal')}`",
+            f"- Marker radius / samples: `{receipt.get('sphere_radius')}` / `{receipt.get('sphere_samples')}`",
+            f"- Radius source / camera-diag cap: `{receipt.get('sphere_radius_source')}` / "
+            f"`{receipt.get('sphere_radius_cap')}`",
+            f"- Visible base RGB fallback: `{cc.get('visible_rgb')}`",
+            f"- Clipping receipt: `{receipt.get('clipping_receipt')}`",
+            "",
+            "## CloudCompare",
+            "",
+        ]
+    )
     for item in receipt.get("viewer_instructions") or VIEWER_INSTRUCTIONS:
         lines.append(f"- {item}")
     lines.extend(["", "| class | RGB | meaning |", "|---|---|---|"])
@@ -975,7 +1188,7 @@ def write_risk_ply(
     include_actloc_shadow: bool = False,
     filename: str = "localization_risk_spheres.ply",
 ) -> dict[str, Any]:
-    """Write archival and CloudCompare-ready map+marker PLYs plus a clip receipt."""
+    """Write layered CloudCompare PLYs, archival full PLY, and a clip receipt."""
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -1021,31 +1234,40 @@ def write_risk_ply(
     else:
         excluded_ids = [int(v) for v in excluded_idx]
 
-    auto_radius = max(
-        MARKER_RADIUS_ABS_FLOOR,
-        MARKER_RADIUS_NN_FRACTION * float(clip["camera_nn"]),
-        MARKER_RADIUS_DIAG_FRACTION * float(clip["robust_diagonal"]),
-    )
+    auto_radius, auto_meta = display_radius_from_clip(clip)
     if sphere_radius is None:
-        sphere_radius = auto_radius
+        sphere_radius = float(auto_radius)
+        radius_meta = auto_meta
     else:
-        sphere_radius = max(float(sphere_radius), 1e-4)
+        sphere_radius, radius_meta = display_radius_from_clip(clip, override=sphere_radius)
+        sphere_radius = float(sphere_radius)
     sphere_samples = max(8, int(sphere_samples))
+    agg_radius = aggregation_radius_from_clip(clip)
     clip_min = np.asarray(clip["clip_min"], dtype=float)
     clip_max = np.asarray(clip["clip_max"], dtype=float)
     full_marker_xyz: list[np.ndarray] = []
     full_marker_rgb: list[np.ndarray] = []
-    cc_marker_xyz: list[np.ndarray] = []
-    cc_marker_rgb: list[np.ndarray] = []
+    overlay_xyz: list[np.ndarray] = []
+    overlay_rgb: list[np.ndarray] = []
     mesh_xyz: list[np.ndarray] = []
     mesh_rgb: list[np.ndarray] = []
     mesh_faces: list[np.ndarray] = []
+    class_shells: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
+        name: [] for name in ISSUE_COLORS
+    }
+    raw_pts: list[np.ndarray] = []
+    raw_cols: list[np.ndarray] = []
     counts: dict[str, int] = {name: 0 for name in ISSUE_COLORS}
     excluded_markers: list[dict[str, Any]] = []
     excluded_marker_classes: dict[str, int] = {}
+    in_clip_indices: list[int] = []
+    class_indices: dict[str, list[int]] = {name: [] for name in ISSUE_COLORS}
     mesh_offset = 0
     unit_shell = sphere_points((0.0, 0.0, 0.0), 1.0, sphere_samples)
     unit_mesh_xyz, unit_mesh_faces = sphere_mesh((0.0, 0.0, 0.0), 1.0)
+    radius_by_class = {
+        name: class_marker_radius(name, sphere_radius) for name in ISSUE_COLORS
+    }
     for index, row in enumerate(markers):
         issue = str(row["issue_class"])
         counts[issue] = counts.get(issue, 0) + 1
@@ -1053,34 +1275,86 @@ def write_risk_ply(
         center = (row["x"], row["y"], row["z"])
         in_clip = _xyz_in_clip(center, clip_min, clip_max)
         origin = np.asarray(center, dtype=float).reshape(3)
-        shell = unit_shell * sphere_radius + origin
+        marker_radius = radius_by_class.get(issue, class_marker_radius(issue, sphere_radius))
+        shell = unit_shell * marker_radius + origin
         shell_rgb = np.repeat(color.reshape(1, 3), len(shell), axis=0)
         full_marker_xyz.append(shell)
         full_marker_rgb.append(shell_rgb)
         row["sphere_index"] = index
         row["in_cloudcompare_clip"] = in_clip
-        verts = unit_mesh_xyz * sphere_radius + origin
+        row["display_radius"] = float(marker_radius)
+        verts = unit_mesh_xyz * marker_radius + origin
         mesh_xyz.append(verts)
         mesh_rgb.append(np.repeat(color.reshape(1, 3), len(verts), axis=0))
         mesh_faces.append(unit_mesh_faces + mesh_offset)
         mesh_offset += len(verts)
-        if in_clip:
-            cc_marker_xyz.append(shell)
-            cc_marker_rgb.append(shell_rgb)
+        if not in_clip:
+            excluded_marker_classes[issue] = excluded_marker_classes.get(issue, 0) + 1
+            image_id = _as_int(row.get("image_id"))
+            excluded_markers.append(
+                {
+                    "sphere_index": index,
+                    "image_id": image_id,
+                    "image_name": row.get("image_name"),
+                    "issue_class": issue,
+                    "x": float(center[0]),
+                    "y": float(center[1]),
+                    "z": float(center[2]),
+                }
+            )
             continue
-        excluded_marker_classes[issue] = excluded_marker_classes.get(issue, 0) + 1
-        image_id = _as_int(row.get("image_id"))
-        excluded_markers.append(
-            {
-                "sphere_index": index,
-                "image_id": image_id,
-                "image_name": row.get("image_name"),
-                "issue_class": issue,
-                "x": float(center[0]),
-                "y": float(center[1]),
-                "z": float(center[2]),
-            }
-        )
+        in_clip_indices.append(index)
+        class_indices.setdefault(issue, []).append(index)
+        overlay_xyz.append(shell)
+        overlay_rgb.append(shell_rgb)
+        class_shells.setdefault(issue, []).append((shell, shell_rgb))
+        raw_pts.append(origin.reshape(1, 3))
+        raw_cols.append(color.reshape(1, 3))
+
+    display_items: list[dict[str, Any]] = []
+    aggregation_clusters: list[dict[str, Any]] = []
+    for issue in ISSUE_COLORS:
+        idxs = class_indices.get(issue) or []
+        if not idxs:
+            continue
+        issue_radius = radius_by_class[issue]
+        if issue in DENSE_COMBINED_CLASSES:
+            clusters = cluster_marker_indices(markers, idxs, agg_radius)
+            for cluster in clusters:
+                cluster["display_radius"] = float(issue_radius)
+                aggregation_clusters.append(cluster)
+                display_items.append(
+                    {
+                        "issue_class": issue,
+                        "center": cluster["center"],
+                        "radius": issue_radius,
+                        "member_count": cluster["member_count"],
+                        "members": cluster["members"],
+                        "aggregated": True,
+                    }
+                )
+            continue
+        for index in idxs:
+            row = markers[index]
+            display_items.append(
+                {
+                    "issue_class": issue,
+                    "center": [float(row["x"]), float(row["y"]), float(row["z"])],
+                    "radius": issue_radius,
+                    "member_count": 1,
+                    "members": [index],
+                    "aggregated": False,
+                }
+            )
+
+    display_xyz: list[np.ndarray] = []
+    display_rgb: list[np.ndarray] = []
+    for item in display_items:
+        origin = np.asarray(item["center"], dtype=float).reshape(3)
+        color = np.asarray(_rgb(str(item["issue_class"])), dtype=np.uint8)
+        shell = unit_shell * float(item["radius"]) + origin
+        display_xyz.append(shell)
+        display_rgb.append(np.repeat(color.reshape(1, 3), len(shell), axis=0))
 
     finite_map = np.isfinite(map_xyz).all(axis=1)
     full_xyz, full_rgb = _stack_xyz_rgb(
@@ -1089,18 +1363,76 @@ def write_risk_ply(
         full_marker_xyz,
         full_marker_rgb,
     )
-    cc_xyz, cc_rgb = _stack_xyz_rgb(retained_xyz, cc_map_rgb, cc_marker_xyz, cc_marker_rgb)
+    cc_xyz, cc_rgb = _stack_xyz_rgb(retained_xyz, cc_map_rgb, display_xyz, display_rgb)
+    overlay_stack_xyz, overlay_stack_rgb = _stack_xyz_rgb(
+        np.zeros((0, 3), dtype=float),
+        np.zeros((0, 3), dtype=np.uint8),
+        overlay_xyz,
+        overlay_rgb,
+    )
+    if raw_pts:
+        raw_xyz = np.vstack(raw_pts)
+        raw_rgb = np.vstack(raw_cols)
+    else:
+        raw_xyz = np.zeros((0, 3), dtype=float)
+        raw_rgb = np.zeros((0, 3), dtype=np.uint8)
+    base_rgb = np.repeat(
+        np.asarray(VISIBLE_MAP_RGB, dtype=np.uint8).reshape(1, 3),
+        len(retained_xyz),
+        axis=0,
+    )
     excluded_marker_ids = [
         int(item["image_id"]) if item["image_id"] is not None else int(item["sphere_index"])
         for item in excluded_markers
     ]
-    marker_spheres_cc = int(len(cc_marker_xyz))
-    paths = _artifact_paths(out, filename)
-    comments = (
-        "sfm-diagnosis CloudCompare-ready robust-clipped risk PLY",
-        "open this file first; archival *_full.ply keeps outliers and original RGB",
+    marker_spheres_cc = int(len(in_clip_indices))
+    present_issues = [name for name, idxs in class_indices.items() if idxs]
+    paths = _artifact_paths(out, filename, present_issues)
+    ply_path = write_binary_ply(
+        paths["cloudcompare"],
+        cc_xyz,
+        cc_rgb,
+        comments=(
+            "sfm-diagnosis CloudCompare combined preview; dense held-out classes aggregated",
+            "load *_cloudcompare_base.ply plus class files as separate entities",
+        ),
     )
-    ply_path = write_binary_ply(paths["cloudcompare"], cc_xyz, cc_rgb, comments=comments)
+    base_path = write_binary_ply(
+        paths["base"],
+        retained_xyz,
+        base_rgb,
+        comments=("sfm-diagnosis CloudCompare base cloud; neutral gray; robust-clipped",),
+    )
+    markers_path = write_binary_ply(
+        paths["markers"],
+        overlay_stack_xyz,
+        overlay_stack_rgb,
+        comments=("sfm-diagnosis CloudCompare all-class markers; no base cloud",),
+    )
+    raw_path = write_binary_ply(
+        paths["markers_raw"],
+        raw_xyz,
+        raw_rgb,
+        comments=("sfm-diagnosis raw in-clip marker centers; one vertex per raw marker",),
+    )
+    ply_classes: dict[str, str] = {}
+    class_vertex_counts: dict[str, int] = {}
+    for issue in present_issues:
+        shells = class_shells.get(issue) or []
+        class_xyz, class_rgb = _stack_xyz_rgb(
+            np.zeros((0, 3), dtype=float),
+            np.zeros((0, 3), dtype=np.uint8),
+            [shell for shell, _color in shells],
+            [color for _shell, color in shells],
+        )
+        class_path = write_binary_ply(
+            paths["classes"][issue],
+            class_xyz,
+            class_rgb,
+            comments=(f"sfm-diagnosis CloudCompare {issue} markers; no base cloud",),
+        )
+        ply_classes[issue] = str(class_path)
+        class_vertex_counts[issue] = int(len(class_xyz))
     full_path = write_binary_ply(
         paths["full"],
         full_xyz,
@@ -1125,6 +1457,10 @@ def write_risk_ply(
 
     robust_diag = float(clip["robust_diagonal"])
     full_diag = float(clip["full_diagonal"])
+    camera_diag = float(clip["camera_diagonal"])
+    radius_cap = (
+        MARKER_RADIUS_CAMERA_DIAG_CAP * camera_diag if camera_diag > 0.0 else None
+    )
     clip_payload = {
         "method": clip["method"],
         "scale_source": clip["scale_source"],
@@ -1151,7 +1487,7 @@ def write_risk_ply(
             "max": [float(v) for v in clip["quantile_max"]],
         },
         "camera_nn": float(clip["camera_nn"]),
-        "camera_diagonal": float(clip["camera_diagonal"]),
+        "camera_diagonal": camera_diag,
         "camera_diagonal_full": float(clip.get("camera_diagonal_full") or 0.0),
         "camera_radius": float(clip.get("camera_radius") or 0.0),
         "camera_method": clip.get("camera_method"),
@@ -1171,39 +1507,86 @@ def write_risk_ply(
         "excluded_marker_classes": dict(excluded_marker_classes),
         "excluded_markers": excluded_markers,
     }
+    display_by_class: dict[str, int] = {}
+    for item in display_items:
+        issue = str(item["issue_class"])
+        display_by_class[issue] = display_by_class.get(issue, 0) + 1
+    max_display_radius = max((float(item["radius"]) for item in display_items), default=0.0)
+    base_n = int(len(retained_xyz))
+    combined_n = int(len(cc_xyz))
+    display_n = int(len(display_items))
+    visual_balance = {
+        "base_vertex_count": base_n,
+        "combined_vertex_count": combined_n,
+        "display_vertex_count": int(combined_n - base_n),
+        "base_vertex_fraction": float(base_n / combined_n) if combined_n else 1.0,
+        "base_rgb_majority": bool(base_n > (combined_n - base_n)),
+        "display_sphere_count": display_n,
+        "raw_marker_count": int(len(markers)),
+        "raw_marker_count_in_clip": marker_spheres_cc,
+        "max_display_radius": max_display_radius,
+        "radius_bounded_by_camera_diagonal": bool(
+            radius_cap is None or sphere_radius <= radius_cap + 1e-12
+        ),
+    }
+    aggregation = {
+        "classes": sorted(DENSE_COMBINED_CLASSES),
+        "radius": float(agg_radius),
+        "raw_marker_count": int(len(markers)),
+        "cluster_count": int(len(aggregation_clusters)),
+        "clusters": aggregation_clusters,
+    }
     cloudcompare = {
         "ply": str(ply_path),
+        "ply_base": str(base_path),
+        "ply_markers": str(markers_path),
+        "ply_markers_raw": str(raw_path),
+        "ply_classes": dict(ply_classes),
         "format": "binary_little_endian",
         "rgb": True,
-        "vertex_count": int(len(cc_xyz)),
-        "map_vertices_retained": int(len(retained_xyz)),
+        "vertex_count": combined_n,
+        "map_vertices_retained": base_n,
         "map_vertices_excluded": int(clip["excluded_count"]),
         "marker_spheres": marker_spheres_cc,
         "marker_spheres_total": int(len(markers)),
         "marker_spheres_excluded": int(len(excluded_markers)),
+        "display_spheres": display_n,
+        "display_spheres_by_class": display_by_class,
+        "class_vertex_counts": class_vertex_counts,
         "sphere_radius": float(sphere_radius),
+        "sphere_radius_by_class": {key: float(value) for key, value in radius_by_class.items()},
         "sphere_samples": int(sphere_samples),
         "robust_bounds": clip_payload["robust_bounds"],
         "visible_rgb": rgb_fallback,
-        "payload_bytes": int(len(cc_xyz) * 15),
+        "payload_bytes": int(combined_n * 15),
+        "visual_balance": visual_balance,
     }
     receipt = {
-        "schema_version": 2,
+        "schema_version": 3,
         "artifact_type": "SFM_DIAGNOSIS_RISK_PLY",
         "ply": str(ply_path),
+        "ply_base": str(base_path),
+        "ply_markers": str(markers_path),
+        "ply_markers_raw": str(raw_path),
+        "ply_classes": dict(ply_classes),
         "ply_full": str(full_path),
         "ply_mesh": str(mesh_path),
         "format": "binary_little_endian",
         "map_vertices": int(len(map_xyz)),
-        "map_vertices_retained": int(len(retained_xyz)),
+        "map_vertices_retained": base_n,
         "map_vertices_excluded": int(clip["excluded_count"]),
         "marker_spheres": int(len(markers)),
         "marker_spheres_cloudcompare": marker_spheres_cc,
         "marker_spheres_excluded": int(len(excluded_markers)),
+        "display_spheres": display_n,
+        "display_spheres_by_class": display_by_class,
         "sphere_samples": int(sphere_samples),
         "sphere_radius": float(sphere_radius),
         "sphere_radius_auto": float(auto_radius),
-        "vertex_count": int(len(cc_xyz)),
+        "sphere_radius_source": radius_meta["source"],
+        "sphere_radius_cap": radius_cap,
+        "sphere_radius_by_class": {key: float(value) for key, value in radius_by_class.items()},
+        "vertex_count": combined_n,
         "vertex_count_full": int(len(full_xyz)),
         "mesh_vertex_count": int(len(mesh_v)),
         "mesh_face_count": int(len(mesh_f)),
@@ -1227,6 +1610,8 @@ def write_risk_ply(
         "clip": clip_payload,
         "clipping_receipt": str(out / "risk_ply_clipping.json"),
         "cloudcompare": cloudcompare,
+        "aggregation": aggregation,
+        "visual_balance": visual_balance,
         "markers": markers,
     }
     write_json(out / "legend.json", {key: ISSUE_LEGEND[key] for key in ISSUE_COLORS})
@@ -1239,11 +1624,19 @@ def write_risk_ply(
 
 __all__ = [
     "CAVEATS",
+    "CLASS_RADIUS_SCALE",
+    "DENSE_COMBINED_CLASSES",
     "ISSUE_COLORS",
     "ISSUE_LEGEND",
+    "MARKER_RADIUS_ABS_FLOOR",
+    "MARKER_RADIUS_CAMERA_DIAG_CAP",
     "VIEWER_INSTRUCTIONS",
     "VISIBLE_MAP_RGB",
+    "aggregation_radius_from_clip",
     "camera_nearest_spacing",
+    "class_marker_radius",
+    "cluster_marker_indices",
+    "display_radius_from_clip",
     "load_jsonl_rows",
     "load_rows",
     "markers_from_heatmap",
