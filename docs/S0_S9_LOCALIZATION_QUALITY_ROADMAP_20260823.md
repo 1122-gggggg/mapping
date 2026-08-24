@@ -181,14 +181,14 @@ universal constants from the papers.
 
 - Detector-Free SfM or Dense-SfM for local low-texture/fragmented-track regions.
 - PixSfM featuremetric refinement for noisy keypoints and appearance change.
-- LFOE is the default S5/S5.7 global mapper; cycle/triplet checks remain independent edge diagnostics.
+- COLMAP 4.x GlobalMapper is the default S5/S5.7 backend; LFOE is blocked without a license grant.
 - MP-SfM for proven low-overlap/low-parallax/symmetry regimes.
 - RoMo-style dynamic correspondence masking where moving content is material.
 - ActLoc/Fisher planning for route and camera direction after site-held-out calibration.
 - Appearance-conditioned landmark/reference selection for day/night and long-term change.
 
-The remaining research backends do not become defaults merely because they win a paper benchmark.
-LFOE still must pass the same S6/S9, resource and gauge contracts as every candidate map.
+Research backends do not become defaults merely because they win a paper benchmark.
+Every candidate must pass the same S6/S9, resource, license and gauge contracts.
 
 ## Non-portable constants
 
@@ -234,7 +234,7 @@ calibration and one frozen S9 certification run:
 
 - conformal risk control and nonexchangeable weighting (Angelopoulos et al. 2024; Farinhas et al. 2023; Barber et al. 2023);
 - group-level Learn-Then-Test and nested session calibration (Angelopoulos et al. 2025; Kull et al. 2017; Roberts et al. 2017);
-- alternate reconstruction backends: PixSfM, Detector-Free SfM, MP-SfM, RoMo, LFOE, Light3R-SfM, depth-guided SfM;
+- alternate reconstruction backends: PixSfM, Detector-Free SfM, MP-SfM, RoMo, licensed-LFOE only, Light3R-SfM, depth-guided SfM;
 - lifelong posterior/FreMEn/BOCPD calibration and automatic tile replacement (Rosen 2016; Krajník et al. 2017; Adams and MacKay 2007);
 - replacement of the mixed prebuild objective by a monotone submodular or ILP selector (Nemhauser et al. 1978; Gygli et al. 2015).
 

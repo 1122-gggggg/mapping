@@ -127,27 +127,10 @@ def _filter_database(source: Path, output: Path, sequence: str) -> dict:
     shutil.copy2(source, output)
     connection = sqlite3.connect(output)
     try:
-        pose_prior_columns = {
+        pose_prior_columns = [
             str(row[1])
             for row in connection.execute("PRAGMA table_info(pose_priors)")
-        }
-        if pose_prior_columns and "image_id" not in pose_prior_columns:
-            pose_prior_count = int(
-                connection.execute("SELECT COUNT(*) FROM pose_priors").fetchone()[0]
-            )
-            if pose_prior_count:
-                raise ValueError(
-                    "cannot migrate non-empty COLMAP 4 pose_priors to legacy GLOMAP schema"
-                )
-            connection.execute("DROP TABLE pose_priors")
-            connection.execute(
-                "CREATE TABLE pose_priors ("
-                "image_id INTEGER PRIMARY KEY NOT NULL, "
-                "position BLOB, "
-                "coordinate_system INTEGER NOT NULL, "
-                "position_covariance BLOB, "
-                "FOREIGN KEY(image_id) REFERENCES images(image_id) ON DELETE CASCADE)"
-            )
+        ]
         rows = connection.execute(
             "SELECT image_id, name FROM images WHERE name LIKE ? ORDER BY image_id",
             (f"{sequence}/%",),
@@ -193,7 +176,7 @@ def _filter_database(source: Path, output: Path, sequence: str) -> dict:
     return {
         "images": len(keep),
         "two_view_pairs": remaining_pairs,
-        "legacy_pose_priors_schema": True,
+        "pose_priors_columns": pose_prior_columns,
     }
 
 
@@ -205,7 +188,7 @@ def _find_model(output: Path) -> Path:
         and (path.parent / "points3D.bin").is_file()
     ]
     if not candidates:
-        raise FileNotFoundError(f"LFOE produced no model under {output}")
+        raise FileNotFoundError(f"COLMAP GlobalMapper produced no model under {output}")
     return max(candidates, key=lambda path: (path / "images.bin").stat().st_size)
 
 
@@ -215,7 +198,7 @@ def _build_local_model(
     image_root: Path,
     sequence: str,
     work_dir: Path,
-    lfoe_bin: Path,
+    global_mapper_bin: Path,
     reuse: bool,
 ) -> tuple[Path, dict]:
     sequence_dir = work_dir / sequence
@@ -231,20 +214,22 @@ def _build_local_model(
     mapper_out.mkdir(parents=True)
     database_stats = _filter_database(database, database_out, sequence)
     command = [
-        str(lfoe_bin),
-        "mapper",
+        str(global_mapper_bin),
+        "global_mapper",
         "--database_path",
         str(database_out),
         "--image_path",
         str(image_root),
         "--output_path",
         str(mapper_out),
-        "--BundleAdjustment.optimize_intrinsics",
+        "--GlobalMapper.ba_refine_focal_length",
         "0",
-        "--BundleAdjustment.optimize_principal_point",
+        "--GlobalMapper.ba_refine_principal_point",
+        "0",
+        "--GlobalMapper.ba_refine_extra_params",
         "0",
     ]
-    log_path = sequence_dir / "lfoe.log"
+    log_path = sequence_dir / "colmap_global_mapper.log"
     with log_path.open("w", encoding="utf-8") as log_file:
         completed = subprocess.run(
             command,
@@ -255,7 +240,7 @@ def _build_local_model(
         )
     if completed.returncode:
         raise RuntimeError(
-            f"{sequence}: LFOE exited {completed.returncode}; see {log_path}"
+            f"{sequence}: COLMAP GlobalMapper exited {completed.returncode}; see {log_path}"
         )
     model = _find_model(mapper_out)
     return model, {
@@ -339,7 +324,7 @@ def main() -> None:
     parser.add_argument("--twoview", type=Path, required=True)
     parser.add_argument("--s4-gate", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--lfoe-bin", type=Path, required=True)
+    parser.add_argument("--global-mapper-bin", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--final-model", type=Path)
     parser.add_argument(
@@ -367,7 +352,7 @@ def main() -> None:
             image_root=args.image_root,
             sequence=sequence,
             work_dir=args.work_dir,
-            lfoe_bin=args.lfoe_bin,
+            global_mapper_bin=args.global_mapper_bin,
             reuse=args.reuse,
         )
         models[sequence] = pycolmap.Reconstruction(str(model))
@@ -527,7 +512,7 @@ def main() -> None:
         "stage": "S5.7_independent_sim3",
         "status": "PASS" if all_pass and bool(robust_edges) else "FAIL",
         "method": (
-            "independent per-sequence LFOE global SfM plus verified 3D-3D "
+            "independent per-sequence COLMAP GlobalMapper plus verified 3D-3D "
             "bridge RANSAC; failed redundant edges require zero shared "
             "final-map tracks"
         ),

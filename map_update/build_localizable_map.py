@@ -7,7 +7,7 @@ This is a one-file orchestration wrapper for the pipeline that was used around
 sfm_glomap / sfm_reshot25:
 
   videos -> extracted frames -> MegaLoc retrieval pairs -> MV-RoMa dense matches
-  -> hloc dense aggregation -> legacy COLMAP DB -> GLOMAP sparse model
+  -> hloc dense aggregation -> COLMAP DB -> COLMAP GlobalMapper sparse model
   -> RGB point cloud + XFeat localization bundle.
 
 The file intentionally keeps all important knobs in this CLI so a new site can
@@ -164,7 +164,7 @@ DEFAULT_DG_ROOT = str(DEFAULT_SYSTEM_ROOT / "建圖" / "external_tools" / "doppe
 DEFAULT_DG_CHECKPOINT = str(Path(DEFAULT_DG_ROOT) / "checkpoints" / "checkpoint-dg+visym.pth")
 DEFAULT_LFOE_GLOMAP = str(DEFAULT_SYSTEM_ROOT / "建圖" / "external_tools" / "LFOE-GlobalSfM" / "build" / "glomap_filter")
 DEFAULT_MPSFM_REPO = str(DEFAULT_SYSTEM_ROOT / "建圖" / "external_tools" / "mpsfm")
-DEFAULT_GLOMAP = "/home/cihcilab/micromamba/envs/sfm/bin/glomap"
+DEFAULT_COLMAP_GLOBAL = "/home/cihcilab/micromamba/envs/sfm/bin/colmap"
 DEFAULT_PY_SFM = "/usr/bin/python3.12"
 DEFAULT_PY_SFMDB = "/home/cihcilab/micromamba/envs/sfmdb/bin/python"
 DEFAULT_PY_MVROMA = "/home/cihcilab/micromamba/envs/mvroma/bin/python"
@@ -524,8 +524,8 @@ def cfg_paths(cfg: SimpleNamespace) -> SimpleNamespace:
         "aggregate_pairs": work / "work" / "mvroma" / "pairs_aggregate_used.txt",
         "database": work / "work" / "mvroma" / "database_mvroma_forced.db",
         "tmp_database": work / "work" / "tmp" / "database_mvroma_forced_tmp.db",
-        "model_standard": work / "glomap_standard",
-        "model_standard0": work / "glomap_standard" / "0",
+        "model_colmap": work / "colmap_global",
+        "model_colmap0": work / "colmap_global" / "0",
         "model_lfoe": work / "glomap_lfoe",
         "model_lfoe0": work / "glomap_lfoe" / "0",
         "model_dense": work / "glomap_dense_mvroma",
@@ -844,7 +844,7 @@ def stage_preflight(cfg: SimpleNamespace) -> None:
     tool_paths = {
         "ffmpeg": shutil.which(str(cfg.ffmpeg)) or "",
         "ffprobe": shutil.which("ffprobe") or "",
-        "glomap": str(cfg.glomap_command),
+        "colmap_global": str(cfg.colmap_command),
         "python_sfm": str(getattr(cfg, "python_sfm", "")),
         "python_sfmdb": str(getattr(cfg, "python_sfmdb", "")),
         "python_mvroma": str(getattr(cfg, "python_mvroma", "")),
@@ -944,7 +944,7 @@ def validate_stage_gate(stage: str, cfg: SimpleNamespace) -> None:
             )
             require(int(data.get("optimize_intrinsics", 1)) == 0, f"optimize_intrinsics={data.get('optimize_intrinsics')}")
             tools = data.get("tool_exists", {})
-            for name in ("ffmpeg", "ffprobe", "glomap", "python_sfm", "python_sfmdb", "python_mvroma", "template_repo", "mvroma_weights", "doppelgangers_checkpoint"):
+            for name in ("ffmpeg", "ffprobe", "colmap_global", "python_sfm", "python_sfmdb", "python_mvroma", "template_repo", "mvroma_weights", "doppelgangers_checkpoint"):
                 require(bool(tools.get(name)), f"missing_tool_or_path={name}")
             require(float(data.get("disk", {}).get("free_gb", 0.0)) >= float(thresholds["min_free_gb"]), f"disk_free_gb={data.get('disk', {}).get('free_gb')}")
             gpu = data.get("gpu", {})
@@ -7712,15 +7712,46 @@ def mapper_quality_score(summary: dict[str, Any]) -> tuple[int, int, float]:
     )
 
 
-def build_glomap_mapper_cmd(cfg: SimpleNamespace, glomap_cmd: str, output_path: Path) -> list[str]:
+def build_global_mapper_cmd(
+    cfg: SimpleNamespace,
+    backend: str,
+    mapper_cmd: str,
+    output_path: Path,
+) -> list[str]:
     p = cfg_paths(cfg)
     cmd = [
-        glomap_cmd,
-        "mapper",
+        mapper_cmd,
+        "global_mapper" if backend == "colmap_global" else "mapper",
         "--database_path", str(p.database),
         "--image_path", str(p.images),
         "--output_path", str(output_path),
     ]
+    if backend == "colmap_global":
+        if cfg.skip_bundle_adjustment:
+            cmd += ["--GlobalMapper.skip_bundle_adjustment", "1"]
+        if cfg.skip_retriangulation:
+            cmd += ["--GlobalMapper.skip_retriangulation", "1"]
+        if getattr(cfg, "optimize_intrinsics", None) is not None:
+            value = str(int(cfg.optimize_intrinsics))
+            cmd += [
+                "--GlobalMapper.ba_refine_focal_length", value,
+                "--GlobalMapper.ba_refine_extra_params", value,
+            ]
+        if cfg.optimize_principal_point is not None:
+            cmd += [
+                "--GlobalMapper.ba_refine_principal_point",
+                str(int(cfg.optimize_principal_point)),
+            ]
+        min_views = int(getattr(cfg, "min_num_view_per_track", 0) or 0)
+        if min_views > 0:
+            cmd += ["--GlobalMapper.track_min_num_views_per_track", str(min_views)]
+        min_angle = float(getattr(cfg, "min_triangulation_angle", 0.0) or 0.0)
+        if min_angle > 0:
+            cmd += ["--GlobalMapper.tri_min_angle", str(min_angle)]
+        return cmd
+
+    if backend != "lfoe":
+        raise ValueError(f"unsupported command-compatible mapper backend: {backend}")
     if cfg.skip_bundle_adjustment:
         cmd += ["--skip_bundle_adjustment", "1"]
     if cfg.skip_retriangulation:
@@ -7740,9 +7771,9 @@ def build_glomap_mapper_cmd(cfg: SimpleNamespace, glomap_cmd: str, output_path: 
     return cmd
 
 
-def glomap_run_cwd(glomap_cmd: str) -> Path | None:
-    if Path(glomap_cmd).name == "glomap_filter":
-        return Path(glomap_cmd).resolve().parent
+def mapper_run_cwd(backend: str, mapper_cmd: str) -> Path | None:
+    if backend == "lfoe":
+        return Path(mapper_cmd).resolve().parent
     return None
 
 
@@ -7803,8 +7834,8 @@ def run_dense_mvroma_triangulation(cfg: SimpleNamespace, reference_model: Path, 
 
 def stage_glomap(cfg: SimpleNamespace) -> None:
     p = cfg_paths(cfg)
-    backend = str(getattr(cfg, "backend", "lfoe"))
-    for path in (p.model, p.model_standard, p.model_lfoe, p.model_dense, p.model_mpsfm):
+    backend = str(getattr(cfg, "backend", "colmap_global"))
+    for path in (p.model, p.model_colmap, p.model_lfoe, p.model_dense, p.model_mpsfm):
         if path.exists() and cfg.overwrite:
             shutil.rmtree(path)
 
@@ -7819,25 +7850,36 @@ def stage_glomap(cfg: SimpleNamespace) -> None:
             "path": str(selected_root), "summary": summary,
         }
     else:
-        if backend == "lfoe":
+        if backend == "colmap_global":
+            mapper_command = str(cfg.colmap_command)
+            selected_root = p.model_colmap
+        elif backend == "lfoe":
+            if not bool(getattr(cfg, "allow_unlicensed_lfoe", False)):
+                raise SystemExit(
+                    "LFOE has no upstream license grant; pass "
+                    "--allow-unlicensed-lfoe only after obtaining deployment authorization"
+                )
             mapper_command = resolve_lfoe_command(cfg)
             selected_root = p.model_lfoe
             if not mapper_command:
                 raise SystemExit(
-                    "LFOE is the selected global mapper, but no executable "
+                    "LFOE was explicitly selected, but no executable "
                     f"glomap_filter is available at {getattr(cfg, 'lfoe_command', DEFAULT_LFOE_GLOMAP)}"
                 )
-        elif backend == "glomap":
-            mapper_command = str(cfg.glomap_command)
-            selected_root = p.model_standard
         else:
             raise ValueError(f"unsupported mapper backend: {backend}")
         selected_root.mkdir(parents=True, exist_ok=True)
-        command = build_glomap_mapper_cmd(cfg, mapper_command, selected_root)
+        command = build_global_mapper_cmd(
+            cfg, backend, mapper_command, selected_root
+        )
         diagnostics["runs"][backend] = {
             "path": str(selected_root), "command": command,
         }
-        run_cmd(command, cwd=glomap_run_cwd(mapper_command), dry_run=cfg.dry_run)
+        run_cmd(
+            command,
+            cwd=mapper_run_cwd(backend, mapper_command),
+            dry_run=cfg.dry_run,
+        )
         if cfg.dry_run:
             write_json(p.mapper_diagnostics, diagnostics)
             return
@@ -8272,10 +8314,15 @@ def stage_report(cfg: SimpleNamespace) -> None:
         "parameters": vars(cfg),
         "stage_times": read_stage_times(cfg),
         "integrated_modules": {
+            "COLMAP GlobalMapper": {
+                "role": "default maintained global SfM backend with native COLMAP database/model contracts",
+                "command": getattr(cfg, "colmap_command", DEFAULT_COLMAP_GLOBAL),
+                "default": getattr(cfg, "backend", "colmap_global") == "colmap_global",
+            },
             "LFOE-GlobalSfM": {
-                "role": "default global mapper; filters relative-translation outlier edges before translation averaging",
-                "command": getattr(cfg, "lfoe_command", DEFAULT_LFOE_GLOMAP),
-                "default": getattr(cfg, "backend", "lfoe") == "lfoe",
+                "role": "experiment-only learned translation-edge filter; upstream repository has no license grant",
+                "how_to_enable": "--backend lfoe --lfoe-command /path/to/glomap_filter",
+                "default": False,
             },
             "MP-SfM": {
                 "role": "explicit alternative backend for low-overlap, low-texture, or low-parallax scenes",
@@ -8321,8 +8368,8 @@ def stage_report(cfg: SimpleNamespace) -> None:
         f"- Doppelgangers++ scope: `{getattr(cfg, 'doppelgangers_filter_scope', 'all')}`, threshold: `{getattr(cfg, 'doppelgangers_threshold', 0.8)}`",
         f"- Pair verification: `{getattr(cfg, 'pair_verification', 'dms')}` action `{getattr(cfg, 'pair_verification_action', 'filter')}`, planar rotation limit `{getattr(cfg, 'dms_planar_max_rotation_error_deg', 10.0)}` deg",
         f"- Motion bridges: use_rotation_bridges=`{getattr(cfg, 'use_rotation_bridges', False)}`, exclude_rotation_from_triangulation=`{getattr(cfg, 'exclude_rotation_from_triangulation', False)}`",
-        f"- Backend: `{getattr(cfg, 'backend', 'lfoe')}`, MP-SfM conf: `{getattr(cfg, 'mpsfm_conf', 'sp-mast3r-dense')}`",
-        f"- Global mapper skip_BA: `{cfg.skip_bundle_adjustment}`, skip_retriangulation: `{cfg.skip_retriangulation}`, optimize_intrinsics: `{getattr(cfg, 'optimize_intrinsics', 0)}`, max_tracks: `{cfg.max_num_tracks}`, min_views: `{getattr(cfg, 'min_num_view_per_track', 0)}`, min_angle: `{getattr(cfg, 'min_triangulation_angle', 0.0)}`",
+        f"- Backend: `{getattr(cfg, 'backend', 'colmap_global')}`, MP-SfM conf: `{getattr(cfg, 'mpsfm_conf', 'sp-mast3r-dense')}`",
+        f"- Global mapper skip_BA: `{cfg.skip_bundle_adjustment}`, skip_retriangulation: `{cfg.skip_retriangulation}`, optimize_intrinsics: `{getattr(cfg, 'optimize_intrinsics', 0)}`, min_views: `{getattr(cfg, 'min_num_view_per_track', 0)}`, min_angle: `{getattr(cfg, 'min_triangulation_angle', 0.0)}`",
         f"- Dense MV-RoMA triangulation: `{getattr(cfg, 'dense_map_triangulation', False)}`, two_view: `{getattr(cfg, 'dense_tri_include_two_view_tracks', True)}`, min_angle: `{getattr(cfg, 'dense_tri_min_angle', 0.5)}`, max_reproj: `{getattr(cfg, 'dense_tri_max_reproj_error', 2.0)}`",
         f"- XFeat topk: `{cfg.xfeat_topk}`, snap_px: `{cfg.snap_px}`, tri_pair_topk: `{cfg.tri_pair_topk}`",
         "",
@@ -8336,7 +8383,8 @@ def stage_report(cfg: SimpleNamespace) -> None:
         "",
         "## Integrated Modules",
         "",
-        "- LFOE-GlobalSfM: the default global mapper; one mapper run, not a second diagnostic reconstruction.",
+        "- COLMAP GlobalMapper: default BSD-licensed maintained GLOMAP implementation with native fixed-intrinsics controls.",
+        "- LFOE-GlobalSfM: experiment-only because its official repository provides no license grant.",
         "- MP-SfM: explicit alternative backend for low-overlap or low-texture scenes.",
         "- Dense Match Graph Verification: H/E-consistent planar-edge rescue plus largest-component view pruning before aggregation.",
         "- Doppelgangers++: use before MV-RoMa when repeated structures create visually plausible but wrong pairs.",
@@ -8391,10 +8439,12 @@ RUNTIME_DEFAULTS: dict[str, Any] = {
     "dms_rotation_h_over_f": 1.5,
     "dms_planar_max_rotation_error_deg": 10.0,
     "dms_min_largest_component_ratio": 0.90,
-    "backend": "lfoe",
+    "backend": "colmap_global",
     "use_rotation_bridges": False,
     "exclude_rotation_from_triangulation": False,
     "motion_classes": "parallax,pure_rotation,hover",
+    "colmap_command": DEFAULT_COLMAP_GLOBAL,
+    "allow_unlicensed_lfoe": False,
     "lfoe_command": DEFAULT_LFOE_GLOMAP,
     "mpsfm_repo": DEFAULT_MPSFM_REPO,
     "python_mpsfm": DEFAULT_PY_MPSFM,
@@ -8533,7 +8583,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--doppelgangers-checkpoint", default="")
     ap.add_argument("--doppelgangers-threshold", type=float, default=0.8)
     ap.add_argument("--doppelgangers-filter-scope", choices=["all", "cross_video", "cross_direction"], default="all")
-    ap.add_argument("--backend", choices=["lfoe", "glomap", "mpsfm"], default="lfoe")
+    ap.add_argument("--backend", choices=["colmap_global", "lfoe", "mpsfm"], default="colmap_global")
     ap.add_argument("--mpsfm-repo", default=DEFAULT_MPSFM_REPO)
     ap.add_argument("--python-mpsfm", default=DEFAULT_PY_MPSFM)
     ap.add_argument("--mpsfm-conf", default="sp-mast3r-dense")
@@ -8542,8 +8592,9 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--mpsfm-extract-list", default="sky,features,matches,depth,normal")
     ap.add_argument("--mpsfm-verbose", type=int, default=0)
     ap.add_argument("--mpsfm-max-frames-per-chunk", type=int, default=220)
-    ap.add_argument("--glomap-command", default=DEFAULT_GLOMAP)
+    ap.add_argument("--colmap-command", default=DEFAULT_COLMAP_GLOBAL)
     ap.add_argument("--lfoe-command", default=DEFAULT_LFOE_GLOMAP)
+    ap.add_argument("--allow-unlicensed-lfoe", action="store_true")
     ap.add_argument("--python-sfm", default=DEFAULT_PY_SFM)
     ap.add_argument("--python-sfmdb", default=DEFAULT_PY_SFMDB)
     ap.add_argument("--python-mvroma", default=DEFAULT_PY_MVROMA)

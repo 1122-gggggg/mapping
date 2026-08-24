@@ -7,13 +7,16 @@ video paths or new gate logic. --run-dir is required; missing inputs fail closed
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 
 
 TOOLS = Path(__file__).resolve().parent
+DEFAULT_GLOBAL_MAPPER = Path("/home/cihcilab/micromamba/envs/sfm/bin/colmap")
 
 
 def gate_passed(path: Path) -> tuple[bool, str]:
@@ -37,6 +40,37 @@ def require_path(path: Path | None, label: str) -> Path:
     return path
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def clone_mapper_database(source: Path, destination: Path) -> dict[str, str | int]:
+    source = source.resolve()
+    destination = destination.resolve()
+    if destination.exists():
+        raise FileExistsError(f"global mapper database clone already exists: {destination}")
+    wal = source.with_name(source.name + "-wal")
+    if wal.is_file() and wal.stat().st_size:
+        raise ValueError(f"non-empty SQLite WAL blocks global mapper clone: {wal}")
+    before = sha256_file(source)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    after = sha256_file(destination)
+    if after != before:
+        destination.unlink(missing_ok=True)
+        raise ValueError("global mapper database clone hash mismatch")
+    return {
+        "source": str(source),
+        "clone": str(destination),
+        "sha256": before,
+        "size_bytes": source.stat().st_size,
+    }
+
+
 def plan_stages(args: argparse.Namespace) -> list[dict]:
     run_dir = args.run_dir.resolve()
     run_name = run_dir.name
@@ -48,7 +82,8 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
     corpus_manifest = run_dir / "corpus_manifest.json"
     gates = run_dir / "gates"
     model = args.model or (run_dir / "final_model")
-    lfoe_model = run_dir / "lfoe_model"
+    global_model = run_dir / "colmap_global"
+    global_database = run_dir / "work" / "global_mapper" / "database.db"
     tracking = args.tracking_bundle or (
         run_dir / "edm" / "target_site_v1_seed_tracking.pt"
     )
@@ -117,31 +152,36 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
             "gate": gates / "S5_fixed_intrinsics.json",
             "needs": {
                 "--database": args.database,
-                "--lfoe-bin": args.lfoe_bin,
+                "--global-mapper-bin": args.global_mapper_bin,
                 "--intrinsics-seed": args.intrinsics_seed,
                 "--frame-manifest": frame_manifest,
                 "--image-root": images,
             },
+            "database_clone": (args.database, global_database),
+            "fresh_dirs": [global_model],
+            "database_receipt": run_dir / "global_mapper_database.json",
             "commands": [
                 [
-                    args.lfoe_bin,
-                    "mapper",
+                    args.global_mapper_bin,
+                    "global_mapper",
                     "--database_path",
-                    args.database,
+                    global_database,
                     "--image_path",
                     images,
                     "--output_path",
-                    lfoe_model,
-                    "--BundleAdjustment.optimize_intrinsics",
+                    global_model,
+                    "--GlobalMapper.ba_refine_focal_length",
                     "0",
-                    "--BundleAdjustment.optimize_principal_point",
+                    "--GlobalMapper.ba_refine_principal_point",
+                    "0",
+                    "--GlobalMapper.ba_refine_extra_params",
                     "0",
                 ],
                 [
                     python,
                     tool("finalize_edm_model.py"),
                     "--input-model",
-                    lfoe_model / "0",
+                    global_model / "0",
                     "--output-model",
                     model,
                     "--frame-manifest",
@@ -158,7 +198,7 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
             "gate": gates / "S5_7_independent_sim3.json",
             "needs": {
                 "--database": args.database,
-                "--lfoe-bin": args.lfoe_bin,
+                "--global-mapper-bin": args.global_mapper_bin,
                 "--twoview": args.twoview,
                 "--image-root": images,
                 "--forced-pairs": forced_txt,
@@ -182,8 +222,8 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
                 gates / "S4_doppelgangers.json",
                 "--work-dir",
                 run_dir / "s5_7",
-                "--lfoe-bin",
-                args.lfoe_bin,
+                "--global-mapper-bin",
+                args.global_mapper_bin,
                 "--out",
                 gates / "S5_7_independent_sim3.json",
             ],
@@ -328,7 +368,7 @@ def main() -> None:
     parser.add_argument("--twoview", type=Path)
     parser.add_argument("--intrinsics-seed", type=Path)
     parser.add_argument("--database", type=Path)
-    parser.add_argument("--lfoe-bin", type=Path)
+    parser.add_argument("--global-mapper-bin", type=Path, default=DEFAULT_GLOBAL_MAPPER)
     parser.add_argument("--model", type=Path)
     parser.add_argument("--s5-metrics", type=Path)
     parser.add_argument("--tracking-bundle", type=Path)
@@ -349,7 +389,22 @@ def main() -> None:
             if spec["stage"] != args.start_from:
                 continue
             started = True
-        for cmd in resolve_stage_commands(spec):
+        commands = resolve_stage_commands(spec)
+        fresh_dirs = [Path(path) for path in spec.get("fresh_dirs", [])]
+        for path in fresh_dirs:
+            if path.exists():
+                raise FileExistsError(f"stage output already exists: {path}")
+        clone = spec.get("database_clone")
+        if clone is not None:
+            receipt = clone_mapper_database(Path(clone[0]), Path(clone[1]))
+            receipt_path = Path(spec["database_receipt"])
+            receipt_path.write_text(
+                json.dumps(receipt, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        for path in fresh_dirs:
+            path.mkdir(parents=True)
+        for cmd in commands:
             print("[run_s0_s9] " + " ".join(cmd), flush=True)
             subprocess.run(cmd, check=True)
         ok, detail = gate_passed(spec["gate"])

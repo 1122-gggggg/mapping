@@ -10,7 +10,12 @@ import pytest
 TARGET_SITE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TARGET_SITE / "tools"))
 
-from run_s0_s9 import gate_passed, plan_stages, resolve_stage_commands  # noqa: E402
+from run_s0_s9 import (  # noqa: E402
+    clone_mapper_database,
+    gate_passed,
+    plan_stages,
+    resolve_stage_commands,
+)
 
 
 def _args(tmp_path: Path, **overrides) -> Namespace:
@@ -20,7 +25,7 @@ def _args(tmp_path: Path, **overrides) -> Namespace:
         twoview=None,
         intrinsics_seed=None,
         database=None,
-        lfoe_bin=None,
+        global_mapper_bin=None,
         model=None,
         s5_metrics=None,
         tracking_bundle=None,
@@ -66,12 +71,12 @@ def test_s4_fails_closed_without_twoview(tmp_path: Path) -> None:
         resolve_stage_commands(spec)
 
 
-def test_s5_7_wires_lfoe_as_the_only_global_mapper(tmp_path: Path) -> None:
+def test_s5_7_wires_colmap_as_the_only_global_mapper(tmp_path: Path) -> None:
     run_dir = tmp_path / "target_site_v1"
     run_dir.mkdir()
     required = {
         "database": tmp_path / "database.db",
-        "lfoe_bin": tmp_path / "glomap_filter",
+        "global_mapper_bin": tmp_path / "colmap",
         "twoview": tmp_path / "twoview.pt",
     }
     for path in required.values():
@@ -89,19 +94,19 @@ def test_s5_7_wires_lfoe_as_the_only_global_mapper(tmp_path: Path) -> None:
         if item["stage"] == "S5.7"
     )
     cmd = resolve_stage_commands(spec)[0]
-    assert "--lfoe-bin" in cmd
-    assert "--glomap-bin" not in cmd
-    assert str(required["lfoe_bin"]) in cmd
+    assert "--global-mapper-bin" in cmd
+    assert "--lfoe-bin" not in cmd
+    assert str(required["global_mapper_bin"]) in cmd
 
 
-def test_s5_runs_lfoe_then_fixed_intrinsics_finalizer(tmp_path: Path) -> None:
+def test_s5_runs_colmap_global_mapper_then_fixed_intrinsics_finalizer(tmp_path: Path) -> None:
     run_dir = tmp_path / "target_site_v1"
     images = run_dir / "images"
     images.mkdir(parents=True)
     database = tmp_path / "database.db"
-    lfoe_bin = tmp_path / "glomap_filter"
+    global_mapper_bin = tmp_path / "colmap"
     intrinsics = tmp_path / "intrinsics"
-    for path in (database, lfoe_bin):
+    for path in (database, global_mapper_bin):
         path.write_bytes(b"x")
     intrinsics.mkdir()
     (run_dir / "frame_manifest.json").write_text("{}", encoding="utf-8")
@@ -109,18 +114,44 @@ def test_s5_runs_lfoe_then_fixed_intrinsics_finalizer(tmp_path: Path) -> None:
         item
         for item in plan_stages(
             _args(
-                tmp_path, database=database, lfoe_bin=lfoe_bin,
+                tmp_path, database=database, global_mapper_bin=global_mapper_bin,
                 intrinsics_seed=intrinsics,
             )
         )
         if item["stage"] == "S5"
     )
     mapper, finalizer = resolve_stage_commands(spec)
-    assert mapper[:2] == [str(lfoe_bin), "mapper"]
+    assert mapper[:2] == [str(global_mapper_bin), "global_mapper"]
     assert "--database_path" in mapper
-    assert "--BundleAdjustment.optimize_intrinsics" in mapper
+    assert "--GlobalMapper.ba_refine_focal_length" in mapper
+    assert "--GlobalMapper.ba_refine_extra_params" in mapper
     assert "finalize_edm_model.py" in finalizer[1]
-    assert str(run_dir / "lfoe_model" / "0") in finalizer
+    assert str(run_dir / "colmap_global" / "0") in finalizer
+
+
+def test_global_mapper_database_clone_is_immutable_and_collision_safe(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.db"
+    clone = tmp_path / "work" / "database.db"
+    source.write_bytes(b"immutable database")
+
+    receipt = clone_mapper_database(source, clone)
+
+    assert clone.read_bytes() == source.read_bytes()
+    assert receipt["source"] == str(source.resolve())
+    assert receipt["clone"] == str(clone.resolve())
+    with pytest.raises(FileExistsError):
+        clone_mapper_database(source, clone)
+
+
+def test_global_mapper_database_clone_rejects_nonempty_wal(tmp_path: Path) -> None:
+    source = tmp_path / "source.db"
+    source.write_bytes(b"database")
+    source.with_name("source.db-wal").write_bytes(b"pending")
+
+    with pytest.raises(ValueError, match="WAL"):
+        clone_mapper_database(source, tmp_path / "clone.db")
 
 
 def test_gate_passed_requires_status_pass(tmp_path: Path) -> None:

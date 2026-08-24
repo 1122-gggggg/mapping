@@ -16,7 +16,7 @@ SYSTEM_ROOT = BUILD_ROOT.parent
 TOOLS = BUILD_ROOT / "external_tools"
 DEFAULT_RUN = BUILD_ROOT / "runs" / "fuhe_full_no_undistort_official69_20260708"
 DEFAULT_EXPERIMENT_ROOT = BUILD_ROOT / "experiments" / "research_methods_20260710"
-DEFAULT_GLOMAP = "/home/cihcilab/micromamba/envs/sfm/bin/glomap"
+DEFAULT_COLMAP = "/home/cihcilab/micromamba/envs/sfm/bin/colmap"
 DEFAULT_LFOE = TOOLS / "LFOE-GlobalSfM" / "build" / "glomap_filter"
 DEFAULT_DG_ROOT = TOOLS / "doppelgangers-plusplus"
 DEFAULT_DG_CKPT = DEFAULT_DG_ROOT / "checkpoints" / "checkpoint-dg+visym.pth"
@@ -35,6 +35,15 @@ def path_status(path: Path, executable: bool = False) -> dict:
         "exists": exists,
         "ok": ok,
     }
+
+
+def find_license(path: Path) -> Path | None:
+    for root in [path.parent, *list(path.parents)[1:4]]:
+        for name in ("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING", "COPYING.txt"):
+            candidate = root / name
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def command_step(name: str, priority: int, status: str, rationale: str,
@@ -58,44 +67,54 @@ def build_plan(args: argparse.Namespace) -> dict:
     experiment_root = Path(args.experiment_root).resolve()
     database = Path(args.database).resolve() if args.database else find_default_database(run_dir).resolve()
     lfoe = Path(args.lfoe_command).resolve()
+    lfoe_license = find_license(lfoe)
+    lfoe_ready = lfoe.is_file() and lfoe_license is not None
     dg_root = Path(args.doppelgangers_root).resolve()
     dg_ckpt = Path(args.doppelgangers_checkpoint).resolve()
 
-    baseline_out = experiment_root / "00_baseline_glomap_db_reuse"
+    baseline_out = experiment_root / "00_baseline_colmap_global_db_reuse"
     lfoe_out = experiment_root / "01_lfoe_glomap_filter"
     dg_out = experiment_root / "02_doppelgangers_pp_frontend"
-    gap_out = experiment_root / "03_global_edge_prior_frontend"
-    trip_out = experiment_root / "04_trip_translation_averaging"
-    ggpt_out = experiment_root / "05_ggpt_dense_geometry"
 
     steps = [
         command_step(
-            "baseline_glomap_db_reuse",
+            "baseline_colmap_global_db_reuse",
             0,
             "ready",
-            "Control run from the same DB/H5 artifacts; no expensive front-end rerun.",
+            "Maintained COLMAP GlobalMapper control run from the same database.",
             [
-                args.glomap_command, "mapper",
+                args.colmap_command, "global_mapper",
                 "--database_path", str(database),
                 "--image_path", str(image_root),
                 "--output_path", str(baseline_out),
+                "--GlobalMapper.ba_refine_focal_length", "0",
+                "--GlobalMapper.ba_refine_principal_point", "0",
+                "--GlobalMapper.ba_refine_extra_params", "0",
             ],
             ["existing COLMAP database", "image_root"],
-            ["Run this before any research variant so every method has the same baseline."],
+            ["Run this before research variants so every method has the same maintained baseline."],
         ),
         command_step(
             "lfoe_outlier_edge_filter",
             1,
-            "ready" if lfoe.exists() else "blocked",
-            "LFOE directly targets outlier relative-translation edges in global SfM and reuses the existing database.",
+            "ready" if lfoe_ready else "blocked",
+            "LFOE is a translation-edge-filtering experiment; its upstream release currently has no license grant.",
             [
                 str(lfoe), "mapper",
                 "--database_path", str(database),
                 "--image_path", str(image_root),
                 "--output_path", str(lfoe_out),
-            ] if lfoe.exists() else None,
-            ["LFOE glomap_filter executable", "existing COLMAP database", "image_root"],
-            ["Compare registered images, points3D, reprojection stats, and holdout localization."],
+            ] if lfoe_ready else None,
+            [
+                "LFOE glomap_filter executable",
+                "explicit local/upstream license grant",
+                "existing COLMAP database",
+                "image_root",
+            ],
+            [
+                f"Detected license: {lfoe_license}" if lfoe_license else "BLOCKED: no license file found.",
+                "Compare against COLMAP GlobalMapper with the same S6/S9 gates.",
+            ],
         ),
         command_step(
             "doppelgangers_pp_pair_filter",
@@ -166,8 +185,12 @@ def build_plan(args: argparse.Namespace) -> dict:
         "image_root": str(image_root),
         "experiment_root": str(experiment_root),
         "preflight": {
-            "glomap": {"path": args.glomap_command},
-            "lfoe": path_status(lfoe, executable=True),
+            "colmap_global": {"path": args.colmap_command},
+            "lfoe": {
+                **path_status(lfoe, executable=True),
+                "license": str(lfoe_license) if lfoe_license else None,
+                "ok": lfoe_ready,
+            },
             "doppelgangers_root": path_status(dg_root),
             "doppelgangers_checkpoint": path_status(dg_ckpt),
         },
@@ -229,7 +252,7 @@ def main() -> None:
     parser.add_argument("--database", default="")
     parser.add_argument("--image-root", default="")
     parser.add_argument("--experiment-root", default=str(DEFAULT_EXPERIMENT_ROOT))
-    parser.add_argument("--glomap-command", default=DEFAULT_GLOMAP)
+    parser.add_argument("--colmap-command", default=DEFAULT_COLMAP)
     parser.add_argument("--lfoe-command", default=str(DEFAULT_LFOE))
     parser.add_argument("--doppelgangers-root", default=str(DEFAULT_DG_ROOT))
     parser.add_argument("--doppelgangers-checkpoint", default=str(DEFAULT_DG_CKPT))

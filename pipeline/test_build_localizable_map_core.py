@@ -123,10 +123,45 @@ class PaperMethodIntegrationTests(unittest.TestCase):
         self.assertEqual(graph["pruned_views"], ["isolated", "x", "y"])
         self.assertEqual(graph["largest_component_ratio"], 0.5)
 
-    def test_lfoe_and_graph_filter_are_runtime_defaults(self) -> None:
-        self.assertEqual(core.RUNTIME_DEFAULTS["backend"], "lfoe")
+    def test_colmap_global_and_graph_filter_are_runtime_defaults(self) -> None:
+        self.assertEqual(core.RUNTIME_DEFAULTS["backend"], "colmap_global")
         self.assertEqual(core.RUNTIME_DEFAULTS["pair_verification"], "dms")
         self.assertNotIn("lfoe_mode", core.RUNTIME_DEFAULTS)
+        self.assertFalse(core.RUNTIME_DEFAULTS["allow_unlicensed_lfoe"])
+
+    def test_colmap_global_command_fixes_all_intrinsic_groups(self) -> None:
+        cfg = SimpleNamespace(
+            work_dir="/tmp/colmap-global-command-test",
+            skip_bundle_adjustment=False,
+            skip_retriangulation=True,
+            optimize_intrinsics=0,
+            optimize_principal_point=0,
+            min_num_view_per_track=3,
+            min_triangulation_angle=1.0,
+            max_num_tracks=600000,
+        )
+
+        command = core.build_global_mapper_cmd(
+            cfg, "colmap_global", "/bin/colmap", Path("/tmp/model")
+        )
+
+        self.assertEqual(command[:2], ["/bin/colmap", "global_mapper"])
+        self.assertIn("--GlobalMapper.ba_refine_focal_length", command)
+        self.assertIn("--GlobalMapper.ba_refine_principal_point", command)
+        self.assertIn("--GlobalMapper.ba_refine_extra_params", command)
+        self.assertNotIn("--TrackEstablishment.max_num_tracks", command)
+
+    def test_lfoe_requires_explicit_deployment_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SimpleNamespace(
+                work_dir=tmp,
+                backend="lfoe",
+                allow_unlicensed_lfoe=False,
+                overwrite=False,
+            )
+
+            with self.assertRaisesRegex(SystemExit, "no upstream license grant"):
+                core.stage_glomap(cfg)
 
 
 class PairGraphPerformanceTests(unittest.TestCase):

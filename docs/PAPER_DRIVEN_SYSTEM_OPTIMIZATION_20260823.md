@@ -1,6 +1,6 @@
 # Paper-driven mapping-system optimization — 2026-08-23
 
-This document records the architecture decisions used to optimize the mapping/diagnosis/update stack. It distinguishes **implemented production-path changes** from **conditional research backends** and **future work**. A paper being stronger on a benchmark is not, by itself, a reason to replace the validated GlueMap → EDM deployment path.
+This document records architecture decisions for the mapping/diagnosis/update stack. A paper benchmark alone never authorizes replacement: the implementation must also have an explicit usable license, a compatible COLMAP boundary, fixed-calibration controls, bounded resources, and the same S6/S9 release evidence.
 
 ## 1. Target failure modes
 
@@ -140,7 +140,7 @@ Pan, Schönberger & Pollefeys, *Global Structure-from-Motion Meets Feedforward R
 
 GLUEMAP combines retrieval, optional Doppelgangers++ disambiguation, feed-forward local reconstruction, global averaging/BA and refinement. It remains COLMAP-compatible and useful for controlled comparison.
 
-**Decision:** LFOE now replaces the standard global mapper in S5. GlueMap remains an explicit alternative; it cannot run as a hidden second reconstruction or win based only on registration/reprojection summaries. Promotion still requires the same S6/S9, gauge, resource and provenance gates.
+**Decision:** the maintained BSD-licensed COLMAP 4.x `global_mapper` is the S5 default. GlueMap remains an explicit whole-pipeline alternative; it does not consume the existing match database and its default transitive learned dependencies include non-commercial components.
 
 ### 4.2 Camera triplets — use for graph quality and sparsification
 
@@ -157,7 +157,7 @@ q(e)   = mean_t q(e,t)
 
 using candidate counts only to rank geometry work. S3/S4 still owns true geometric verification.
 
-**Stronger extension:** compute the same concept from verified pair inliers/relative poses at image level and combine it with rotation-cycle residuals before GlueMap.
+**Stronger extension:** compute the same concept from verified pair inliers/relative poses at image level and combine it with rotation-cycle residuals before GlobalMapper.
 
 ### 4.3 Doppelgangers++ — keep as the repeated-structure primary gate
 
@@ -167,18 +167,18 @@ The method targets visual aliasing where distinct surfaces look alike and genera
 
 **Decision:** S4 Doppelgangers++ remains the first repeated-structure disambiguator. It should not be bypassed for scenes that show symmetry/repeated fences/buildings/roadside structures.
 
-### 4.4 LFOE-GlobalSfM — default global mapper
+### 4.4 LFOE-GlobalSfM — isolated research backend only
 
 Damblon et al., *Learning to Filter Outlier Edges in Global SfM*, CVPR 2025.
 
-The method models relative-translation edges as vertices in a clustered line graph and classifies them before translation averaging. Its published GLOMAP integration is a command-compatible `glomap_filter`.
+The method models relative-translation edges as vertices in a clustered line graph and classifies them before translation averaging. Its command-compatible `glomap_filter` consumes a COLMAP database and writes a COLMAP model.
 
-**Implemented:**
+**Replacement audit:** the official repository has no top-level license grant. The released executable also bundles the now-deprecated standalone GLOMAP fork. Therefore:
 
-- S5 runs `glomap_filter mapper` directly from the existing COLMAP database, with fixed intrinsics, then applies the existing finalization and S6/S9 gates;
-- S5.7 independent per-sequence reconstruction uses the same LFOE executable;
-- the previous standard-GLOMAP-then-LFOE diagnostic double reconstruction and duplicate `backend_comparison.json` were removed;
-- standard GLOMAP and MP-SfM remain explicit `--backend` choices in the portable builder, never silent fallbacks.
+- COLMAP 4.x `global_mapper` replaces LFOE in S5 and S5.7;
+- all focal, principal-point and extra-parameter refinement flags are disabled;
+- LFOE remains blocked in the experiment planner unless a local/upstream license file is present;
+- this is a legal/maintenance cutover, not an accuracy claim—COLMAP lacks LFOE's learned translation-edge classifier, so S4/S6/S9 remain mandatory.
 
 ### 4.5 G-MASt3R-SfM — transfer graph pruning, not its optimizer stack
 
@@ -186,7 +186,7 @@ Watanabe et al., *G-MASt3R-SfM: Graph-based View Pruning and Multi-stage Optimiz
 
 GVP geometrically verifies MASt3R edges, detects outlier view groups, and removes them before reconstruction. MSO then expands optimization from community-local to global.
 
-**Implemented transfer:** the dense-match verification stage now filters edges geometrically and removes every view component outside the deterministic largest verified component before database aggregation. The retained-component ratio is a hard gate. MSO was not copied: LFOE/GLOMAP already performs global positioning plus bundle adjustment, so a second pose-only or staged optimizer would duplicate a lower-fidelity objective.
+**Implemented transfer:** dense-match verification removes every view component outside the deterministic largest verified component before database aggregation. The retained-component ratio is a hard gate. MSO was not copied: COLMAP GlobalMapper already performs global positioning plus bundle adjustment.
 
 ### 4.6 Planar-SfM — distinguish a valid plane from pure rotation
 
@@ -202,7 +202,7 @@ He et al., *Detector-Free Structure from Motion*, CVPR 2024.
 
 Detector-Free SfM starts from quantized detector-free matches, builds a coarse reconstruction and iteratively improves tracks/geometry. It is especially relevant when local keypoint repeatability is poor.
 
-**Decision:** research fallback for texture-poor or detector-failure segments, not an always-on replacement. The current GlueMap feed-forward local geometry already addresses part of this failure regime, so replacing the whole pipeline would duplicate cost unless S3/S5 diagnostics identify frontend failure.
+**Decision:** sealed A/B candidate for texture-poor or detector-failure segments, not a default. Apache-2.0 code and public weights exist, and fixed-pose/fixed-intrinsics triangulation writes COLMAP models, but the released refinement depends on a custom COLMAP/CUDA stack and has no target-site S9 evidence.
 
 ### 4.8 MP-SfM — fallback for low overlap / low parallax / symmetry
 
@@ -293,9 +293,9 @@ S4 Doppelgangers++ + graph/cycle audit
   ↓
 verified-edge H/E planar consistency + largest-component view pruning
   ↓
-S5 LFOE translation-edge filter + global mapping + fixed-intrinsics final BA
+S5 maintained COLMAP GlobalMapper + fixed-intrinsics final BA
   ↓
-S5.7 independent per-session LFOE + Sim(3) release gate
+S5.7 independent per-session COLMAP GlobalMapper + Sim(3) release gate
   ↓
 S6 ghost / duplicate geometry audit
   ↓
@@ -313,11 +313,11 @@ update routing with gauge / scale / gravity release gates
 Conditional research escalation:
 
 ```text
-texture/keypoint failure        → Detector-Free SfM A/B
+texture/keypoint failure        → Detector-Free SfM or PixSfM sealed A/B
+pairwise rescue failure         → RoMa v2 sealed A/B
 low overlap/parallax/symmetry   → MP-SfM A/B
-LFOE held-out regression        → explicit GlueMap/GLOMAP A/B
+translation-edge outliers       → licensed LFOE build only, never silent fallback
 material dynamic contamination  → RoMo-style segmentation A/B
-graph/inference memory bottleneck → Light3R-SfM A/B
 ```
 
 Every A/B comparison must use the same build corpus and untouched S9 sessions. The winner is the method with better localization robustness under equivalent compute/memory constraints, not the method with the lowest training/reprojection loss alone.
@@ -361,13 +361,27 @@ This isolates whether the selector saves computation without sacrificing S9 cove
 
 | Failure regime | Strong candidate | Why it can be stronger | Why it is not default here |
 | --- | --- | --- | --- |
-| weak texture / detector failure | Detector-Free SfM | detector-free dense matching and iterative multiview refinement | extra frontend/reconstruction cost; current dense matching already addresses part of this regime |
-| low overlap / low parallax / symmetry | MP-SfM | monocular depth/normal priors regularize weak multiview geometry | prior bias/domain shift; needs site A/B and gauge care |
-| repeated structures | Doppelgangers++ | explicit visual-alias disambiguation | already integrated; still needs graph connectivity checks |
-| global translation-edge outliers | LFOE-GlobalSfM | learned clustered line-graph edge filtering | default mapper; any domain regression is caught by unchanged S6/S9 gates |
-| planar-dominant pairs | Planar-SfM consistency transfer | H/E rotation agreement separates supported planes from rotation-only edges | full spectral pose solver would duplicate the global mapper |
-| feed-forward speed/memory | Light3R-SfM | sparse retrieval-guided graph | release parity with GlueMap/EDM not yet established for this site |
+| weak texture / detector failure | Detector-Free SfM | Apache-2.0, public weights, fixed-pose/intrinsics COLMAP output | custom COLMAP/CUDA stack; experiment until S9 parity |
+| noisy keypoints / geometry | PixSfM | Apache-2.0 featuremetric refinement of existing COLMAP models | COLMAP 3.8/pyceres port and multi-GB cache |
+| pairwise rescue | RoMa v2 | MIT, public code/weights, covariance-aware dense matches | pairwise output does not replace MV-RoMa multi-view tracks |
+| repeated structures | Doppelgangers++ | explicit visual-alias disambiguation | CC BY-NC-SA; retain only where deployment terms allow |
+| global translation-edge outliers | LFOE-GlobalSfM | learned clustered line-graph edge filtering | no upstream license grant; experiment blocked by default |
+| planar-dominant pairs | Planar-SfM consistency transfer | H/E rotation agreement separates supported planes from rotation-only edges | no official code for full spectral solver |
+| feed-forward speed/memory | InstantSfM / Light3R-SfM | GPU-native or sparse feed-forward reconstruction | InstantSfM is CC BY-NC; Light3R has no released compatible module |
 | long-term sparse map | Heterogeneous-GNN K-Cover | learns future localization value under map budget | training/query-domain requirement; more complex maintenance stack |
+
+### 7.1 2026-08-24 online replacement audit
+
+| Candidate | Boundary | License/release status | Decision |
+|---|---|---|---|
+| COLMAP 4.0.4 `global_mapper` / GLOMAP ECCV 2024 | Existing COLMAP DB → COLMAP sparse model | New BSD, installed CUDA binary, maintained upstream | **REPLACE_NOW** for S5/S5.7 |
+| Detector-Free SfM (CVPR 2024) | Fixed-pose/intrinsics dense triangulation → COLMAP model | Apache-2.0 + weights; custom COLMAP fork | **EXPERIMENT_ONLY** |
+| PixSfM (ICCV 2021) | Existing COLMAP model → featuremetric refined model | Apache-2.0 + weights; existing isolated runner | **EXPERIMENT_ONLY** |
+| RoMa v2 (2025) | Pairwise dense rescue matches | MIT + weights; no multi-view-track contract | **EXPERIMENT_ONLY** |
+| MGSfM (ICCV 2025) | COLMAP DB → model | BSD-3; assumes synchronized rigid multi-camera sequences | **EXPERIMENT_ONLY** |
+| LFOE / Dense-SfM | Mapper / dense refinement | No top-level license; Dense-SfM also omits the paper's GS extension | **REJECT as default** |
+| InstantSfM | Images/depth → model | CC BY-NC 4.0; active development | **REJECT as production replacement** |
+| Planar-SfM / G-MASt3R-SfM / DATAP-SfM | Pair graph / full SfM | No usable official module or code not released | **REJECT until release** |
 
 The release criterion therefore stays empirical and deployment-oriented:
 
@@ -383,11 +397,15 @@ better method = passes geometry gates
 ## 8. References
 
 - Pan, L., Schönberger, J. L., Pollefeys, M. [*Global Structure-from-Motion Meets Feedforward Reconstruction*](https://arxiv.org/abs/2605.26103). CVPR 2026 / GLUEMAP.
+- Pan, L. et al. [*Global Structure-from-Motion Revisited*](https://arxiv.org/abs/2407.20219). ECCV 2024 / maintained in COLMAP 4.x.
 - Manam, B., Govindu, V. M. [*Leveraging Camera Triplets for Efficient and Accurate Structure-from-Motion*](https://openaccess.thecvf.com/content/CVPR2024/html/Manam_Leveraging_Camera_Triplets_for_Efficient_and_Accurate_Structure-from-Motion_CVPR_2024_paper.html). CVPR 2024.
 - Xiangli, Y. et al. [*Doppelgangers++: Improved Visual Disambiguation with Geometric 3D Features*](https://openaccess.thecvf.com/content/CVPR2025/html/Xiangli_Doppelgangers_Improved_Visual_Disambiguation_with_Geometric_3D_Features_CVPR_2025_paper.html). CVPR 2025.
 - He, X. et al. [*Detector-Free Structure from Motion*](https://arxiv.org/abs/2306.15669). CVPR 2024.
 - Pataki et al. [*MP-SfM: Monocular Surface Priors for Robust Structure-from-Motion*](https://openaccess.thecvf.com/content/CVPR2025/html/Pataki_MP-SfM_Monocular_Surface_Priors_for_Robust_Structure-from-Motion_CVPR_2025_paper.html). CVPR 2025.
 - Damblon et al. [*Learning to Filter Outlier Edges in Global SfM*](https://openaccess.thecvf.com/content/CVPR2025/html/Damblon_Learning_to_Filter_Outlier_Edges_in_Global_SfM_CVPR_2025_paper.html). CVPR 2025.
+- Lee, J. et al. [*Dense-SfM: Structure from Motion with Dense Consistent Matching*](https://openaccess.thecvf.com/content/CVPR2025/html/Lee_Dense-SfM_Structure_from_Motion_with_Dense_Consistent_Matching_CVPR_2025_paper.html). CVPR 2025.
+- Zhong, J. et al. [*InstantSfM: Towards GPU-Native SfM for the Deep Learning Era*](https://arxiv.org/abs/2510.13310). 2025.
+- Edstedt, J. et al. [*RoMa v2: Harder Better Faster Denser Feature Matching*](https://arxiv.org/abs/2511.15706). 2025.
 - Watanabe, T. et al. [*G-MASt3R-SfM: Graph-based View Pruning and Multi-stage Optimization for Robust SfM*](https://arxiv.org/abs/2606.22856). 2026.
 - Pragier, G. et al. [*Planar-SfM: Camera Pose Estimation via Homography Graph Embeddings*](https://arxiv.org/abs/2606.31979). 2026.
 - Goli et al. [*RoMo: Robust Motion Segmentation Improves Structure from Motion*](https://openaccess.thecvf.com/content/ICCV2025/html/Goli_RoMo_Robust_Motion_Segmentation_Improves_Structure_from_Motion_ICCV_2025_paper.html). ICCV 2025.

@@ -47,7 +47,7 @@ site 測試必須各自在新程序執行，避免 Python 模組快取把另一�
 `pipeline/repair_fuhe_gluemap_fixed_ba.py` 也都是實際跑過的活程式。
 
 `pipeline/build_localizable_map_core.py` 是 symlink，指到
-`map_update/build_localizable_map.py`；這條可攜式全域 SfM 路徑現在預設用 LFOE，並在聚合前執行 H/E 平面一致性與 view-component pruning。
+`map_update/build_localizable_map.py`；這條可攜式全域 SfM 路徑預設用 COLMAP 4.x `global_mapper`，並在聚合前執行 H/E 平面一致性與 view-component pruning。
 
 ---
 
@@ -65,8 +65,8 @@ site 測試必須各自在新程序執行，避免 Python 模組快取把另一�
 | **S2b** | `s2b_intrinsics_bakeoff.py` | crash-safe 雙 seed 內參可辨識性烘培 | 多解析度 × 多相機模型獨立 replay |
 | **S3** | `s3_pairs.py` | forced VPR-blind bridge candidates + real-loader 契約 gate | 跨影片 bridge pairs > 0 |
 | **S4** | `audit_dg_graph.py` + Doppelgangers++ | **反鬼影主閘**。拒絕重複結構造成的假橋接 | 最大 component ratio、不得清光跨向邊 |
-| **S5** | `LFOE glomap_filter` → `finalize_edm_model.py` | 過濾 relative-translation outlier edges → 全域建圖 → 移除 pure-rotation observations → **固定內參 BA** | 內參與 seed 逐參數比對，容差 `1e-6` |
-| **S5.7** | `audit_independent_sim3.py` + LFOE | 各 sequence 獨立建圖，再獨立驗證跨方向 Sim3 橋接 | 不靠同一次建圖自我背書 |
+| **S5** | COLMAP 4.x `global_mapper` → `finalize_edm_model.py` | 維護中的 GLOMAP 全域建圖 → 移除 pure-rotation observations → **固定內參 BA** | focal/principal/extra 全部固定，並與 seed 逐參數比對 |
+| **S5.7** | `audit_independent_sim3.py` + COLMAP GlobalMapper | 各 sequence 獨立建圖，再獨立驗證跨方向 Sim3 橋接 | 不靠同一次建圖自我背書 |
 | **S6** | `audit_map_geometry.py` | 鬼影稽核 | G6.1–G6.4 |
 | **S7** | `build_bundle_seed.py` → `validate_tracking_bundle.py` | MegaLoc seed bundle → tracking bundle | `ref_global.shape == [refs, 8448]` |
 | **S8** | `finalize_edm_model.py` → `validate_edm_bundle.py` | EDM detector-free 固定姿態重三角化 → bundle | cell-anchor round-trip |
@@ -84,15 +84,16 @@ site 測試必須各自在新程序執行，避免 Python 模組快取把另一�
   都必須明確記錄在 manifest 裡。
 - **S2b 存在的原因**：ANAFI 到底該用 PINHOLE（韌體已去畸變）還是 SIMPLE_RADIAL，
   規格書講不清楚。三個焦距來源互差 7.5%，所以用實測 bake-off 定案，不用猜的。
-- **S5 的 LFOE 是單一 production mapper，不再是標準 GLOMAP 跑完後的第二套診斷重建。**
-  它直接重用現有 COLMAP database；最終模型仍須通過固定內參、S6 與 S9。
+- **S5 只跑維護中的 COLMAP GlobalMapper。** 它直接重用現有 COLMAP database 的隔離副本；
+  最終模型仍須通過固定內參、S6 與 S9。
 - **S9 才是驗收**。「有輸出檔」不等於完成。
 
 ### 論文方法整合
 
 - **G-MASt3R-SfM**：移植 geometrically verified view pruning；dense pair filter 只保留最大的 verified component，component ratio 不足直接 fail。沒有再加 MSO/PGO，因為下游 global positioning + BA 已涵蓋較完整的目標。
 - **Planar-SfM**：homography-dominant edge 不再一律當 pure rotation；只有 homography decomposition 與 essential rotation 的 geodesic agreement 通過才救回。
-- **LFOE-GlobalSfM**：`glomap_filter` 直接取代 S5/S5.7 的標準 GLOMAP；移除 standard→LFOE 雙跑與重複 `backend_comparison.json`。
+- **LFOE-GlobalSfM**：論文方法仍可做隔離 A/B，但官方 repository 沒有 license grant，不能作 production default；由 BSD 授權且持續維護的 COLMAP 4.x `global_mapper` 取代。
+- **其他候選**：DFSfM／PixSfM 保留為固定 pose/intrinsics 的隔離候選；Dense-SfM 缺 license 且未釋出論文的 GS track extension；InstantSfM 為 CC BY-NC；Planar-SfM、G-MASt3R-SfM、DATAP-SfM 尚無可直接替換的完整官方模組。
 
 ## 診斷：Stage 0–2
 
@@ -341,6 +342,7 @@ image identity，不新增 ID、不更新 `last_seen_session`、不進 held-out 
 | MV-RoMa | https://github.com/IceTea-CV/MV-RoMa | `acb09ef` |
 | Doppelgangers++ | https://github.com/doppelgangers25/doppelgangers-plusplus | `f58d86a` |
 | LFOE-GlobalSfM | https://github.com/DmblnNicole/LFOE-GlobalSfM | `a80c845` |
+
 | DetectorFreeSfM | https://github.com/zju3dv/DetectorFreeSfM | `4a370f1` |
 | GGPT | https://github.com/ChenYutongTHU/GGPT | `2f39fcf` |
 | SLiM | https://github.com/Band-127/SLiM | `8b34762` |
@@ -352,6 +354,8 @@ image identity，不新增 ID、不更新 `last_seen_session`、不進 held-out 
 | EDM | https://github.com/chicleee/EDM | (在定位 repo) |
 | GlueMap | https://github.com/colmap/gluemap | — |
 
+LFOE 此 revision 未提供 top-level license；只允許在取得明確授權後進入 experiment queue，不是 production dependency。
+
 `sites/target_site/tools/preflight_research_backends.py` 會檢查這些後端在不在。
 
 ---
@@ -360,6 +364,7 @@ image identity，不新增 ID、不更新 `last_seen_session`、不進 held-out 
 
 | 用途 | 直譯器 |
 |---|---|
+| COLMAP 4.0.4 GlobalMapper（CUDA） | `~/micromamba/envs/sfm` |
 | GlueMap / GLOMAP / pycolmap 4.0.4 | `~/micromamba/envs/target-site-gluemap-run` |
 | EDM bundle 產生 | `sfm_system/EDM定位測試/env/edm_eval_py312`（`/usr/bin/python3.12` venv + `yacs`） |
 | sm_120 CUDA 編譯 | `CUDA_HOME=~/miniconda3/envs/gsplat`（唯一完整的 CUDA 12.8） |

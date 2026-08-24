@@ -104,12 +104,30 @@ def test_filter_database_removes_every_cross_sequence_pair(tmp_path: Path) -> No
     ]
     assert [
         row[1] for row in filtered.execute("PRAGMA table_info(pose_priors)")
-    ] == ["image_id", "position", "coordinate_system", "position_covariance"]
+    ] == [
+        "pose_prior_id",
+        "corr_data_id",
+        "corr_sensor_id",
+        "corr_sensor_type",
+        "position",
+        "position_covariance",
+        "gravity",
+        "coordinate_system",
+    ]
     filtered.close()
     assert stats == {
         "images": 3,
         "two_view_pairs": 1,
-        "legacy_pose_priors_schema": True,
+        "pose_priors_columns": [
+            "pose_prior_id",
+            "corr_data_id",
+            "corr_sensor_id",
+            "corr_sensor_type",
+            "position",
+            "position_covariance",
+            "gravity",
+            "coordinate_system",
+        ],
     }
 
 
