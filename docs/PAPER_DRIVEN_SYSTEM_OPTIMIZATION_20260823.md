@@ -134,13 +134,13 @@ GitHub executes workflows only from repository-root `.github/workflows/`. A root
 
 ## 4. Paper-to-stage mapping
 
-### 4.1 GLUEMAP — keep as the primary reconstruction backend
+### 4.1 GLUEMAP — retained as an explicit alternative
 
 Pan, Schönberger & Pollefeys, *Global Structure-from-Motion Meets Feedforward Reconstruction*, CVPR 2026.
 
-GLUEMAP combines retrieval, optional Doppelgangers++ disambiguation, feed-forward local reconstruction, global averaging/BA and refinement. It is a good match for the system because it provides local robustness while retaining a globally optimized COLMAP-compatible map.
+GLUEMAP combines retrieval, optional Doppelgangers++ disambiguation, feed-forward local reconstruction, global averaging/BA and refinement. It remains COLMAP-compatible and useful for controlled comparison.
 
-**Decision:** do not replace the validated GlueMap path by default. Improve what enters GlueMap and independently test what comes out.
+**Decision:** LFOE now replaces the standard global mapper in S5. GlueMap remains an explicit alternative; it cannot run as a hidden second reconstruction or win based only on registration/reprojection summaries. Promotion still requires the same S6/S9, gauge, resource and provenance gates.
 
 ### 4.2 Camera triplets — use for graph quality and sparsification
 
@@ -167,23 +167,36 @@ The method targets visual aliasing where distinct surfaces look alike and genera
 
 **Decision:** S4 Doppelgangers++ remains the first repeated-structure disambiguator. It should not be bypassed for scenes that show symmetry/repeated fences/buildings/roadside structures.
 
-### 4.4 LFOE-GlobalSfM — conditional second opinion on translation edges
+### 4.4 LFOE-GlobalSfM — default global mapper
 
-*Learning to Filter Outlier Edges in Global SfM*, CVPR 2025.
+Damblon et al., *Learning to Filter Outlier Edges in Global SfM*, CVPR 2025.
 
-The method models the line graph of camera-pair relations and predicts inaccurate translation edges, with clustering for scalability.
+The method models relative-translation edges as vertices in a clustered line graph and classifies them before translation averaging. Its published GLOMAP integration is a command-compatible `glomap_filter`.
 
-**Planned trigger conditions (not wired to the live selector):** evaluate the pinned
-research backend when:
+**Implemented:**
 
-- S4 leaves a small number of high-influence ambiguous edges;
-- independent Sim(3) disagrees across sessions;
-- cycle errors remain high after Doppelgangers++;
-- a candidate map has ghost geometry despite apparently good pairwise scores.
+- S5 runs `glomap_filter mapper` directly from the existing COLMAP database, with fixed intrinsics, then applies the existing finalization and S6/S9 gates;
+- S5.7 independent per-sequence reconstruction uses the same LFOE executable;
+- the previous standard-GLOMAP-then-LFOE diagnostic double reconstruction and duplicate `backend_comparison.json` were removed;
+- standard GLOMAP and MP-SfM remain explicit `--backend` choices in the portable builder, never silent fallbacks.
 
-Do not make it a mandatory pass on every normal build until its effect is calibrated on held-out localization.
+### 4.5 G-MASt3R-SfM — transfer graph pruning, not its optimizer stack
 
-### 4.5 Detector-Free SfM — fallback when the feature graph is the bottleneck
+Watanabe et al., *G-MASt3R-SfM: Graph-based View Pruning and Multi-stage Optimization for Robust SfM*, 2026.
+
+GVP geometrically verifies MASt3R edges, detects outlier view groups, and removes them before reconstruction. MSO then expands optimization from community-local to global.
+
+**Implemented transfer:** the dense-match verification stage now filters edges geometrically and removes every view component outside the deterministic largest verified component before database aggregation. The retained-component ratio is a hard gate. MSO was not copied: LFOE/GLOMAP already performs global positioning plus bundle adjustment, so a second pose-only or staged optimizer would duplicate a lower-fidelity objective.
+
+### 4.6 Planar-SfM — distinguish a valid plane from pure rotation
+
+Pragier et al., *Planar-SfM: Camera Pose Estimation via Homography Graph Embeddings*, 2026.
+
+Planar-SfM scores homography hypotheses by image support and agreement between homography-derived and essential-matrix-derived rotations, then selects a mutually consistent graph backbone.
+
+**Implemented transfer:** dense pair verification decomposes the normalized homography, compares every homography rotation candidate with the essential rotation, and only rescues a homography-dominant cross-video/cross-direction edge when the rotation geodesic is within the configured bound. This replaces the old rule that treated every such cross-direction edge as rotation-like. Full spectral pose recovery is not duplicated because the downstream global mapper already owns pose estimation.
+
+### 4.7 Detector-Free SfM — fallback when the feature graph is the bottleneck
 
 He et al., *Detector-Free Structure from Motion*, CVPR 2024.
 
@@ -191,7 +204,7 @@ Detector-Free SfM starts from quantized detector-free matches, builds a coarse r
 
 **Decision:** research fallback for texture-poor or detector-failure segments, not an always-on replacement. The current GlueMap feed-forward local geometry already addresses part of this failure regime, so replacing the whole pipeline would duplicate cost unless S3/S5 diagnostics identify frontend failure.
 
-### 4.6 MP-SfM — fallback for low overlap / low parallax / symmetry
+### 4.8 MP-SfM — fallback for low overlap / low parallax / symmetry
 
 *MP-SfM: Monocular Surface Priors for Robust Structure-from-Motion*, CVPR 2025.
 
@@ -199,7 +212,7 @@ The key idea is to inject monocular geometric priors such as depth/normals with 
 
 **Decision:** use only as an experimental fallback on segments diagnosed as low-parallax/low-overlap/symmetric and compare against GlueMap on the same held-out localization set. A monocular prior must never silently define metric scale; the final map remains a similarity-gauge reconstruction unless external scale is supplied.
 
-### 4.7 RoMo — dynamic-scene escalation path
+### 4.9 RoMo — dynamic-scene escalation path
 
 *RoMo: Robust Motion Segmentation Improves Structure from Motion*, ICCV 2025.
 
@@ -209,13 +222,13 @@ RoMo combines optical flow, epipolar cues and pretrained video segmentation to r
 
 **Not implemented:** semantic/video segmentation. Trigger a full RoMo-style backend only when dynamic contamination is material; static infrastructure scenes should not pay this cost by default.
 
-### 4.8 Light3R-SfM — speed/memory research alternative
+### 4.10 Light3R-SfM — speed/memory research alternative
 
 *Light3R-SfM: Towards Feed-forward Structure-from-Motion*, CVPR 2025, uses retrieval-guided sparse scene graphs / tree-style connectivity to reduce feed-forward reconstruction cost.
 
 **Decision:** benchmark as an alternative when GlueMap local inference or graph size, rather than BA, dominates runtime/memory. Do not substitute it into release maps without S6/S9 parity.
 
-### 4.9 Long-term map sparsification — preserve localization support, not raw point count
+### 4.11 Long-term map sparsification — preserve localization support, not raw point count
 
 Chang et al., *Long-Term Visual Map Sparsification with Heterogeneous GNN*, CVPR 2022.
 
@@ -223,7 +236,7 @@ The work frames sparse localization-map design with a K-Cover constraint: camera
 
 **Adopted principle:** pre-build/session selection and later bundle sparsification should optimize coverage/support per cost. “More frames / more tracks / more points” is not itself a release objective.
 
-### 4.10 ExMaps — point-level temporal stability
+### 4.12 ExMaps — point-level temporal stability
 
 Rotsidis et al., *ExMaps: Long-Term Localization in Dynamic Scenes using Exponential Decay*, WACV 2021.
 
@@ -237,7 +250,7 @@ and point stability aggregates decayed evidence across sessions.
 
 **Current state:** `map_update/core/point_evidence_ledger.py` has point identities and session evidence but is not fully wired into the live update matcher. Do not claim production point-level ExMaps until that identity/evidence hand-off is complete.
 
-### 4.11 Multi-session wide-baseline optimization
+### 4.13 Multi-session wide-baseline optimization
 
 *Multi-Session SLAM with Differentiable Wide-Baseline Pose Optimization*, CVPR 2024.
 
@@ -245,7 +258,7 @@ The important transferable principle is that disconnected/weakly connected sessi
 
 **Future/release-gate decision:** preserve independent submap reconstruction and add disjoint hold-out Sim(3) validation as the safety pattern for weak bridges. The current session admission code does not yet implement the disjoint hold-out fit/validation split.
 
-### 4.12 Change detection / map freshness
+### 4.14 Change detection / map freshness
 
 Galappaththige et al., *Multi-View Pose-Agnostic Change Localization with Zero Labels*, CVPR 2025, shows the benefit of accumulating multiview evidence for viewpoint-robust change localization.
 
@@ -277,11 +290,12 @@ S2b intrinsics bake-off
 S3 verified cross-video pairs
   ↓
 S4 Doppelgangers++ + graph/cycle audit
-  ├─ ambiguous/high-influence → optional LFOE second opinion
   ↓
-S5 GlueMap + fixed-intrinsics final BA
+verified-edge H/E planar consistency + largest-component view pruning
   ↓
-S5.7 independent per-session/submap Sim(3) (future disjoint hold-out release gate)
+S5 LFOE translation-edge filter + global mapping + fixed-intrinsics final BA
+  ↓
+S5.7 independent per-session LFOE + Sim(3) release gate
   ↓
 S6 ghost / duplicate geometry audit
   ↓
@@ -301,7 +315,7 @@ Conditional research escalation:
 ```text
 texture/keypoint failure        → Detector-Free SfM A/B
 low overlap/parallax/symmetry   → MP-SfM A/B
-residual bad translation edges  → LFOE A/B
+LFOE held-out regression        → explicit GlueMap/GLOMAP A/B
 material dynamic contamination  → RoMo-style segmentation A/B
 graph/inference memory bottleneck → Light3R-SfM A/B
 ```
@@ -347,11 +361,11 @@ This isolates whether the selector saves computation without sacrificing S9 cove
 
 | Failure regime | Strong candidate | Why it can be stronger | Why it is not default here |
 | --- | --- | --- | --- |
-| weak texture / detector failure | Detector-Free SfM | detector-free dense matching and iterative multiview refinement | extra frontend/reconstruction cost; GlueMap already adds feed-forward local robustness |
+| weak texture / detector failure | Detector-Free SfM | detector-free dense matching and iterative multiview refinement | extra frontend/reconstruction cost; current dense matching already addresses part of this regime |
 | low overlap / low parallax / symmetry | MP-SfM | monocular depth/normal priors regularize weak multiview geometry | prior bias/domain shift; needs site A/B and gauge care |
 | repeated structures | Doppelgangers++ | explicit visual-alias disambiguation | already integrated; still needs graph connectivity checks |
-| global translation-edge outliers | LFOE-GlobalSfM | learned line-graph edge filtering | learned-domain dependency; best as second opinion initially |
-| dynamic scene | RoMo | motion segmentation using flow + epipolar + learned video cues | unnecessary cost in mostly static infrastructure scenes |
+| global translation-edge outliers | LFOE-GlobalSfM | learned clustered line-graph edge filtering | default mapper; any domain regression is caught by unchanged S6/S9 gates |
+| planar-dominant pairs | Planar-SfM consistency transfer | H/E rotation agreement separates supported planes from rotation-only edges | full spectral pose solver would duplicate the global mapper |
 | feed-forward speed/memory | Light3R-SfM | sparse retrieval-guided graph | release parity with GlueMap/EDM not yet established for this site |
 | long-term sparse map | Heterogeneous-GNN K-Cover | learns future localization value under map budget | training/query-domain requirement; more complex maintenance stack |
 
@@ -374,6 +388,8 @@ better method = passes geometry gates
 - He, X. et al. [*Detector-Free Structure from Motion*](https://arxiv.org/abs/2306.15669). CVPR 2024.
 - Pataki et al. [*MP-SfM: Monocular Surface Priors for Robust Structure-from-Motion*](https://openaccess.thecvf.com/content/CVPR2025/html/Pataki_MP-SfM_Monocular_Surface_Priors_for_Robust_Structure-from-Motion_CVPR_2025_paper.html). CVPR 2025.
 - Damblon et al. [*Learning to Filter Outlier Edges in Global SfM*](https://openaccess.thecvf.com/content/CVPR2025/html/Damblon_Learning_to_Filter_Outlier_Edges_in_Global_SfM_CVPR_2025_paper.html). CVPR 2025.
+- Watanabe, T. et al. [*G-MASt3R-SfM: Graph-based View Pruning and Multi-stage Optimization for Robust SfM*](https://arxiv.org/abs/2606.22856). 2026.
+- Pragier, G. et al. [*Planar-SfM: Camera Pose Estimation via Homography Graph Embeddings*](https://arxiv.org/abs/2606.31979). 2026.
 - Goli et al. [*RoMo: Robust Motion Segmentation Improves Structure from Motion*](https://openaccess.thecvf.com/content/ICCV2025/html/Goli_RoMo_Robust_Motion_Segmentation_Improves_Structure_from_Motion_ICCV_2025_paper.html). ICCV 2025.
 - [*Light3R-SfM: Towards Feed-forward Structure-from-Motion*](https://cvpr.thecvf.com/virtual/2025/poster/32660). CVPR 2025.
 - Chang, M.-F. et al. [*Long-Term Visual Map Sparsification with Heterogeneous GNN*](https://openaccess.thecvf.com/content/CVPR2022/html/Chang_Long-Term_Visual_Map_Sparsification_With_Heterogeneous_GNN_CVPR_2022_paper.html). CVPR 2022.

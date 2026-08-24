@@ -205,7 +205,7 @@ def _find_model(output: Path) -> Path:
         and (path.parent / "points3D.bin").is_file()
     ]
     if not candidates:
-        raise FileNotFoundError(f"GLOMAP produced no model under {output}")
+        raise FileNotFoundError(f"LFOE produced no model under {output}")
     return max(candidates, key=lambda path: (path / "images.bin").stat().st_size)
 
 
@@ -215,7 +215,7 @@ def _build_local_model(
     image_root: Path,
     sequence: str,
     work_dir: Path,
-    glomap_bin: Path,
+    lfoe_bin: Path,
     reuse: bool,
 ) -> tuple[Path, dict]:
     sequence_dir = work_dir / sequence
@@ -231,7 +231,7 @@ def _build_local_model(
     mapper_out.mkdir(parents=True)
     database_stats = _filter_database(database, database_out, sequence)
     command = [
-        str(glomap_bin),
+        str(lfoe_bin),
         "mapper",
         "--database_path",
         str(database_out),
@@ -244,7 +244,7 @@ def _build_local_model(
         "--BundleAdjustment.optimize_principal_point",
         "0",
     ]
-    log_path = sequence_dir / "glomap.log"
+    log_path = sequence_dir / "lfoe.log"
     with log_path.open("w", encoding="utf-8") as log_file:
         completed = subprocess.run(
             command,
@@ -255,7 +255,7 @@ def _build_local_model(
         )
     if completed.returncode:
         raise RuntimeError(
-            f"{sequence}: GLOMAP exited {completed.returncode}; see {log_path}"
+            f"{sequence}: LFOE exited {completed.returncode}; see {log_path}"
         )
     model = _find_model(mapper_out)
     return model, {
@@ -339,7 +339,7 @@ def main() -> None:
     parser.add_argument("--twoview", type=Path, required=True)
     parser.add_argument("--s4-gate", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--glomap-bin", type=Path, required=True)
+    parser.add_argument("--lfoe-bin", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--final-model", type=Path)
     parser.add_argument(
@@ -367,7 +367,7 @@ def main() -> None:
             image_root=args.image_root,
             sequence=sequence,
             work_dir=args.work_dir,
-            glomap_bin=args.glomap_bin,
+            lfoe_bin=args.lfoe_bin,
             reuse=args.reuse,
         )
         models[sequence] = pycolmap.Reconstruction(str(model))
@@ -527,8 +527,9 @@ def main() -> None:
         "stage": "S5.7_independent_sim3",
         "status": "PASS" if all_pass and bool(robust_edges) else "FAIL",
         "method": (
-            "independent per-sequence GLOMAP plus verified 3D-3D bridge RANSAC; "
-            "failed redundant edges require zero shared final-map tracks"
+            "independent per-sequence LFOE global SfM plus verified 3D-3D "
+            "bridge RANSAC; failed redundant edges require zero shared "
+            "final-map tracks"
         ),
         "local_models": build_evidence,
         "edges": evidence,

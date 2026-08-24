@@ -539,7 +539,6 @@ def cfg_paths(cfg: SimpleNamespace) -> SimpleNamespace:
         "mpsfm_intrinsics": work / "work" / "mpsfm" / "intrinsics.yaml",
         "mpsfm_custom_conf": work / "work" / "mpsfm" / "configs" / "roma_m3dv2_large.yaml",
         "mapper_diagnostics": work / "mapper_diagnostics.json",
-        "backend_comparison": work / "backend_comparison.json",
         "pair_graph_diagnostics": work / "pair_graph_diagnostics.json",
         "rotation_bridge_report": work / "rotation_bridge_report.json",
         "rgb_ply": work / "deploy" / "map_rgb.ply",
@@ -1097,7 +1096,16 @@ def validate_stage_gate(stage: str, cfg: SimpleNamespace) -> None:
             before = int(report.get("pairs_before", count_lines(p.pairs_before_verification)))
             after = int(report.get("pairs_after", count_lines(p.pairs_verified) or count_lines(p.pairs)))
             missing = int(report.get("missing_dense_match_groups", 0))
-            metrics.update({"pairs_before": before, "pairs_after": after, "mode": report.get("mode"), "missing_dense_match_groups": missing})
+            graph = report.get("graph_pruning", {})
+            component_ratio = float(graph.get("largest_component_ratio", 0.0))
+            metrics.update({
+                "pairs_before": before,
+                "pairs_after": after,
+                "mode": report.get("mode"),
+                "missing_dense_match_groups": missing,
+                "largest_verified_component_ratio": component_ratio,
+                "pruned_views": len(graph.get("pruned_views", [])),
+            })
             if strict:
                 retention = ratio(after, before)
                 missing_ratio = ratio(missing, before)
@@ -1115,6 +1123,10 @@ def validate_stage_gate(stage: str, cfg: SimpleNamespace) -> None:
                     require(int(after_rel.get("cross_video", 0)) + int(after_rel.get("cross_direction", 0)) > 0, "pair verification removed all cross-video pairs")
             require(p.pair_verification_report.exists(), f"missing {p.pair_verification_report}")
             require(after > 0, "pair verification left zero pairs")
+            require(
+                component_ratio >= float(cfg.dms_min_largest_component_ratio),
+                f"largest_verified_component_ratio={component_ratio:.3f}",
+            )
             if before:
                 require(after <= before, "pair verification count grew unexpectedly")
     elif stage == "aggregate":
@@ -6926,63 +6938,119 @@ def _stage_mvroma_legacy_body(cfg: SimpleNamespace) -> None:
     log(f"MV-RoMa done: {total_written} dense pair groups -> {p.dense_matches}")
 
 
-def dms_verify_geometry(k0: Any, k1: Any, scores: Any, cfg: SimpleNamespace) -> dict[str, Any]:
+def camera_matrix_for_resolution(width: int, height: int, cfg: SimpleNamespace) -> Any:
+    import numpy as np
+
+    model, params = focal_for_resolution(width, height, cfg)
+    if model in {"PINHOLE", "OPENCV", "FULL_OPENCV", "FOV", "THIN_PRISM_FISHEYE"}:
+        if len(params) < 4:
+            raise ValueError(f"{model} requires fx, fy, cx, cy")
+        fx, fy, cx, cy = params[:4]
+    elif len(params) >= 3:
+        fx = fy = params[0]
+        cx, cy = params[1:3]
+    else:
+        raise ValueError(f"cannot derive calibration matrix from {model} {params}")
+    return np.asarray(
+        [[float(fx), 0.0, float(cx)], [0.0, float(fy), float(cy)], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+
+
+def rotation_geodesic_deg(left: Any, right: Any) -> float:
+    import numpy as np
+
+    cosine = (float(np.trace(np.asarray(left).T @ np.asarray(right))) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+
+def dms_verify_geometry(
+    k0: Any,
+    k1: Any,
+    scores: Any,
+    cfg: SimpleNamespace,
+    camera0: Any | None = None,
+    camera1: Any | None = None,
+) -> dict[str, Any]:
     import cv2
     import numpy as np
 
+    empty = {
+        "raw_matches": int(len(k0)), "sampled_matches": int(len(k0)),
+        "f_inliers": 0, "h_inliers": 0, "f_ratio": 0.0, "h_ratio": 0.0,
+        "h_over_f": 0.0, "planar_rotation_error_deg": None,
+        "planar_consistent": False,
+    }
     if len(k0) < 8:
-        return {
-            "raw_matches": int(len(k0)),
-            "sampled_matches": int(len(k0)),
-            "f_inliers": 0,
-            "h_inliers": 0,
-            "f_ratio": 0.0,
-            "h_ratio": 0.0,
-            "h_over_f": 0.0,
-        }
+        return empty
     grid_h, grid_w = parse_grid_spec(getattr(cfg, "dms_grid", "8x12"), 8, 12)
     sel = score_grid_select_indices(
-        np.asarray(k0)[:, 0],
-        np.asarray(k0)[:, 1],
-        scores,
-        int(cfg.dms_max_matches),
-        grid_h,
-        grid_w,
+        np.asarray(k0)[:, 0], np.asarray(k0)[:, 1], scores,
+        int(cfg.dms_max_matches), grid_h, grid_w,
     )
     pts0 = np.asarray(k0, dtype=np.float32)[sel]
     pts1 = np.asarray(k1, dtype=np.float32)[sel]
+    fundamental = homography = None
     f_inl = h_inl = 0
-    if len(pts0) >= 8:
+    try:
+        method = getattr(cv2, "USAC_MAGSAC", cv2.FM_RANSAC)
+        fundamental, fm = cv2.findFundamentalMat(
+            pts0, pts1, method, float(cfg.dms_ransac_px), 0.99,
+            int(cfg.dms_max_trials),
+        )
+        if fm is not None:
+            f_inl = int(fm.reshape(-1).astype(bool).sum())
+    except Exception:
+        fundamental = None
+    try:
+        homography, hm = cv2.findHomography(
+            pts0, pts1, cv2.RANSAC, float(cfg.dms_homography_px)
+        )
+        if hm is not None:
+            h_inl = int(hm.reshape(-1).astype(bool).sum())
+    except Exception:
+        homography = None
+
+    planar_error: float | None = None
+    if (
+        camera0 is not None and camera1 is not None
+        and fundamental is not None and np.asarray(fundamental).shape == (3, 3)
+        and homography is not None and np.asarray(homography).shape == (3, 3)
+    ):
         try:
-            method = getattr(cv2, "USAC_MAGSAC", cv2.FM_RANSAC)
-            _F, fm = cv2.findFundamentalMat(
-                pts0,
-                pts1,
-                method,
-                float(cfg.dms_ransac_px),
-                0.99,
-                int(cfg.dms_max_trials),
+            k0_matrix = np.asarray(camera0, dtype=np.float64)
+            k1_matrix = np.asarray(camera1, dtype=np.float64)
+            essential = k1_matrix.T @ np.asarray(fundamental) @ k0_matrix
+            normalized0 = cv2.undistortPoints(
+                pts0.reshape(-1, 1, 2), k0_matrix, None
+            ).reshape(-1, 2)
+            normalized1 = cv2.undistortPoints(
+                pts1.reshape(-1, 1, 2), k1_matrix, None
+            ).reshape(-1, 2)
+            _, essential_rotation, _translation, _mask = cv2.recoverPose(
+                essential, normalized0, normalized1, np.eye(3, dtype=np.float64)
             )
-            if fm is not None:
-                f_inl = int(fm.reshape(-1).astype(bool).sum())
-        except Exception:
-            f_inl = 0
-    if len(pts0) >= 4:
-        try:
-            _H, hm = cv2.findHomography(pts0, pts1, cv2.RANSAC, float(cfg.dms_homography_px))
-            if hm is not None:
-                h_inl = int(hm.reshape(-1).astype(bool).sum())
-        except Exception:
-            h_inl = 0
+            normalized_h = np.linalg.inv(k1_matrix) @ np.asarray(homography) @ k0_matrix
+            count, rotations, _translations, _normals = cv2.decomposeHomographyMat(
+                normalized_h, np.eye(3, dtype=np.float64)
+            )
+            if count:
+                planar_error = min(
+                    rotation_geodesic_deg(essential_rotation, rotation)
+                    for rotation in rotations
+                )
+        except (cv2.error, np.linalg.LinAlgError, ValueError):
+            planar_error = None
+
     n = max(1, int(len(pts0)))
+    planar_limit = float(getattr(cfg, "dms_planar_max_rotation_error_deg", 10.0))
     return {
-        "raw_matches": int(len(k0)),
-        "sampled_matches": int(len(pts0)),
-        "f_inliers": f_inl,
-        "h_inliers": h_inl,
-        "f_ratio": float(f_inl / n),
-        "h_ratio": float(h_inl / n),
+        "raw_matches": int(len(k0)), "sampled_matches": int(len(pts0)),
+        "f_inliers": f_inl, "h_inliers": h_inl,
+        "f_ratio": float(f_inl / n), "h_ratio": float(h_inl / n),
         "h_over_f": float(h_inl / max(1, f_inl)),
+        "planar_rotation_error_deg": planar_error,
+        "planar_consistent": planar_error is not None and planar_error <= planar_limit,
     }
 
 
@@ -6996,6 +7064,7 @@ def keep_verified_pair(metrics: dict[str, Any], rel: dict[str, Any], cfg: Simple
     h_ratio = float(metrics.get("h_ratio", 0.0))
     f_pass = f_inl >= int(cfg.dms_min_inliers) and f_ratio >= float(cfg.dms_min_inlier_ratio)
     h_pass = h_inl >= int(cfg.dms_min_inliers) and h_ratio >= float(cfg.dms_min_inlier_ratio)
+    planar_consistent = h_pass and bool(metrics.get("planar_consistent"))
     rotation_like = h_inl >= int(cfg.dms_min_inliers) and h_inl >= float(cfg.dms_rotation_h_over_f) * max(1, f_inl)
     if bool(rel.get("same_video")):
         if f_pass:
@@ -7006,14 +7075,40 @@ def keep_verified_pair(metrics: dict[str, Any], rel: dict[str, Any], cfg: Simple
     if bool(rel.get("cross_direction")):
         if f_pass:
             return True, "cross_direction_fundamental"
+        if planar_consistent:
+            return True, "cross_direction_planar_consistent"
         if rotation_like:
             return False, "cross_direction_rotation_like"
         return False, "cross_direction_geometry_failed"
     if f_pass:
         return True, "cross_video_fundamental"
-    if h_pass and not rotation_like:
-        return True, "cross_video_homography"
+    if planar_consistent:
+        return True, "cross_video_planar_consistent"
     return False, "cross_video_geometry_failed"
+
+
+def prune_outlier_pair_components(
+    names: Iterable[str],
+    pairs: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], dict[str, Any]]:
+    all_names = sorted(set(names))
+    components = sorted(
+        connected_components(all_names, pairs),
+        key=lambda component: (-len(component), component),
+    )
+    retained_nodes = set(components[0]) if components else set()
+    retained_pairs = [
+        (left, right) for left, right in pairs
+        if left in retained_nodes and right in retained_nodes
+    ]
+    pruned = sorted(set(all_names) - retained_nodes)
+    return retained_pairs, {
+        "components_before_pruning": len(components),
+        "component_sizes_before_pruning": [len(component) for component in components],
+        "largest_component_images": len(retained_nodes),
+        "largest_component_ratio": len(retained_nodes) / max(1, len(all_names)),
+        "pruned_views": pruned,
+    }
 
 
 def stage_verify_pairs(cfg: SimpleNamespace) -> None:
@@ -7034,10 +7129,14 @@ def stage_verify_pairs(cfg: SimpleNamespace) -> None:
     names, groups = list_images(p.images)
     folder_of = {name: folder for folder, rel in groups.items() for name in rel}
     directions = sequence_directions(cfg, groups)
-    kept: list[tuple[str, str]] = []
+    geometry_kept: list[tuple[str, str]] = []
     records: list[dict[str, Any]] = []
     reason_counts: Counter[str] = Counter()
+    camera_cache: dict[str, Any] = {}
     missing = 0
+    for image_name in names:
+        width, height = image_size(p.images / image_name)
+        camera_cache[image_name] = camera_matrix_for_resolution(width, height, cfg)
     with h5py.File(str(p.dense_matches), "r") as fd:
         for a, b in pairs:
             name = pair_name(a, b)
@@ -7058,29 +7157,39 @@ def stage_verify_pairs(cfg: SimpleNamespace) -> None:
                 if rev:
                     k0, k1 = k1, k0
                 scores = grp["scores"].__array__().astype(np.float32) if "scores" in grp else np.ones((len(k0),), np.float32)
-                metrics = dms_verify_geometry(k0, k1, scores, cfg)
+                metrics = dms_verify_geometry(
+                    k0, k1, scores, cfg, camera_cache[a], camera_cache[b]
+                )
                 keep, reason = keep_verified_pair(metrics, rel, cfg)
-            if action == "report":
-                keep = True
             if keep:
-                kept.append((a, b))
+                geometry_kept.append((a, b))
             reason_counts[reason] += 1
             records.append({
                 "pair": [a, b],
-                "keep": bool(keep),
+                "geometry_keep": bool(keep),
                 "reason": reason,
                 "relation": rel,
                 **metrics,
             })
-    write_pairs(p.pairs_verified, kept)
+    pruned_pairs, graph = prune_outlier_pair_components(names, geometry_kept)
+    kept = pruned_pairs if action == "filter" else pairs
+    selected = set(kept)
+    for record in records:
+        record["keep"] = tuple(record["pair"]) in selected
+    write_pairs(p.pairs_verified, pruned_pairs)
     if action == "filter":
         write_pairs(p.pairs, kept)
     report = {
         "mode": mode,
         "action": action,
-        "used_for": "summarized two-view edge verification only; full dense matches remain in H5 for aggregation/tracks",
+        "used_for": (
+            "geometric edge verification, planar H/E rotation-consistency rescue, "
+            "and largest-component view pruning; full dense matches remain in H5"
+        ),
         "pairs_before": len(pairs),
+        "pairs_geometry_accepted": len(geometry_kept),
         "pairs_after": len(kept),
+        "graph_pruning": graph,
         "missing_dense_match_groups": missing,
         "directions": directions,
         "thresholds": {
@@ -7090,6 +7199,8 @@ def stage_verify_pairs(cfg: SimpleNamespace) -> None:
             "dms_min_inliers": cfg.dms_min_inliers,
             "dms_min_inlier_ratio": cfg.dms_min_inlier_ratio,
             "dms_rotation_h_over_f": cfg.dms_rotation_h_over_f,
+            "dms_planar_max_rotation_error_deg": cfg.dms_planar_max_rotation_error_deg,
+            "dms_min_largest_component_ratio": cfg.dms_min_largest_component_ratio,
         },
         "reason_counts": dict(reason_counts),
         "records": records,
@@ -7390,15 +7501,17 @@ def stage_db(cfg: SimpleNamespace) -> None:
 
 
 def resolve_lfoe_command(cfg: SimpleNamespace) -> str:
-    lfoe_cmd = DEFAULT_LFOE_GLOMAP if Path(DEFAULT_LFOE_GLOMAP).exists() else cfg.glomap_command
-    if Path(lfoe_cmd).name != "glomap_filter":
-        return lfoe_cmd
-    missing_libs = unresolved_shared_libs(lfoe_cmd)
-    if missing_libs:
-        log("WARNING: glomap_filter shared libraries are unresolved; LFOE fallback is unavailable.")
-        log("WARNING: missing shared libraries: " + "; ".join(missing_libs))
+    lfoe_cmd = str(getattr(cfg, "lfoe_command", DEFAULT_LFOE_GLOMAP))
+    executable = Path(lfoe_cmd).expanduser()
+    if not executable.is_file() or not os.access(executable, os.X_OK):
         return ""
-    return lfoe_cmd
+    if Path(lfoe_cmd).name == "glomap_filter":
+        missing_libs = unresolved_shared_libs(lfoe_cmd)
+        if missing_libs:
+            log("WARNING: glomap_filter shared libraries are unresolved.")
+            log("WARNING: missing shared libraries: " + "; ".join(missing_libs))
+            return ""
+    return str(executable.resolve())
 
 
 def mpsfm_flat_name(rel_name: str) -> str:
@@ -7589,19 +7702,6 @@ def glomap_model_dir(root: Path) -> Path:
     return candidates[0] if candidates else root / "0"
 
 
-def mapper_needs_lfoe(summary: dict[str, Any], cfg: SimpleNamespace) -> tuple[bool, list[str]]:
-    reasons: list[str] = []
-    if not bool(summary.get("exists")):
-        reasons.append("missing_model")
-    if "registered_images" in summary:
-        manifest_total = read_json(cfg_paths(cfg).manifest).get("total_frames", 0) if cfg_paths(cfg).manifest.exists() else 0
-        reg = int(summary.get("registered_images", 0))
-        ratio = reg / max(1, int(manifest_total))
-        if reg < int(cfg.gate_min_registered_images):
-            reasons.append(f"registered_images={reg}")
-        if ratio < float(cfg.gate_min_registered_ratio):
-            reasons.append(f"registered_ratio={ratio:.3f}")
-    return bool(reasons), reasons
 
 
 def mapper_quality_score(summary: dict[str, Any]) -> tuple[int, int, float]:
@@ -7703,149 +7803,83 @@ def run_dense_mvroma_triangulation(cfg: SimpleNamespace, reference_model: Path, 
 
 def stage_glomap(cfg: SimpleNamespace) -> None:
     p = cfg_paths(cfg)
-    backend = str(getattr(cfg, "backend", "glomap"))
-    if getattr(cfg, "use_lfoe", False) and backend == "glomap":
-        backend = "lfoe"
+    backend = str(getattr(cfg, "backend", "lfoe"))
     for path in (p.model, p.model_standard, p.model_lfoe, p.model_dense, p.model_mpsfm):
         if path.exists() and cfg.overwrite:
             shutil.rmtree(path)
+
+    diagnostics: dict[str, Any] = {
+        "backend": backend, "mode": "single_backend",
+        "selected": backend, "runs": {},
+    }
     if backend == "mpsfm":
-        diagnostics: dict[str, Any] = {"backend": backend, "mode": "mpsfm", "selected": "", "runs": {}}
-        mpsfm_summary = run_mpsfm_backend(cfg, fatal=True)
-        diagnostics["runs"]["mpsfm"] = {"path": str(p.model_mpsfm), "summary": mpsfm_summary}
-        if cfg.dry_run:
-            diagnostics["selected"] = "mpsfm"
-            write_json(p.mapper_diagnostics, diagnostics)
-            write_json(p.backend_comparison, diagnostics)
-            return
-        if p.model.exists():
-            shutil.rmtree(p.model)
-        shutil.copytree(p.model_mpsfm, p.model)
-        diagnostics["selected"] = "mpsfm"
-        diagnostics["final_summary"] = glomap_summary(glomap_model_dir(p.model))
-        write_json(p.mapper_diagnostics, diagnostics)
-        write_json(p.backend_comparison, diagnostics)
-        return
-
-    if backend == "lfoe":
-        mode = "always"
-    elif backend == "compare":
-        mode = "diagnostic"
+        summary = run_mpsfm_backend(cfg, fatal=True)
+        selected_root = p.model_mpsfm
+        diagnostics["runs"]["mpsfm"] = {
+            "path": str(selected_root), "summary": summary,
+        }
     else:
-        mode = getattr(cfg, "lfoe_mode", "diagnostic")
-    diagnostics = {"backend": backend, "mode": mode, "selected": "", "runs": {}}
-
-    standard_summary: dict[str, Any] = {}
-    if mode != "always":
-        p.model_standard.mkdir(parents=True, exist_ok=True)
-        try:
-            run_cmd(build_glomap_mapper_cmd(cfg, cfg.glomap_command, p.model_standard), dry_run=cfg.dry_run)
-            if cfg.dry_run:
-                return
-            standard_summary = glomap_summary(glomap_model_dir(p.model_standard))
-            needs_lfoe, reasons = mapper_needs_lfoe(standard_summary, cfg)
-            if backend == "compare":
-                needs_lfoe = True
-                reasons = [*reasons, "compare_backend"]
-        except subprocess.CalledProcessError as exc:
-            if mode == "off":
-                raise
-            standard_summary = {
-                "exists": False,
-                "command_error": str(exc),
-                "returncode": int(exc.returncode),
-            }
-            needs_lfoe = True
-            reasons = [f"standard_mapper_failed:{exc.returncode}"]
-            if not getattr(cfg, "skip_retriangulation", False):
-                log("standard GLOMAP failed; retrying with --skip_retriangulation 1 while keeping bundle adjustment enabled")
-                retry_cfg = SimpleNamespace(**vars(cfg))
-                retry_cfg.skip_retriangulation = True
-                if p.model_standard.exists():
-                    shutil.rmtree(p.model_standard)
-                p.model_standard.mkdir(parents=True, exist_ok=True)
-                try:
-                    run_cmd(build_glomap_mapper_cmd(retry_cfg, retry_cfg.glomap_command, p.model_standard), dry_run=cfg.dry_run)
-                    standard_summary = glomap_summary(glomap_model_dir(p.model_standard))
-                    standard_summary["retried_without_retriangulation"] = True
-                    needs_lfoe, reasons = mapper_needs_lfoe(standard_summary, cfg)
-                    reasons.append("standard_retried_without_retriangulation")
-                    if backend == "compare":
-                        needs_lfoe = True
-                        reasons.append("compare_backend")
-                except subprocess.CalledProcessError as retry_exc:
-                    standard_summary["retry_without_retriangulation_error"] = str(retry_exc)
-                    standard_summary["retry_without_retriangulation_returncode"] = int(retry_exc.returncode)
-        diagnostics["runs"]["standard"] = {"path": str(p.model_standard), "summary": standard_summary, "fallback_reasons": reasons}
-    else:
-        needs_lfoe = True
-        reasons = ["forced_lfoe"]
-
-    selected = p.model_standard
-    selected_name = "standard"
-    lfoe_summary: dict[str, Any] = {}
-    if mode in {"diagnostic", "always"} and needs_lfoe:
-        lfoe_cmd = resolve_lfoe_command(cfg)
-        if not lfoe_cmd:
-            if mode == "always":
-                raise SystemExit(f"--use-lfoe requested but usable glomap_filter was not found: {DEFAULT_LFOE_GLOMAP}")
-            log("LFOE fallback requested by diagnostics, but glomap_filter is unavailable; keeping standard GLOMAP output.")
-            if not bool(standard_summary.get("exists")):
-                write_json(p.mapper_diagnostics, diagnostics)
-                raise SystemExit("standard GLOMAP failed and LFOE fallback is unavailable")
+        if backend == "lfoe":
+            mapper_command = resolve_lfoe_command(cfg)
+            selected_root = p.model_lfoe
+            if not mapper_command:
+                raise SystemExit(
+                    "LFOE is the selected global mapper, but no executable "
+                    f"glomap_filter is available at {getattr(cfg, 'lfoe_command', DEFAULT_LFOE_GLOMAP)}"
+                )
+        elif backend == "glomap":
+            mapper_command = str(cfg.glomap_command)
+            selected_root = p.model_standard
         else:
-            p.model_lfoe.mkdir(parents=True, exist_ok=True)
-            try:
-                run_cmd(build_glomap_mapper_cmd(cfg, lfoe_cmd, p.model_lfoe), cwd=glomap_run_cwd(lfoe_cmd), dry_run=cfg.dry_run)
-                lfoe_summary = glomap_summary(glomap_model_dir(p.model_lfoe))
-                diagnostics["runs"]["lfoe"] = {"path": str(p.model_lfoe), "summary": lfoe_summary, "trigger_reasons": reasons}
-                if mode == "always" or not standard_summary or mapper_quality_score(lfoe_summary) >= mapper_quality_score(standard_summary):
-                    selected = p.model_lfoe
-                    selected_name = "lfoe"
-            except subprocess.CalledProcessError as exc:
-                diagnostics["runs"]["lfoe"] = {
-                    "path": str(p.model_lfoe),
-                    "summary": {"exists": False, "command_error": str(exc), "returncode": int(exc.returncode)},
-                    "trigger_reasons": reasons,
-                }
-                if mode == "always" or not bool(standard_summary.get("exists")):
-                    write_json(p.mapper_diagnostics, diagnostics)
-                    raise
+            raise ValueError(f"unsupported mapper backend: {backend}")
+        selected_root.mkdir(parents=True, exist_ok=True)
+        command = build_glomap_mapper_cmd(cfg, mapper_command, selected_root)
+        diagnostics["runs"][backend] = {
+            "path": str(selected_root), "command": command,
+        }
+        run_cmd(command, cwd=glomap_run_cwd(mapper_command), dry_run=cfg.dry_run)
+        if cfg.dry_run:
+            write_json(p.mapper_diagnostics, diagnostics)
+            return
+        summary = glomap_summary(glomap_model_dir(selected_root))
+        diagnostics["runs"][backend]["summary"] = summary
+        if not bool(summary.get("exists")):
+            write_json(p.mapper_diagnostics, diagnostics)
+            raise SystemExit(f"{backend} produced no complete COLMAP model")
 
-    if backend == "compare":
-        mpsfm_summary = run_mpsfm_backend(cfg, fatal=False)
-        diagnostics["runs"]["mpsfm"] = {"path": str(p.model_mpsfm), "summary": mpsfm_summary, "trigger_reasons": ["compare_backend"]}
-        if bool(mpsfm_summary.get("exists")) and mapper_quality_score(mpsfm_summary) >= mapper_quality_score(glomap_summary(glomap_model_dir(selected))):
-            selected = p.model_mpsfm
-            selected_name = "mpsfm"
+    if cfg.dry_run:
+        write_json(p.mapper_diagnostics, diagnostics)
+        return
+    if p.model.exists():
+        shutil.rmtree(p.model)
+    shutil.copytree(selected_root, p.model)
 
-    if selected.exists():
-        if p.model.exists():
-            shutil.rmtree(p.model)
-        shutil.copytree(selected, p.model)
-    p.model.mkdir(parents=True, exist_ok=True)
-    if bool(getattr(cfg, "dense_map_triangulation", False)) and not cfg.dry_run:
-        dense_summary = run_dense_mvroma_triangulation(cfg, glomap_model_dir(p.model), p.model_dense0)
+    selected_name = backend
+    if bool(getattr(cfg, "dense_map_triangulation", False)):
+        dense_summary = run_dense_mvroma_triangulation(
+            cfg, glomap_model_dir(p.model), p.model_dense0
+        )
         diagnostics["runs"]["dense_mvroma_triangulation"] = {
             "path": str(p.model_dense0),
             "summary": dense_summary,
             "reference": selected_name,
         }
-        if mapper_quality_score(dense_summary) >= mapper_quality_score(glomap_summary(glomap_model_dir(p.model))):
-            if p.model.exists():
-                shutil.rmtree(p.model)
+        if mapper_quality_score(dense_summary) >= mapper_quality_score(
+            glomap_summary(glomap_model_dir(p.model))
+        ):
+            shutil.rmtree(p.model)
             shutil.copytree(p.model_dense, p.model)
             selected_name = "dense_mvroma_triangulation"
+
     diagnostics["selected"] = selected_name
     diagnostics["final_summary"] = glomap_summary(glomap_model_dir(p.model))
     write_json(p.mapper_diagnostics, diagnostics)
-    write_json(p.backend_comparison, diagnostics)
     if not p.model0.exists():
-        candidates = sorted([x for x in p.model.iterdir() if x.is_dir()])
+        candidates = sorted(path for path in p.model.iterdir() if path.is_dir())
         if candidates:
-            log(f"GLOMAP output has no 0/ directory; first candidate: {candidates[0]}")
+            log(f"global mapper output has no 0/ directory; first candidate: {candidates[0]}")
         else:
-            raise SystemExit(f"GLOMAP produced no model directory under {p.model}")
+            raise SystemExit(f"{backend} produced no model directory under {p.model}")
 
 
 def stage_color(cfg: SimpleNamespace) -> None:
@@ -7903,7 +7937,6 @@ def prepare_deploy_imports(cfg: SimpleNamespace) -> None:
 
 
 def stage_snap(cfg: SimpleNamespace) -> None:
-    import cv2
     import numpy as np
     import pycolmap
     import torch
@@ -8206,7 +8239,7 @@ def stage_triangulate(cfg: SimpleNamespace) -> None:
 def stage_report(cfg: SimpleNamespace) -> None:
     p = cfg_paths(cfg)
     outputs = {
-        "glomap_model": str(p.model0),
+        "sparse_model": str(p.model0),
         "rgb_point_cloud": str(p.rgb_ply),
         "snap_bundle": str(p.snap_bundle),
         "tracking_bundle": str(p.tracking_bundle),
@@ -8218,7 +8251,6 @@ def stage_report(cfg: SimpleNamespace) -> None:
         "stage_times": str(p.stage_times),
         "pair_verification_report": str(p.pair_verification_report),
         "mapper_diagnostics": str(p.mapper_diagnostics),
-        "backend_comparison": str(p.backend_comparison),
         "pair_graph_diagnostics": str(p.pair_graph_diagnostics),
         "rotation_bridge_report": str(p.rotation_bridge_report),
     }
@@ -8239,21 +8271,24 @@ def stage_report(cfg: SimpleNamespace) -> None:
         "sizes_bytes": sizes,
         "parameters": vars(cfg),
         "stage_times": read_stage_times(cfg),
-        "optional_modules": {
+        "integrated_modules": {
             "LFOE-GlobalSfM": {
-                "use_when": "diagnostic fallback when standard GLOMAP fails registration gates or the view graph has translation-edge outliers",
-                "how_to_enable": "--lfoe-mode diagnostic|always or --use-lfoe",
-                "default": getattr(cfg, "lfoe_mode", "off"),
+                "role": "default global mapper; filters relative-translation outlier edges before translation averaging",
+                "command": getattr(cfg, "lfoe_command", DEFAULT_LFOE_GLOMAP),
+                "default": getattr(cfg, "backend", "lfoe") == "lfoe",
             },
             "MP-SfM": {
-                "use_when": "primary candidate backend for low-overlap, low-texture, or low-parallax scenes",
-                "how_to_enable": "--backend mpsfm|compare --mpsfm-conf sp-mast3r-dense",
+                "role": "explicit alternative backend for low-overlap, low-texture, or low-parallax scenes",
+                "how_to_enable": "--backend mpsfm --mpsfm-conf sp-mast3r-dense",
                 "default_conf": getattr(cfg, "mpsfm_conf", "sp-mast3r-dense"),
             },
-            "Dense Match Summarization": {
-                "use_when": "fast two-view verification before dense aggregation; does not replace full dense matches",
-                "how_to_enable": "--pair-verification dms",
-                "default": getattr(cfg, "pair_verification", "off"),
+            "Dense Match Graph Verification": {
+                "role": (
+                    "default pre-aggregation edge filter with planar H/E rotation "
+                    "consistency and outlier-component view pruning"
+                ),
+                "how_to_disable": "--pair-verification off",
+                "default": getattr(cfg, "pair_verification", "dms"),
             },
             "Doppelgangers++": {
                 "use_when": "visually repeated structures cause false image pairs",
@@ -8284,10 +8319,10 @@ def stage_report(cfg: SimpleNamespace) -> None:
         f"- Pair graph mode: `{getattr(cfg, 'pair_graph_mode', 'directional')}`, intra cap: `{getattr(cfg, 'agg_intra_degree_cap', 10)}`, cross-direction cap: `{getattr(cfg, 'agg_cross_direction_degree_cap', 8)}`, total cap: `{cfg.agg_pair_degree_cap}`",
         f"- MV-RoMA cert: `{cfg.roma_cert_thresh}`, grid: `{cfg.mvroma_grid_h}x{cfg.mvroma_grid_w}`, chunk: `{cfg.mvroma_chunk}`, sample: `{getattr(cfg, 'mvroma_sample_mode', 'random')}`",
         f"- Doppelgangers++ scope: `{getattr(cfg, 'doppelgangers_filter_scope', 'all')}`, threshold: `{getattr(cfg, 'doppelgangers_threshold', 0.8)}`",
-        f"- Pair verification: `{getattr(cfg, 'pair_verification', 'off')}` action `{getattr(cfg, 'pair_verification_action', 'filter')}`",
+        f"- Pair verification: `{getattr(cfg, 'pair_verification', 'dms')}` action `{getattr(cfg, 'pair_verification_action', 'filter')}`, planar rotation limit `{getattr(cfg, 'dms_planar_max_rotation_error_deg', 10.0)}` deg",
         f"- Motion bridges: use_rotation_bridges=`{getattr(cfg, 'use_rotation_bridges', False)}`, exclude_rotation_from_triangulation=`{getattr(cfg, 'exclude_rotation_from_triangulation', False)}`",
-        f"- Backend: `{getattr(cfg, 'backend', 'glomap')}`, MP-SfM conf: `{getattr(cfg, 'mpsfm_conf', 'sp-mast3r-dense')}`",
-        f"- GLOMAP skip_BA: `{cfg.skip_bundle_adjustment}`, skip_retriangulation: `{cfg.skip_retriangulation}`, optimize_intrinsics: `{getattr(cfg, 'optimize_intrinsics', 0)}`, max_tracks: `{cfg.max_num_tracks}`, min_views: `{getattr(cfg, 'min_num_view_per_track', 0)}`, min_angle: `{getattr(cfg, 'min_triangulation_angle', 0.0)}`",
+        f"- Backend: `{getattr(cfg, 'backend', 'lfoe')}`, MP-SfM conf: `{getattr(cfg, 'mpsfm_conf', 'sp-mast3r-dense')}`",
+        f"- Global mapper skip_BA: `{cfg.skip_bundle_adjustment}`, skip_retriangulation: `{cfg.skip_retriangulation}`, optimize_intrinsics: `{getattr(cfg, 'optimize_intrinsics', 0)}`, max_tracks: `{cfg.max_num_tracks}`, min_views: `{getattr(cfg, 'min_num_view_per_track', 0)}`, min_angle: `{getattr(cfg, 'min_triangulation_angle', 0.0)}`",
         f"- Dense MV-RoMA triangulation: `{getattr(cfg, 'dense_map_triangulation', False)}`, two_view: `{getattr(cfg, 'dense_tri_include_two_view_tracks', True)}`, min_angle: `{getattr(cfg, 'dense_tri_min_angle', 0.5)}`, max_reproj: `{getattr(cfg, 'dense_tri_max_reproj_error', 2.0)}`",
         f"- XFeat topk: `{cfg.xfeat_topk}`, snap_px: `{cfg.snap_px}`, tri_pair_topk: `{cfg.tri_pair_topk}`",
         "",
@@ -8299,11 +8334,11 @@ def stage_report(cfg: SimpleNamespace) -> None:
         lines.append(f"- `{item.get('stage')}`: `{item.get('duration_seconds')}` sec ({item.get('status')})")
     lines += [
         "",
-        "## Optional Modules",
+        "## Integrated Modules",
         "",
-        "- LFOE-GlobalSfM: diagnostic fallback for bad translation edges, disconnected graphs, or weak standard GLOMAP output.",
-        "- MP-SfM: primary candidate backend for low-overlap or low-texture scenes; configure with --mpsfm-conf.",
-        "- Dense Match Summarization: uses compact score/grid samples only for RANSAC edge checks; full dense matches remain for aggregation.",
+        "- LFOE-GlobalSfM: the default global mapper; one mapper run, not a second diagnostic reconstruction.",
+        "- MP-SfM: explicit alternative backend for low-overlap or low-texture scenes.",
+        "- Dense Match Graph Verification: H/E-consistent planar-edge rescue plus largest-component view pruning before aggregation.",
         "- Doppelgangers++: use before MV-RoMa when repeated structures create visually plausible but wrong pairs.",
         "- UFM: used indirectly as MV-RoMa's prematch model; keep it installed for the MV-RoMa stage.",
     ]
@@ -8343,7 +8378,7 @@ RUNTIME_DEFAULTS: dict[str, Any] = {
     "mvroma_resume": True,
     "repair_dense_h5": False,
     "doppelgangers_filter_scope": "all",
-    "pair_verification": "off",
+    "pair_verification": "dms",
     "pair_verification_action": "filter",
     "dms_max_matches": 512,
     "dms_grid": "8x12",
@@ -8354,11 +8389,13 @@ RUNTIME_DEFAULTS: dict[str, Any] = {
     "dms_homography_px": 3.0,
     "dms_max_trials": 2000,
     "dms_rotation_h_over_f": 1.5,
-    "backend": "glomap",
+    "dms_planar_max_rotation_error_deg": 10.0,
+    "dms_min_largest_component_ratio": 0.90,
+    "backend": "lfoe",
     "use_rotation_bridges": False,
     "exclude_rotation_from_triangulation": False,
     "motion_classes": "parallax,pure_rotation,hover",
-    "lfoe_mode": "off",
+    "lfoe_command": DEFAULT_LFOE_GLOMAP,
     "mpsfm_repo": DEFAULT_MPSFM_REPO,
     "python_mpsfm": DEFAULT_PY_MPSFM,
     "mpsfm_conf": "sp-mast3r-dense",
@@ -8496,9 +8533,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--doppelgangers-checkpoint", default="")
     ap.add_argument("--doppelgangers-threshold", type=float, default=0.8)
     ap.add_argument("--doppelgangers-filter-scope", choices=["all", "cross_video", "cross_direction"], default="all")
-    ap.add_argument("--use-lfoe", action="store_true")
-    ap.add_argument("--lfoe-mode", choices=["diagnostic", "always", "off"], default="off")
-    ap.add_argument("--backend", choices=["glomap", "lfoe", "mpsfm", "compare"], default="glomap")
+    ap.add_argument("--backend", choices=["lfoe", "glomap", "mpsfm"], default="lfoe")
     ap.add_argument("--mpsfm-repo", default=DEFAULT_MPSFM_REPO)
     ap.add_argument("--python-mpsfm", default=DEFAULT_PY_MPSFM)
     ap.add_argument("--mpsfm-conf", default="sp-mast3r-dense")
@@ -8508,6 +8543,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--mpsfm-verbose", type=int, default=0)
     ap.add_argument("--mpsfm-max-frames-per-chunk", type=int, default=220)
     ap.add_argument("--glomap-command", default=DEFAULT_GLOMAP)
+    ap.add_argument("--lfoe-command", default=DEFAULT_LFOE_GLOMAP)
     ap.add_argument("--python-sfm", default=DEFAULT_PY_SFM)
     ap.add_argument("--python-sfmdb", default=DEFAULT_PY_SFMDB)
     ap.add_argument("--python-mvroma", default=DEFAULT_PY_MVROMA)
@@ -8542,7 +8578,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
         help="reuse strict-valid per-source MV-RoMa shards",
     )
     ap.add_argument("--repair-dense-h5", action=argparse.BooleanOptionalAction, default=False)
-    ap.add_argument("--pair-verification", choices=["dms", "off"], default="off")
+    ap.add_argument("--pair-verification", choices=["dms", "off"], default="dms")
     ap.add_argument("--pair-verification-action", choices=["filter", "report"], default="filter")
     ap.add_argument("--dms-max-matches", type=int, default=512)
     ap.add_argument("--dms-grid", default="8x12")
@@ -8553,6 +8589,8 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--dms-homography-px", type=float, default=3.0)
     ap.add_argument("--dms-max-trials", type=int, default=2000)
     ap.add_argument("--dms-rotation-h-over-f", type=float, default=1.5)
+    ap.add_argument("--dms-planar-max-rotation-error-deg", type=float, default=10.0)
+    ap.add_argument("--dms-min-largest-component-ratio", type=float, default=0.90)
 
     ap.add_argument("--camera-model", default="SIMPLE_RADIAL")
     ap.add_argument("--camera-init-json", default="")

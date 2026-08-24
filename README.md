@@ -47,7 +47,7 @@ site 測試必須各自在新程序執行，避免 Python 模組快取把另一�
 `pipeline/repair_fuhe_gluemap_fixed_ba.py` 也都是實際跑過的活程式。
 
 `pipeline/build_localizable_map_core.py` 是 symlink，指到
-`map_update/build_localizable_map.py`（357 KB 單檔巨獸，上一代的 all-in-one builder）。
+`map_update/build_localizable_map.py`；這條可攜式全域 SfM 路徑現在預設用 LFOE，並在聚合前執行 H/E 平面一致性與 view-component pruning。
 
 ---
 
@@ -65,9 +65,9 @@ site 測試必須各自在新程序執行，避免 Python 模組快取把另一�
 | **S2b** | `s2b_intrinsics_bakeoff.py` | crash-safe 雙 seed 內參可辨識性烘培 | 多解析度 × 多相機模型獨立 replay |
 | **S3** | `s3_pairs.py` | forced VPR-blind bridge candidates + real-loader 契約 gate | 跨影片 bridge pairs > 0 |
 | **S4** | `audit_dg_graph.py` + Doppelgangers++ | **反鬼影主閘**。拒絕重複結構造成的假橋接 | 最大 component ratio、不得清光跨向邊 |
-| **S5** | `run_gluemap_memory_safe.py` → `finalize_edm_model.py` | GlueMap 建圖 → 移除 pure-rotation observations → **固定內參 BA** | 內參與 seed 逐參數比對，容差 `1e-6` |
+| **S5** | `LFOE glomap_filter` → `finalize_edm_model.py` | 過濾 relative-translation outlier edges → 全域建圖 → 移除 pure-rotation observations → **固定內參 BA** | 內參與 seed 逐參數比對，容差 `1e-6` |
+| **S5.7** | `audit_independent_sim3.py` + LFOE | 各 sequence 獨立建圖，再獨立驗證跨方向 Sim3 橋接 | 不靠同一次建圖自我背書 |
 | **S6** | `audit_map_geometry.py` | 鬼影稽核 | G6.1–G6.4 |
-| **S5.7** | `audit_independent_sim3.py` | 各 sequence 獨立建圖，再獨立驗證跨方向 Sim3 橋接 | 不靠同一次建圖自我背書 |
 | **S7** | `build_bundle_seed.py` → `validate_tracking_bundle.py` | MegaLoc seed bundle → tracking bundle | `ref_global.shape == [refs, 8448]` |
 | **S8** | `finalize_edm_model.py` → `validate_edm_bundle.py` | EDM detector-free 固定姿態重三角化 → bundle | cell-anchor round-trip |
 | **S9** | `validate_heldout_localization.py` | **唯一真正重要的 gate**：未參與建圖的影片 | target_site 要 ≥95% |
@@ -84,9 +84,15 @@ site 測試必須各自在新程序執行，避免 Python 模組快取把另一�
   都必須明確記錄在 manifest 裡。
 - **S2b 存在的原因**：ANAFI 到底該用 PINHOLE（韌體已去畸變）還是 SIMPLE_RADIAL，
   規格書講不清楚。三個焦距來源互差 7.5%，所以用實測 bake-off 定案，不用猜的。
-- **S5 的固定內參 BA 是硬要求**。GlueMap 的 BA 會**默默漂移內參**——
-  `refine_extra_params` 是那個陷阱。最終模型的相機參數必須與 seed 完全一致（實測 delta `0.0`）。
+- **S5 的 LFOE 是單一 production mapper，不再是標準 GLOMAP 跑完後的第二套診斷重建。**
+  它直接重用現有 COLMAP database；最終模型仍須通過固定內參、S6 與 S9。
 - **S9 才是驗收**。「有輸出檔」不等於完成。
+
+### 論文方法整合
+
+- **G-MASt3R-SfM**：移植 geometrically verified view pruning；dense pair filter 只保留最大的 verified component，component ratio 不足直接 fail。沒有再加 MSO/PGO，因為下游 global positioning + BA 已涵蓋較完整的目標。
+- **Planar-SfM**：homography-dominant edge 不再一律當 pure rotation；只有 homography decomposition 與 essential rotation 的 geodesic agreement 通過才救回。
+- **LFOE-GlobalSfM**：`glomap_filter` 直接取代 S5/S5.7 的標準 GLOMAP；移除 standard→LFOE 雙跑與重複 `backend_comparison.json`。
 
 ## 診斷：Stage 0–2
 

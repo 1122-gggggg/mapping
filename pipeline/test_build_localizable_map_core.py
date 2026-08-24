@@ -74,6 +74,61 @@ class MotionClassificationTests(unittest.TestCase):
             self.assertIn("matches_mode: sparse+dense", text)
 
 
+class PaperMethodIntegrationTests(unittest.TestCase):
+    def cfg(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            dms_min_sampled_matches=24,
+            dms_min_inliers=24,
+            dms_min_inlier_ratio=0.08,
+            dms_rotation_h_over_f=1.5,
+        )
+
+    def test_planar_consistency_rescues_homography_dominant_cross_direction_edge(self) -> None:
+        metrics = {
+            "sampled_matches": 100,
+            "f_inliers": 10,
+            "h_inliers": 80,
+            "f_ratio": 0.10,
+            "h_ratio": 0.80,
+            "planar_consistent": True,
+        }
+        keep, reason = core.keep_verified_pair(
+            metrics, {"cross_direction": True, "same_video": False}, self.cfg()
+        )
+        self.assertTrue(keep)
+        self.assertEqual(reason, "cross_direction_planar_consistent")
+
+    def test_inconsistent_homography_does_not_rescue_cross_direction_edge(self) -> None:
+        metrics = {
+            "sampled_matches": 100,
+            "f_inliers": 10,
+            "h_inliers": 80,
+            "f_ratio": 0.10,
+            "h_ratio": 0.80,
+            "planar_consistent": False,
+        }
+        keep, reason = core.keep_verified_pair(
+            metrics, {"cross_direction": True, "same_video": False}, self.cfg()
+        )
+        self.assertFalse(keep)
+        self.assertEqual(reason, "cross_direction_rotation_like")
+
+    def test_view_pruning_keeps_only_deterministic_largest_component(self) -> None:
+        pairs = [("a", "b"), ("b", "c"), ("x", "y")]
+        kept, graph = core.prune_outlier_pair_components(
+            ["a", "b", "c", "x", "y", "isolated"], pairs
+        )
+        self.assertEqual(kept, [("a", "b"), ("b", "c")])
+        self.assertEqual(graph["component_sizes_before_pruning"], [3, 2, 1])
+        self.assertEqual(graph["pruned_views"], ["isolated", "x", "y"])
+        self.assertEqual(graph["largest_component_ratio"], 0.5)
+
+    def test_lfoe_and_graph_filter_are_runtime_defaults(self) -> None:
+        self.assertEqual(core.RUNTIME_DEFAULTS["backend"], "lfoe")
+        self.assertEqual(core.RUNTIME_DEFAULTS["pair_verification"], "dms")
+        self.assertNotIn("lfoe_mode", core.RUNTIME_DEFAULTS)
+
+
 class PairGraphPerformanceTests(unittest.TestCase):
     def test_default_directional_mode_skips_full_similarity_matrix(self) -> None:
         class NoMatmulArray(np.ndarray):

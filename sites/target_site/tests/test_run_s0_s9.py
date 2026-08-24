@@ -10,7 +10,7 @@ import pytest
 TARGET_SITE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TARGET_SITE / "tools"))
 
-from run_s0_s9 import gate_passed, plan_stages, resolve_stage_command  # noqa: E402
+from run_s0_s9 import gate_passed, plan_stages, resolve_stage_commands  # noqa: E402
 
 
 def _args(tmp_path: Path, **overrides) -> Namespace:
@@ -18,11 +18,9 @@ def _args(tmp_path: Path, **overrides) -> Namespace:
         run_dir=tmp_path / "target_site_v1",
         python=sys.executable,
         twoview=None,
-        input_model=None,
-        output_model=None,
         intrinsics_seed=None,
         database=None,
-        glomap_bin=None,
+        lfoe_bin=None,
         model=None,
         s5_metrics=None,
         tracking_bundle=None,
@@ -65,7 +63,64 @@ def test_s4_fails_closed_without_twoview(tmp_path: Path) -> None:
     run_dir.mkdir()
     spec = next(item for item in plan_stages(_args(tmp_path)) if item["stage"] == "S4")
     with pytest.raises(SystemExit, match="S4"):
-        resolve_stage_command(spec)
+        resolve_stage_commands(spec)
+
+
+def test_s5_7_wires_lfoe_as_the_only_global_mapper(tmp_path: Path) -> None:
+    run_dir = tmp_path / "target_site_v1"
+    run_dir.mkdir()
+    required = {
+        "database": tmp_path / "database.db",
+        "lfoe_bin": tmp_path / "glomap_filter",
+        "twoview": tmp_path / "twoview.pt",
+    }
+    for path in required.values():
+        path.write_bytes(b"x")
+    (run_dir / "images").mkdir()
+    (run_dir / "forced_bridges.txt").write_text("", encoding="utf-8")
+    (run_dir / "forced_bridges.json").write_text("{}", encoding="utf-8")
+    gates = run_dir / "gates"
+    gates.mkdir()
+    (gates / "S4_doppelgangers.json").write_text(
+        '{"status": "PASS"}', encoding="utf-8"
+    )
+    spec = next(
+        item for item in plan_stages(_args(tmp_path, **required))
+        if item["stage"] == "S5.7"
+    )
+    cmd = resolve_stage_commands(spec)[0]
+    assert "--lfoe-bin" in cmd
+    assert "--glomap-bin" not in cmd
+    assert str(required["lfoe_bin"]) in cmd
+
+
+def test_s5_runs_lfoe_then_fixed_intrinsics_finalizer(tmp_path: Path) -> None:
+    run_dir = tmp_path / "target_site_v1"
+    images = run_dir / "images"
+    images.mkdir(parents=True)
+    database = tmp_path / "database.db"
+    lfoe_bin = tmp_path / "glomap_filter"
+    intrinsics = tmp_path / "intrinsics"
+    for path in (database, lfoe_bin):
+        path.write_bytes(b"x")
+    intrinsics.mkdir()
+    (run_dir / "frame_manifest.json").write_text("{}", encoding="utf-8")
+    spec = next(
+        item
+        for item in plan_stages(
+            _args(
+                tmp_path, database=database, lfoe_bin=lfoe_bin,
+                intrinsics_seed=intrinsics,
+            )
+        )
+        if item["stage"] == "S5"
+    )
+    mapper, finalizer = resolve_stage_commands(spec)
+    assert mapper[:2] == [str(lfoe_bin), "mapper"]
+    assert "--database_path" in mapper
+    assert "--BundleAdjustment.optimize_intrinsics" in mapper
+    assert "finalize_edm_model.py" in finalizer[1]
+    assert str(run_dir / "lfoe_model" / "0") in finalizer
 
 
 def test_gate_passed_requires_status_pass(tmp_path: Path) -> None:
@@ -101,7 +156,7 @@ def test_s9_canonical_command_wires_lineage_inputs(tmp_path: Path) -> None:
         for item in plan_stages(_args(tmp_path, result=[result_a, result_b]))
         if item["stage"] == "S9"
     )
-    cmd = resolve_stage_command(spec)
+    cmd = resolve_stage_commands(spec)[0]
     assert "--corpus-manifest" in cmd
     assert "--edm-bundle" in cmd
     assert "--tracking-bundle" in cmd
@@ -117,4 +172,4 @@ def test_s9_canonical_command_wires_lineage_inputs(tmp_path: Path) -> None:
         item for item in plan_stages(_args(tmp_path)) if item["stage"] == "S9"
     )
     with pytest.raises(SystemExit, match="S9"):
-        resolve_stage_command(missing)
+        resolve_stage_commands(missing)

@@ -48,6 +48,7 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
     corpus_manifest = run_dir / "corpus_manifest.json"
     gates = run_dir / "gates"
     model = args.model or (run_dir / "final_model")
+    lfoe_model = run_dir / "lfoe_model"
     tracking = args.tracking_bundle or (
         run_dir / "edm" / "target_site_v1_seed_tracking.pt"
     )
@@ -115,23 +116,41 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
             "stage": "S5",
             "gate": gates / "S5_fixed_intrinsics.json",
             "needs": {
-                "--input-model": args.input_model,
+                "--database": args.database,
+                "--lfoe-bin": args.lfoe_bin,
                 "--intrinsics-seed": args.intrinsics_seed,
                 "--frame-manifest": frame_manifest,
+                "--image-root": images,
             },
-            "cmd": [
-                python,
-                tool("finalize_edm_model.py"),
-                "--input-model",
-                args.input_model,
-                "--output-model",
-                args.output_model or model,
-                "--frame-manifest",
-                frame_manifest,
-                "--intrinsics-seed",
-                args.intrinsics_seed,
-                "--metrics-out",
-                run_dir / "s5_metrics.json",
+            "commands": [
+                [
+                    args.lfoe_bin,
+                    "mapper",
+                    "--database_path",
+                    args.database,
+                    "--image_path",
+                    images,
+                    "--output_path",
+                    lfoe_model,
+                    "--BundleAdjustment.optimize_intrinsics",
+                    "0",
+                    "--BundleAdjustment.optimize_principal_point",
+                    "0",
+                ],
+                [
+                    python,
+                    tool("finalize_edm_model.py"),
+                    "--input-model",
+                    lfoe_model / "0",
+                    "--output-model",
+                    model,
+                    "--frame-manifest",
+                    frame_manifest,
+                    "--intrinsics-seed",
+                    args.intrinsics_seed,
+                    "--metrics-out",
+                    run_dir / "s5_metrics.json",
+                ],
             ],
         },
         {
@@ -139,7 +158,7 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
             "gate": gates / "S5_7_independent_sim3.json",
             "needs": {
                 "--database": args.database,
-                "--glomap-bin": args.glomap_bin,
+                "--lfoe-bin": args.lfoe_bin,
                 "--twoview": args.twoview,
                 "--image-root": images,
                 "--forced-pairs": forced_txt,
@@ -163,8 +182,8 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
                 gates / "S4_doppelgangers.json",
                 "--work-dir",
                 run_dir / "s5_7",
-                "--glomap-bin",
-                args.glomap_bin,
+                "--lfoe-bin",
+                args.lfoe_bin,
                 "--out",
                 gates / "S5_7_independent_sim3.json",
             ],
@@ -287,7 +306,7 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
     ]
 
 
-def resolve_stage_command(spec: dict) -> list[str]:
+def resolve_stage_commands(spec: dict) -> list[list[str]]:
     for label, value in spec.get("needs", {}).items():
         if isinstance(value, list):
             if not value:
@@ -296,7 +315,10 @@ def resolve_stage_command(spec: dict) -> list[str]:
                 require_path(Path(item), f"{spec['stage']} {label}")
             continue
         require_path(None if value is None else Path(value), f"{spec['stage']} {label}")
-    return [str(part) for part in spec["cmd"]]
+    commands = spec.get("commands")
+    if commands is None:
+        commands = [spec["cmd"]]
+    return [[str(part) for part in command] for command in commands]
 
 
 def main() -> None:
@@ -304,11 +326,9 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--twoview", type=Path)
-    parser.add_argument("--input-model", type=Path)
-    parser.add_argument("--output-model", type=Path)
     parser.add_argument("--intrinsics-seed", type=Path)
     parser.add_argument("--database", type=Path)
-    parser.add_argument("--glomap-bin", type=Path)
+    parser.add_argument("--lfoe-bin", type=Path)
     parser.add_argument("--model", type=Path)
     parser.add_argument("--s5-metrics", type=Path)
     parser.add_argument("--tracking-bundle", type=Path)
@@ -329,9 +349,9 @@ def main() -> None:
             if spec["stage"] != args.start_from:
                 continue
             started = True
-        cmd = resolve_stage_command(spec)
-        print("[run_s0_s9] " + " ".join(cmd), flush=True)
-        subprocess.run(cmd, check=True)
+        for cmd in resolve_stage_commands(spec):
+            print("[run_s0_s9] " + " ".join(cmd), flush=True)
+            subprocess.run(cmd, check=True)
         ok, detail = gate_passed(spec["gate"])
         if not ok:
             raise SystemExit(f"stop at {spec['stage']}: {detail}")

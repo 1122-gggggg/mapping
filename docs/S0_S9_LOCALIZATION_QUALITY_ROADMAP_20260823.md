@@ -177,18 +177,18 @@ universal constants from the papers.
 4. Execute weak/stable replay and emit `ComparisonResult` plus measured repairability.
 5. Connect the audited recapture planner only after existing-data repair stages complete.
 
-### P2: conditional research backends
+### P2: backend policy and conditional research paths
 
 - Detector-Free SfM or Dense-SfM for local low-texture/fragmented-track regions.
 - PixSfM featuremetric refinement for noisy keypoints and appearance change.
-- LFOE/cycle/triplet second opinions for global edge outliers.
+- LFOE is the default S5/S5.7 global mapper; cycle/triplet checks remain independent edge diagnostics.
 - MP-SfM for proven low-overlap/low-parallax/symmetry regimes.
 - RoMo-style dynamic correspondence masking where moving content is material.
 - ActLoc/Fisher planning for route and camera direction after site-held-out calibration.
 - Appearance-conditioned landmark/reference selection for day/night and long-term change.
 
-None of these becomes a default merely because it wins a paper benchmark. It must pass
-the same S6/S9, resource and gauge contracts as the current path.
+The remaining research backends do not become defaults merely because they win a paper benchmark.
+LFOE still must pass the same S6/S9, resource and gauge contracts as every candidate map.
 
 ## Non-portable constants
 
