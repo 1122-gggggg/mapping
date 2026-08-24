@@ -181,14 +181,31 @@ def main(argv: list[str] | None = None) -> int:
             localization=args.logs,
             image_roles=getattr(args, "image_roles", None),
             include_actloc_shadow=bool(args.include_actloc_shadow),
+            filename=getattr(args, "filename", "localization_risk_spheres.ply"),
+            sphere_radius=getattr(args, "sphere_radius", None),
+            sphere_samples=getattr(args, "sphere_samples", None) or 96,
         )
         print(
             json.dumps(
                 {
                     "output": receipt["ply"],
+                    "ply_full": receipt.get("ply_full"),
+                    "ply_mesh": receipt.get("ply_mesh"),
+                    "format": receipt.get("format"),
                     "map_vertices": receipt["map_vertices"],
+                    "map_vertices_retained": receipt.get("map_vertices_retained"),
+                    "map_vertices_excluded": receipt.get("map_vertices_excluded"),
                     "marker_spheres": receipt["marker_spheres"],
+                    "sphere_radius": receipt.get("sphere_radius"),
+                    "vertex_count": receipt.get("vertex_count"),
                     "counts": receipt["counts"],
+                    "clip": {
+                        "robust_diagonal": (receipt.get("clip") or {}).get("robust_diagonal"),
+                        "full_diagonal": (receipt.get("clip") or {}).get("full_diagonal"),
+                        "retained_count": (receipt.get("clip") or {}).get("retained_count"),
+                        "excluded_count": (receipt.get("clip") or {}).get("excluded_count"),
+                    },
+                    "visible_rgb": (receipt.get("cloudcompare") or {}).get("visible_rgb"),
                     "fim_recomputed": receipt["fim_recomputed"],
                     "actloc": receipt["actloc"],
                     "caveats": receipt["caveats"],
@@ -472,6 +489,13 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="include explicit ActLoc-proxy shadow markers; still not authorized evidence",
     )
+    risk.add_argument(
+        "--filename",
+        default="localization_risk_spheres.ply",
+        help="base PLY name; writes *_cloudcompare.ply, *_full.ply, and *_markers_mesh.ply",
+    )
+    risk.add_argument("--sphere-radius", type=float, help="override marker radius; default is scale-based")
+    risk.add_argument("--sphere-samples", type=int, help="override marker shell samples")
 
     repair = sub.add_parser(
         "repair",

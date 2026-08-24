@@ -143,6 +143,8 @@ sfm-diagnosis --help
 
 # Colored risk spheres from a map plus optional heatmap / weak-region / logs.
 # Does not recompute FIM. `.jsonl` logs are one JSON object per non-blank line.
+# Writes *_cloudcompare.ply (binary LE, robust-clipped, visible RGB),
+# *_full.ply (archival outliers + original colors), and *_markers_mesh.ply.
 sfm-diagnosis risk-ply /path/to/map --map-adapter colmap --output ./risk \
   [--heatmap ./heatmap] [--weak-regions ./qa-out] [--logs loc.jsonl] \
   [--image-roles frame_manifest.json]

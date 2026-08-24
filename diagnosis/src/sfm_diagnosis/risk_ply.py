@@ -9,6 +9,10 @@ Held-out success is the conjunction of outer ``DIRECT_STRONG`` and nested
 If either richer status is present, boolean ``success`` cannot override;
 missing one side is not strict. Boolean ``success`` is used only when both
 richer statuses are absent.
+
+CloudCompare export writes a robust-clipped binary little-endian PLY with
+visible base RGB. The full-extent archival PLY keeps original coordinates
+and original map colors, including black.
 """
 
 from __future__ import annotations
@@ -73,6 +77,25 @@ CAVEATS = (
     "nested REJECT always wins. Outer GEOMETRY_WEAK/PROVISIONAL plus nested "
     "ACCEPT remains a marker. If either richer status exists, boolean success "
     "cannot override; it is used only when both statuses are absent.",
+)
+
+CLOUDCOMPARE_FORMAT = "binary_little_endian 1.0"
+CLIP_LO_QUANTILE = 0.005
+CLIP_HI_QUANTILE = 0.995
+CLIP_IQR_K = 8.0
+MARKER_RADIUS_DIAG_FRACTION = 0.015
+MARKER_RADIUS_NN_FRACTION = 2.0
+MARKER_RADIUS_ABS_FLOOR = 0.05
+DEFAULT_SPHERE_SAMPLES = 96
+VISIBLE_MAP_RGB = (210, 210, 210)
+SOURCE_RGB_MISSING_MAX = 8
+VIEWER_INSTRUCTIONS = (
+    "Open the CloudCompare-ready binary PLY first (*_cloudcompare.ply).",
+    "Do not auto-fit the full-extent archival PLY; outliers are retained there on purpose.",
+    "Accept Global Shift / scale if CloudCompare prompts.",
+    "Display RGB, not a scalar field. Set the viewer background to dark navy or mid gray, not pure black.",
+    "Raise point size to 3–6 px so the light-gray core cloud is visible at auto-fit.",
+    "Issue markers keep their class colors. Optional *_markers_mesh.ply adds solid faces if shells look sparse.",
 )
 
 _JSONL_SUFFIXES = {".jsonl", ".ndjson"}
@@ -551,6 +574,322 @@ def markers_from_localization(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
     return markers
 
 
+def camera_nearest_spacing(centers: np.ndarray) -> float:
+    """Median nearest-neighbor spacing among finite camera centers."""
+
+    points = np.asarray(centers, dtype=float).reshape(-1, 3)
+    finite = points[np.isfinite(points).all(axis=1)]
+    if len(finite) < 2:
+        return 0.0
+    if len(finite) <= 1024:
+        delta = finite[:, None, :] - finite[None, :, :]
+        dist = np.linalg.norm(delta, axis=2)
+        np.fill_diagonal(dist, np.inf)
+        nearest = dist.min(axis=1)
+        positive = nearest[np.isfinite(nearest) & (nearest > 0)]
+        return float(np.median(positive)) if len(positive) else 0.0
+    sequential = np.linalg.norm(np.diff(finite, axis=0), axis=1)
+    positive = sequential[sequential > 0]
+    return float(np.median(positive)) if len(positive) else 0.0
+
+
+def visible_map_rgb(rgb: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    """Replace black/near-black base colors with a CloudCompare-visible gray."""
+
+    colors = np.asarray(rgb, dtype=np.uint8).reshape(-1, 3)
+    if len(colors) == 0:
+        return colors.copy(), {
+            "applied": False,
+            "override_count": 0,
+            "source_max": 0,
+            "fallback_rgb": list(VISIBLE_MAP_RGB),
+        }
+    source_max = int(colors.max())
+    missing = colors.max(axis=1) <= SOURCE_RGB_MISSING_MAX
+    override_count = int(missing.sum())
+    out = colors.copy()
+    applied = override_count > 0
+    if applied:
+        out[missing] = np.asarray(VISIBLE_MAP_RGB, dtype=np.uint8)
+    return out, {
+        "applied": applied,
+        "override_count": override_count,
+        "source_max": source_max,
+        "fallback_rgb": list(VISIBLE_MAP_RGB),
+        "threshold": SOURCE_RGB_MISSING_MAX,
+    }
+
+
+def robust_spatial_clip(
+    xyz: np.ndarray,
+    *,
+    camera_xyz: np.ndarray | None = None,
+    lo_quantile: float = CLIP_LO_QUANTILE,
+    hi_quantile: float = CLIP_HI_QUANTILE,
+    iqr_k: float = CLIP_IQR_K,
+) -> dict[str, Any]:
+    """Finite-point clip box from robust map/camera scale, not archival extrema."""
+
+    points = np.asarray(xyz, dtype=float).reshape(-1, 3)
+    finite = np.isfinite(points).all(axis=1)
+    cams = np.empty((0, 3), dtype=float)
+    if camera_xyz is not None and len(np.asarray(camera_xyz)):
+        raw_cams = np.asarray(camera_xyz, dtype=float).reshape(-1, 3)
+        cams = raw_cams[np.isfinite(raw_cams).all(axis=1)]
+    camera_nn = camera_nearest_spacing(cams) if len(cams) >= 2 else 0.0
+    camera_diagonal = (
+        float(np.linalg.norm(cams.max(axis=0) - cams.min(axis=0))) if len(cams) else 0.0
+    )
+    work = points[finite]
+    scale_source = "points"
+    if len(work) == 0:
+        work = cams
+        scale_source = "cameras"
+    if len(work) == 0:
+        clip_min = np.array([-1.0, -1.0, -1.0], dtype=float)
+        clip_max = np.array([1.0, 1.0, 1.0], dtype=float)
+        keep = np.zeros(len(points), dtype=bool)
+        return {
+            "keep": keep,
+            "clip_min": clip_min,
+            "clip_max": clip_max,
+            "center": np.zeros(3, dtype=float),
+            "limit": 1.0,
+            "pad": 0.0,
+            "quantile_min": clip_min.copy(),
+            "quantile_max": clip_max.copy(),
+            "lo_quantile": lo_quantile,
+            "hi_quantile": hi_quantile,
+            "iqr_k": iqr_k,
+            "method": "empty",
+            "scale_source": scale_source,
+            "camera_nn": camera_nn,
+            "camera_diagonal": camera_diagonal,
+            "robust_diagonal": float(np.linalg.norm(clip_max - clip_min)),
+            "full_min": clip_min.copy(),
+            "full_max": clip_max.copy(),
+            "full_diagonal": 0.0,
+            "finite_count": 0,
+            "nonfinite_count": int((~finite).sum()),
+            "retained_count": 0,
+            "excluded_count": int(len(points)),
+        }
+
+    center = np.median(work, axis=0)
+    dist = np.linalg.norm(work - center, axis=1)
+    if len(work) >= 64:
+        radius = float(np.quantile(dist, hi_quantile))
+        method = "distance_quantile"
+    else:
+        dmed = float(np.median(dist))
+        dmad = float(np.median(np.abs(dist - dmed)))
+        radius = dmed + iqr_k * max(dmad, 1e-12)
+        method = "distance_mad"
+    if len(cams):
+        radius = max(radius, float(np.max(np.linalg.norm(cams - center, axis=1))))
+    q_lo = np.quantile(work, lo_quantile, axis=0)
+    q_hi = np.quantile(work, hi_quantile, axis=0)
+    pad = max(0.15 * radius, 4.0 * camera_nn, 0.05 * camera_diagonal, 1e-6)
+    limit = float(radius + pad)
+    keep = finite & np.all(np.abs(points - center) <= limit, axis=1)
+    clip_min = center - limit
+    clip_max = center + limit
+    full_min = points[finite].min(axis=0)
+    full_max = points[finite].max(axis=0)
+    return {
+        "keep": keep,
+        "clip_min": clip_min,
+        "clip_max": clip_max,
+        "center": center,
+        "limit": limit,
+        "pad": float(pad),
+        "quantile_min": q_lo,
+        "quantile_max": q_hi,
+        "lo_quantile": lo_quantile,
+        "hi_quantile": hi_quantile,
+        "iqr_k": iqr_k,
+        "method": method,
+        "scale_source": scale_source,
+        "camera_nn": float(camera_nn),
+        "camera_diagonal": float(camera_diagonal),
+        "robust_diagonal": float(np.linalg.norm(clip_max - clip_min)),
+        "full_min": full_min,
+        "full_max": full_max,
+        "full_diagonal": float(np.linalg.norm(full_max - full_min)),
+        "finite_count": int(finite.sum()),
+        "nonfinite_count": int((~finite).sum()),
+        "retained_count": int(keep.sum()),
+        "excluded_count": int((~keep).sum()),
+    }
+
+
+def sphere_mesh(
+    center: Sequence[float],
+    radius: float,
+    stacks: int = 8,
+    slices: int = 12,
+) -> tuple[np.ndarray, np.ndarray]:
+    """UV-sphere vertices and triangle faces for a solid CloudCompare marker."""
+
+    origin = np.asarray(center, dtype=float).reshape(3)
+    stacks = max(3, int(stacks))
+    slices = max(4, int(slices))
+    verts = [origin + np.array([0.0, radius, 0.0], dtype=float)]
+    for ring in range(1, stacks):
+        polar = math.pi * ring / stacks
+        y = math.cos(polar) * radius
+        rad = math.sin(polar) * radius
+        for spoke in range(slices):
+            az = 2.0 * math.pi * spoke / slices
+            verts.append(origin + np.array([rad * math.cos(az), y, rad * math.sin(az)], dtype=float))
+    verts.append(origin + np.array([0.0, -radius, 0.0], dtype=float))
+    vertices = np.asarray(verts, dtype=float)
+    faces: list[tuple[int, int, int]] = []
+    for spoke in range(slices):
+        faces.append((0, 1 + spoke, 1 + (spoke + 1) % slices))
+    for ring in range(stacks - 2):
+        row = 1 + ring * slices
+        nxt = row + slices
+        for spoke in range(slices):
+            a = row + spoke
+            b = row + (spoke + 1) % slices
+            c = nxt + (spoke + 1) % slices
+            d = nxt + spoke
+            faces.append((a, d, b))
+            faces.append((b, d, c))
+    bottom = len(vertices) - 1
+    last = 1 + (stacks - 2) * slices
+    for spoke in range(slices):
+        faces.append((last + spoke, bottom, last + (spoke + 1) % slices))
+    return vertices, np.asarray(faces, dtype=np.int32)
+
+
+def write_binary_ply(
+    path: str | Path,
+    xyz: np.ndarray,
+    rgb: np.ndarray,
+    faces: np.ndarray | None = None,
+    comments: Sequence[str] = (),
+) -> Path:
+    """Write a packed CloudCompare-readable little-endian RGB PLY."""
+
+    points = np.asarray(xyz, dtype=float).reshape(-1, 3)
+    colors = np.asarray(rgb, dtype=np.uint8).reshape(-1, 3)
+    if len(points) != len(colors):
+        raise ValueError("xyz and rgb must have the same length")
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    header = [
+        "ply",
+        "format binary_little_endian 1.0",
+    ]
+    for comment in comments:
+        header.append(f"comment {comment}")
+    header.extend(
+        [
+            f"element vertex {len(points)}",
+            "property float x",
+            "property float y",
+            "property float z",
+            "property uchar red",
+            "property uchar green",
+            "property uchar blue",
+        ]
+    )
+    face_array = None
+    if faces is not None:
+        face_array = np.asarray(faces, dtype=np.int32).reshape(-1, 3)
+        header.append(f"element face {len(face_array)}")
+        header.append("property list uchar int vertex_indices")
+    header.append("end_header")
+    vertex_dt = np.dtype(
+        [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("r", "u1"), ("g", "u1"), ("b", "u1")]
+    )
+    if vertex_dt.itemsize != 15:
+        raise RuntimeError(f"PLY vertex record must be 15 bytes, got {vertex_dt.itemsize}")
+    records = np.empty(len(points), dtype=vertex_dt)
+    records["x"] = points[:, 0]
+    records["y"] = points[:, 1]
+    records["z"] = points[:, 2]
+    records["r"] = colors[:, 0]
+    records["g"] = colors[:, 1]
+    records["b"] = colors[:, 2]
+    with dest.open("wb") as handle:
+        handle.write(("\n".join(header) + "\n").encode("ascii"))
+        handle.write(records.tobytes(order="C"))
+        if face_array is not None:
+            face_dt = np.dtype([("n", "u1"), ("i0", "<i4"), ("i1", "<i4"), ("i2", "<i4")])
+            if face_dt.itemsize != 13:
+                raise RuntimeError(f"PLY face record must be 13 bytes, got {face_dt.itemsize}")
+            face_records = np.empty(len(face_array), dtype=face_dt)
+            face_records["n"] = 3
+            face_records["i0"] = face_array[:, 0]
+            face_records["i1"] = face_array[:, 1]
+            face_records["i2"] = face_array[:, 2]
+            handle.write(face_records.tobytes(order="C"))
+    return dest
+
+
+def _artifact_paths(output_dir: Path, filename: str) -> dict[str, Path]:
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix or ".ply"
+    return {
+        "cloudcompare": output_dir / f"{stem}_cloudcompare{suffix}",
+        "full": output_dir / f"{stem}_full{suffix}",
+        "mesh": output_dir / f"{stem}_markers_mesh{suffix}",
+    }
+
+
+def _stack_xyz_rgb(
+    map_xyz: np.ndarray,
+    map_rgb: np.ndarray,
+    marker_xyz: list[np.ndarray],
+    marker_rgb: list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    chunks_xyz = [part for part in (map_xyz, *marker_xyz) if len(part)]
+    chunks_rgb = [part for part in (map_rgb, *marker_rgb) if len(part)]
+    if not chunks_xyz:
+        return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=np.uint8)
+    return np.vstack(chunks_xyz), np.vstack(chunks_rgb)
+
+
+def _write_legend_md(path: Path, receipt: Mapping[str, Any]) -> Path:
+    clip = receipt.get("clip") or {}
+    cc = receipt.get("cloudcompare") or {}
+    lines = [
+        "# Localization risk PLY",
+        "",
+        f"- CloudCompare-ready (open this): `{receipt.get('ply')}`",
+        f"- Full-extent archival (do not auto-fit): `{receipt.get('ply_full')}`",
+        f"- Solid marker mesh: `{receipt.get('ply_mesh')}`",
+        f"- Format: `{cc.get('format', CLOUDCOMPARE_FORMAT)}` with RGB uchar properties.",
+        f"- Map vertices full/retained/excluded: `{receipt.get('map_vertices')}` / "
+        f"`{receipt.get('map_vertices_retained')}` / `{receipt.get('map_vertices_excluded')}`",
+        f"- Robust bounds diagonal: `{clip.get('robust_diagonal')}`",
+        f"- Full bounds diagonal: `{clip.get('full_diagonal')}`",
+        f"- Marker radius / samples: `{receipt.get('sphere_radius')}` / `{receipt.get('sphere_samples')}`",
+        f"- Visible base RGB fallback: `{cc.get('visible_rgb')}`",
+        f"- Clipping receipt: `{receipt.get('clipping_receipt')}`",
+        "",
+        "## CloudCompare",
+        "",
+    ]
+    for item in receipt.get("viewer_instructions") or VIEWER_INSTRUCTIONS:
+        lines.append(f"- {item}")
+    lines.extend(["", "| class | RGB | meaning |", "|---|---|---|"])
+    colors = receipt.get("colors_rgb") or {}
+    legend = receipt.get("legend") or {}
+    for name, meaning in legend.items():
+        rgb = ",".join(str(v) for v in colors.get(name, ()))
+        lines.append(f"| `{name}` | {rgb} | {meaning} |")
+    lines.append("")
+    for caveat in receipt.get("caveats") or ():
+        lines.append(f"- {caveat}")
+    dest = Path(path)
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return dest
+
+
 def write_ascii_ply(
     path: str | Path,
     xyz: np.ndarray,
@@ -591,11 +930,11 @@ def write_risk_ply(
     extra_markers: Sequence[Mapping[str, Any]] | None = None,
     image_roles: str | Path | Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
     sphere_radius: float | None = None,
-    sphere_samples: int = 48,
+    sphere_samples: int = DEFAULT_SPHERE_SAMPLES,
     include_actloc_shadow: bool = False,
     filename: str = "localization_risk_spheres.ply",
 ) -> dict[str, Any]:
-    """Write map RGB vertices plus colored issue-class sphere markers."""
+    """Write archival and CloudCompare-ready map+marker PLYs plus a clip receipt."""
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -627,51 +966,171 @@ def write_risk_ply(
             continue
         markers.append(dict(row))
 
-    if sphere_radius is None:
-        if map_data.num_images >= 2:
-            diffs = np.linalg.norm(
-                map_data.image_centers[1:] - map_data.image_centers[:-1], axis=1
-            )
-            positive = diffs[diffs > 0]
-            sphere_radius = float(np.median(positive) * 0.08) if len(positive) else 0.05
-        else:
-            sphere_radius = 0.05
-    sphere_radius = max(float(sphere_radius), 1e-4)
-
     map_xyz = np.asarray(map_data.points_xyz, dtype=float).reshape(-1, 3)
     map_rgb = np.asarray(map_data.point_rgb, dtype=np.uint8).reshape(-1, 3)
-    marker_xyz: list[np.ndarray] = []
-    marker_rgb: list[np.ndarray] = []
+    point_ids = np.asarray(map_data.point_ids)
+    clip = robust_spatial_clip(map_xyz, camera_xyz=map_data.image_centers)
+    keep = np.asarray(clip["keep"], dtype=bool)
+    retained_xyz = map_xyz[keep]
+    retained_rgb_src = map_rgb[keep]
+    cc_map_rgb, rgb_fallback = visible_map_rgb(retained_rgb_src)
+    excluded_idx = np.flatnonzero(~keep)
+    if len(point_ids) == len(map_xyz):
+        excluded_ids = [int(v) for v in point_ids[excluded_idx]]
+    else:
+        excluded_ids = [int(v) for v in excluded_idx]
+
+    auto_radius = max(
+        MARKER_RADIUS_ABS_FLOOR,
+        MARKER_RADIUS_NN_FRACTION * float(clip["camera_nn"]),
+        MARKER_RADIUS_DIAG_FRACTION * float(clip["robust_diagonal"]),
+    )
+    if sphere_radius is None:
+        sphere_radius = auto_radius
+    else:
+        sphere_radius = max(float(sphere_radius), 1e-4)
+    sphere_samples = max(8, int(sphere_samples))
+    clip_min = np.asarray(clip["clip_min"], dtype=float)
+    clip_max = np.asarray(clip["clip_max"], dtype=float)
+    full_marker_xyz: list[np.ndarray] = []
+    full_marker_rgb: list[np.ndarray] = []
+    mesh_xyz: list[np.ndarray] = []
+    mesh_rgb: list[np.ndarray] = []
+    mesh_faces: list[np.ndarray] = []
     counts: dict[str, int] = {name: 0 for name in ISSUE_COLORS}
+    mesh_offset = 0
     for index, row in enumerate(markers):
         issue = str(row["issue_class"])
         counts[issue] = counts.get(issue, 0) + 1
         color = np.asarray(_rgb(issue), dtype=np.uint8)
-        shell = sphere_points((row["x"], row["y"], row["z"]), sphere_radius, sphere_samples)
-        marker_xyz.append(shell)
-        marker_rgb.append(np.repeat(color.reshape(1, 3), len(shell), axis=0))
+        center = (row["x"], row["y"], row["z"])
+        shell = sphere_points(center, sphere_radius, sphere_samples)
+        shell_rgb = np.repeat(color.reshape(1, 3), len(shell), axis=0)
+        full_marker_xyz.append(shell)
+        full_marker_rgb.append(shell_rgb)
         row["sphere_index"] = index
+        row["in_cloudcompare_clip"] = True
+        verts, faces = sphere_mesh(center, sphere_radius)
+        mesh_xyz.append(verts)
+        mesh_rgb.append(np.repeat(color.reshape(1, 3), len(verts), axis=0))
+        mesh_faces.append(faces + mesh_offset)
+        mesh_offset += len(verts)
 
-    if marker_xyz:
-        xyz = np.vstack([map_xyz, *marker_xyz]) if len(map_xyz) else np.vstack(marker_xyz)
-        rgb = np.vstack([map_rgb, *marker_rgb]) if len(map_rgb) else np.vstack(marker_rgb)
+    finite_map = np.isfinite(map_xyz).all(axis=1)
+    full_xyz, full_rgb = _stack_xyz_rgb(
+        map_xyz[finite_map],
+        map_rgb[finite_map],
+        full_marker_xyz,
+        full_marker_rgb,
+    )
+    cc_xyz, cc_rgb = _stack_xyz_rgb(retained_xyz, cc_map_rgb, full_marker_xyz, full_marker_rgb)
+    paths = _artifact_paths(out, filename)
+    comments = (
+        "sfm-diagnosis CloudCompare-ready robust-clipped risk PLY",
+        "open this file first; archival *_full.ply keeps outliers and original RGB",
+    )
+    ply_path = write_binary_ply(paths["cloudcompare"], cc_xyz, cc_rgb, comments=comments)
+    full_path = write_binary_ply(
+        paths["full"],
+        full_xyz,
+        full_rgb,
+        comments=("sfm-diagnosis full-extent archival risk PLY; do not auto-fit",),
+    )
+    if mesh_xyz:
+        mesh_v = np.vstack(mesh_xyz)
+        mesh_c = np.vstack(mesh_rgb)
+        mesh_f = np.vstack(mesh_faces)
     else:
-        xyz = map_xyz
-        rgb = map_rgb
-    ply_path = write_ascii_ply(out / filename, xyz, rgb)
+        mesh_v = np.zeros((0, 3), dtype=float)
+        mesh_c = np.zeros((0, 3), dtype=np.uint8)
+        mesh_f = np.zeros((0, 3), dtype=np.int32)
+    mesh_path = write_binary_ply(
+        paths["mesh"],
+        mesh_v,
+        mesh_c,
+        faces=mesh_f,
+        comments=("sfm-diagnosis solid risk-marker mesh",),
+    )
+
+    robust_diag = float(clip["robust_diagonal"])
+    full_diag = float(clip["full_diagonal"])
+    clip_payload = {
+        "method": clip["method"],
+        "scale_source": clip["scale_source"],
+        "lo_quantile": clip["lo_quantile"],
+        "hi_quantile": clip["hi_quantile"],
+        "iqr_k": clip["iqr_k"],
+        "center": [float(v) for v in np.asarray(clip["center"])],
+        "limit": float(clip["limit"]),
+        "pad": float(clip["pad"]),
+        "clip_min": [float(v) for v in clip_min],
+        "clip_max": [float(v) for v in clip_max],
+        "robust_bounds": {
+            "min": [float(v) for v in clip_min],
+            "max": [float(v) for v in clip_max],
+            "diagonal": robust_diag,
+        },
+        "full_bounds": {
+            "min": [float(v) for v in clip["full_min"]],
+            "max": [float(v) for v in clip["full_max"]],
+            "diagonal": full_diag,
+        },
+        "quantile_bounds": {
+            "min": [float(v) for v in clip["quantile_min"]],
+            "max": [float(v) for v in clip["quantile_max"]],
+        },
+        "camera_nn": float(clip["camera_nn"]),
+        "camera_diagonal": float(clip["camera_diagonal"]),
+        "robust_diagonal": robust_diag,
+        "full_diagonal": full_diag,
+        "robust_diagonal_not_dominated_by_extrema": bool(
+            full_diag <= 0.0 or robust_diag * 20.0 < full_diag or int(clip["excluded_count"]) > 0
+        ),
+        "finite_count": int(clip["finite_count"]),
+        "nonfinite_count": int(clip["nonfinite_count"]),
+        "retained_count": int(clip["retained_count"]),
+        "excluded_count": int(clip["excluded_count"]),
+        "excluded_indices": [int(v) for v in excluded_idx],
+        "excluded_point_ids": excluded_ids,
+    }
+    cloudcompare = {
+        "ply": str(ply_path),
+        "format": "binary_little_endian",
+        "rgb": True,
+        "vertex_count": int(len(cc_xyz)),
+        "map_vertices_retained": int(len(retained_xyz)),
+        "map_vertices_excluded": int(clip["excluded_count"]),
+        "marker_spheres": int(len(markers)),
+        "sphere_radius": float(sphere_radius),
+        "sphere_samples": int(sphere_samples),
+        "robust_bounds": clip_payload["robust_bounds"],
+        "visible_rgb": rgb_fallback,
+        "payload_bytes": int(len(cc_xyz) * 15),
+    }
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_type": "SFM_DIAGNOSIS_RISK_PLY",
         "ply": str(ply_path),
+        "ply_full": str(full_path),
+        "ply_mesh": str(mesh_path),
+        "format": "binary_little_endian",
         "map_vertices": int(len(map_xyz)),
+        "map_vertices_retained": int(len(retained_xyz)),
+        "map_vertices_excluded": int(clip["excluded_count"]),
         "marker_spheres": int(len(markers)),
+        "marker_spheres_cloudcompare": int(len(markers)),
         "sphere_samples": int(sphere_samples),
         "sphere_radius": float(sphere_radius),
-        "vertex_count": int(len(xyz)),
+        "sphere_radius_auto": float(auto_radius),
+        "vertex_count": int(len(cc_xyz)),
+        "vertex_count_full": int(len(full_xyz)),
+        "mesh_vertex_count": int(len(mesh_v)),
+        "mesh_face_count": int(len(mesh_f)),
         "counts": {key: value for key, value in counts.items() if value},
         "colors_rgb": {key: list(value) for key, value in ISSUE_COLORS.items()},
         "legend": ISSUE_LEGEND,
         "caveats": list(CAVEATS),
+        "viewer_instructions": list(VIEWER_INSTRUCTIONS),
         "actloc": (
             "SHADOW_ONLY_IF_EXPLICITLY_INCLUDED"
             if include_actloc_shadow
@@ -684,17 +1143,26 @@ def write_risk_ply(
             "localization_rows": len(loc_rows),
             "image_role_rows": len(roles),
         },
+        "clip": clip_payload,
+        "clipping_receipt": str(out / "risk_ply_clipping.json"),
+        "cloudcompare": cloudcompare,
         "markers": markers,
     }
     write_json(out / "legend.json", {key: ISSUE_LEGEND[key] for key in ISSUE_COLORS})
+    write_json(out / "risk_ply_clipping.json", clip_payload)
     write_json(out / "risk_ply_receipt.json", receipt)
+    _write_legend_md(out / "LEGEND.md", receipt)
     return receipt
+
 
 
 __all__ = [
     "CAVEATS",
     "ISSUE_COLORS",
     "ISSUE_LEGEND",
+    "VIEWER_INSTRUCTIONS",
+    "VISIBLE_MAP_RGB",
+    "camera_nearest_spacing",
     "load_jsonl_rows",
     "load_rows",
     "markers_from_heatmap",
@@ -702,7 +1170,11 @@ __all__ = [
     "markers_from_map",
     "markers_from_weak_regions",
     "normalize_image_roles",
+    "robust_spatial_clip",
+    "sphere_mesh",
     "sphere_points",
+    "visible_map_rgb",
     "write_ascii_ply",
+    "write_binary_ply",
     "write_risk_ply",
 ]

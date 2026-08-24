@@ -10,7 +10,15 @@ import pytest
 
 from sfm_diagnosis.cli import main as risk_ply_cli
 from sfm_diagnosis.models import CameraIntrinsics, MapData
-from sfm_diagnosis.risk_ply import ISSUE_COLORS, load_jsonl_rows, load_rows, write_risk_ply
+from sfm_diagnosis.risk_ply import (
+    ISSUE_COLORS,
+    MARKER_RADIUS_ABS_FLOOR,
+    MARKER_RADIUS_DIAG_FRACTION,
+    VISIBLE_MAP_RGB,
+    load_jsonl_rows,
+    load_rows,
+    write_risk_ply,
+)
 from test_diagnose import healthy_map
 
 
@@ -31,6 +39,40 @@ def _tiny_map() -> MapData:
         image_R_wc=np.repeat(np.eye(3)[None], 4, axis=0),
         cameras={0: CameraIntrinsics(0, "PINHOLE", 1000, 800, 500, 500, 500, 400)},
     )
+
+
+def _parse_ply(path: Path) -> dict[str, object]:
+    raw = path.read_bytes()
+    sep = b"end_header\n"
+    idx = raw.index(sep)
+    header = raw[: idx + len(sep)].decode("ascii")
+    payload = raw[idx + len(sep) :]
+    meta: dict[str, object] = {"header": header, "payload": payload}
+    for line in header.splitlines():
+        if line.startswith("format "):
+            meta["format"] = line.split(" ", 1)[1]
+        elif line.startswith("element vertex"):
+            meta["vertex"] = int(line.split()[-1])
+        elif line.startswith("element face"):
+            meta["face"] = int(line.split()[-1])
+        elif line.startswith("property "):
+            meta.setdefault("properties", []).append(line)
+    return meta
+
+
+def _read_vertices(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    meta = _parse_ply(path)
+    payload = meta["payload"]
+    n = int(meta["vertex"])
+    rec = np.dtype(
+        [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("r", "u1"), ("g", "u1"), ("b", "u1")]
+    )
+    assert rec.itemsize == 15
+    vertex_bytes = n * 15
+    verts = np.frombuffer(payload[:vertex_bytes], dtype=rec)
+    xyz = np.column_stack([verts["x"], verts["y"], verts["z"]]).astype(float)
+    rgb = np.column_stack([verts["r"], verts["g"], verts["b"]]).astype(np.uint8)
+    return xyz, rgb
 
 
 def test_risk_ply_header_map_vertices_and_colored_spheres(tmp_path: Path):
@@ -62,28 +104,31 @@ def test_risk_ply_header_map_vertices_and_colored_spheres(tmp_path: Path):
         filename="risk.ply",
     )
     ply = Path(receipt["ply"])
-    text = ply.read_text(encoding="utf-8")
-    assert text.startswith("ply\nformat ascii 1.0\n")
-    assert "property uchar red" in text
-    assert "property uchar green" in text
-    assert "property uchar blue" in text
-    assert "end_header" in text
+    meta = _parse_ply(ply)
+    assert meta["format"] == "binary_little_endian 1.0"
+    assert "property uchar red" in meta["header"]
+    assert "property uchar green" in meta["header"]
+    assert "property uchar blue" in meta["header"]
+    assert "end_header" in meta["header"]
+    assert int(meta["vertex"]) == receipt["vertex_count"]
+    assert len(meta["payload"]) == receipt["vertex_count"] * 15
     assert receipt["map_vertices"] == 3
     assert receipt["marker_spheres"] >= 2
     assert receipt["vertex_count"] == 3 + receipt["marker_spheres"] * 12
     assert receipt["fim_recomputed"] is False
     assert "unverified_bridge_pose" in receipt["counts"]
     assert "heldout_geometry_weak" in receipt["counts"]
-    body = text.split("end_header\n", 1)[1].strip().splitlines()
-    assert len(body) == receipt["vertex_count"]
-    first = body[0].split()
-    assert first[3:] == ["10", "20", "30"]
-    weak_rgb = [str(v) for v in ISSUE_COLORS["heldout_geometry_weak"]]
-    assert any(line.split()[3:] == weak_rgb for line in body[3:])
+    xyz, rgb = _read_vertices(ply)
+    assert len(xyz) == receipt["vertex_count"]
+    assert rgb[0].tolist() == [10, 20, 30]
+    weak_rgb = list(ISSUE_COLORS["heldout_geometry_weak"])
+    assert any(row.tolist() == weak_rgb for row in rgb[3:])
     legend = (tmp_path / "legend.json").read_text(encoding="utf-8")
-    assert "FIM observability" not in legend or True
     assert "heldout_geometry_weak" in legend
     assert "ActLoc" in Path(tmp_path / "risk_ply_receipt.json").read_text(encoding="utf-8")
+    assert Path(receipt["ply_full"]).is_file()
+    assert Path(receipt["clipping_receipt"]).is_file()
+
 
 
 def test_load_rows_jsonl_objects_not_csv(tmp_path: Path):
@@ -307,3 +352,122 @@ def test_boolean_success_only_without_richer_statuses(tmp_path: Path):
 
 def test_healthy_map_fixture_still_imports():
     assert healthy_map().num_points > 0
+
+
+def _outlier_map() -> MapData:
+    core = np.array(
+        [
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [0.5, 0.5, 1.2],
+            [0.2, 0.1, 0.9],
+        ],
+        dtype=float,
+    )
+    outliers = np.array([[1.0e6, 0.0, 0.0], [0.0, -8.0e5, 3.0e5]], dtype=float)
+    points = np.vstack([core, outliers])
+    rgb = np.vstack(
+        [
+            np.array([[10, 20, 30], [40, 50, 60], [70, 80, 90], [11, 22, 33], [44, 55, 66]], dtype=np.uint8),
+            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint8),
+        ]
+    )
+    n = len(points)
+    return MapData(
+        point_ids=np.arange(n),
+        points_xyz=points,
+        point_rgb=rgb,
+        point_errors=np.full(n, 0.4),
+        track_lengths=np.full(n, 2, dtype=int),
+        track_image_ids=[np.array([0, 1]) for _ in range(n)],
+        image_ids=np.array([0, 1, 2, 3]),
+        image_names=["im_0.jpg", "im_1.jpg", "bridge.jpg", "tri.jpg"],
+        image_camera_ids=np.zeros(4, dtype=int),
+        image_centers=np.array([[0, 0, 0], [1, 0, 0], [0.5, 0.2, 0.1], [0.4, 0.1, 0.2]], dtype=float),
+        image_R_wc=np.repeat(np.eye(3)[None], 4, axis=0),
+        cameras={0: CameraIntrinsics(0, "PINHOLE", 1000, 800, 500, 500, 500, 400)},
+    )
+
+
+def test_extreme_outlier_clip_retains_core_rgb_and_full_archive(tmp_path: Path):
+    receipt = write_risk_ply(
+        _outlier_map(),
+        tmp_path / "clip",
+        localization=[{"query": "q1", "status": "GEOMETRY_WEAK", "x": 0.4, "y": 0.1, "z": 0.2}],
+        sphere_samples=8,
+        filename="clip.ply",
+    )
+    clip = receipt["clip"]
+    assert receipt["map_vertices"] == 7
+    assert receipt["map_vertices_retained"] == 5
+    assert receipt["map_vertices_excluded"] == 2
+    assert receipt["vertex_count_full"] > receipt["vertex_count"]
+    assert set(clip["excluded_point_ids"]) == {5, 6}
+    assert np.isfinite(clip["robust_diagonal"])
+    assert all(abs(v) < 100 for v in clip["robust_bounds"]["min"])
+    assert all(abs(v) < 100 for v in clip["robust_bounds"]["max"])
+    assert clip["robust_diagonal"] < clip["full_diagonal"] / 20.0
+    cc_xyz, cc_rgb = _read_vertices(Path(receipt["ply"]))
+    assert np.isfinite(cc_xyz).all()
+    assert cc_xyz.max() < 100
+    assert [10, 20, 30] in cc_rgb.tolist()
+    assert [40, 50, 60] in cc_rgb.tolist()
+    full_xyz, full_rgb = _read_vertices(Path(receipt["ply_full"]))
+    assert full_xyz.max() > 1.0e5
+    assert [1, 2, 3] in full_rgb.tolist()
+    assert receipt["marker_spheres_cloudcompare"] == receipt["marker_spheres"]
+    assert receipt["sphere_radius"] >= MARKER_RADIUS_ABS_FLOOR
+    assert receipt["sphere_radius"] >= MARKER_RADIUS_DIAG_FRACTION * clip["robust_diagonal"]
+    meta = _parse_ply(Path(receipt["ply"]))
+    assert int(meta["vertex"]) == receipt["vertex_count"]
+    assert len(meta["payload"]) == receipt["vertex_count"] * 15
+    clipping = json.loads(Path(receipt["clipping_receipt"]).read_text(encoding="utf-8"))
+    assert clipping["excluded_count"] == 2
+
+
+def test_black_base_rgb_fallback_keeps_marker_colors(tmp_path: Path):
+    base = _tiny_map()
+    black = MapData(
+        point_ids=base.point_ids,
+        points_xyz=base.points_xyz,
+        point_rgb=np.zeros((3, 3), dtype=np.uint8),
+        point_errors=base.point_errors,
+        track_lengths=base.track_lengths,
+        track_image_ids=base.track_image_ids,
+        image_ids=base.image_ids,
+        image_names=base.image_names,
+        image_camera_ids=base.image_camera_ids,
+        image_centers=base.image_centers,
+        image_R_wc=base.image_R_wc,
+        cameras=base.cameras,
+    )
+    receipt = write_risk_ply(
+        black,
+        tmp_path / "gray",
+        localization=[{"query": "q1", "status": "GEOMETRY_WEAK", "x": 0.2, "y": 0.0, "z": 0.1}],
+        sphere_radius=0.1,
+        sphere_samples=8,
+        filename="gray.ply",
+    )
+    visible = receipt["cloudcompare"]["visible_rgb"]
+    assert visible["applied"] is True
+    assert visible["override_count"] == 3
+    assert visible["fallback_rgb"] == list(VISIBLE_MAP_RGB)
+    cc_xyz, cc_rgb = _read_vertices(Path(receipt["ply"]))
+    assert any(row.tolist() == list(VISIBLE_MAP_RGB) for row in cc_rgb[:3])
+    weak = list(ISSUE_COLORS["heldout_geometry_weak"])
+    assert any(row.tolist() == weak for row in cc_rgb[3:])
+    _full_xyz, full_rgb = _read_vertices(Path(receipt["ply_full"]))
+    assert full_rgb[:3].max() == 0
+    legend = Path(tmp_path / "gray" / "LEGEND.md").read_text(encoding="utf-8")
+    assert "background" in legend.lower()
+    assert "point size" in legend.lower()
+
+
+def test_marker_radius_floor_without_override(tmp_path: Path):
+    receipt = write_risk_ply(_tiny_map(), tmp_path / "floor", filename="floor.ply")
+    assert receipt["sphere_radius"] >= MARKER_RADIUS_ABS_FLOOR
+    assert receipt["sphere_radius"] >= MARKER_RADIUS_DIAG_FRACTION * receipt["clip"]["robust_diagonal"]
+    assert receipt["sphere_samples"] >= 96
+
