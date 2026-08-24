@@ -44,6 +44,8 @@ SESSION_ROLE_COLUMNS = [
     "role",
     "fusion_authorization",
     "reason",
+    "geometry_authority",
+    "authorized_edge",
 ]
 
 PREBUILD_PAIR_COLUMNS = [
@@ -56,6 +58,9 @@ PREBUILD_PAIR_COLUMNS = [
     "forced_probe",
     "requires_geometric_verification",
     "reason",
+    "retrieval_triangle_priority",
+    "evidence_type",
+    "count_field_provenance",
 ]
 
 
@@ -66,7 +71,11 @@ def _cell(value: Any) -> str:
         return f"{value:.6g}"
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, Mapping):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     if isinstance(value, (list, tuple)):
+        if any(isinstance(item, Mapping) for item in value):
+            return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return "|".join(str(item) for item in value)
     return str(value)
 
@@ -244,9 +253,9 @@ def build_role_rows(
     core = [sid for sid, role in roles.items() if role in {"BASE_CORE", "BASE_SUPPORT"}]
     base_terms = _objective_terms(qualities, edges, core, config) if core else {}
     try:
-        from sfm_qa.session_select.admission import classify_fusion_authorization
+        from sfm_qa.session_select.admission import incident_fusion_authorization
     except Exception:  # pragma: no cover
-        classify_fusion_authorization = None  # type: ignore[assignment]
+        incident_fusion_authorization = None  # type: ignore[assignment]
     rows: list[dict[str, Any]] = []
     for row in qualities:
         sid = getattr(row, "session_id", None)
@@ -265,24 +274,26 @@ def build_role_rows(
             default=0,
         )
         critical = any(getattr(edge, "is_critical_bridge", False) for edge in incident)
-        complete = any(getattr(edge, "geometry_complete", False) for edge in incident)
-        disjoint = any(getattr(edge, "group_holdout_disjoint", False) for edge in incident)
         info_gain = 0.0
         cov_gain = 0.0
         if core and sid not in core:
             info_gain = with_base["information"] - base_terms.get("information", 0.0)
             cov_gain = with_base["coverage"] - base_terms.get("coverage", 0.0)
         role = roles.get(sid, "QUARANTINE")
-        fusion = extra.get("fusion_authorizations", {}).get(sid) if isinstance(extra.get("fusion_authorizations"), Mapping) else None
-        if fusion is None and classify_fusion_authorization is not None:
-            fusion = classify_fusion_authorization(
-                role=role,
-                has_holdout=disjoint,
-                independent_bridge_groups=int(groups or 0),
-                geometry_complete=bool(complete),
-                group_holdout_disjoint=bool(disjoint),
-                base_admitted=role in {"BASE_CORE", "BASE_SUPPORT"},
-            )
+        fusion_override = (
+            extra.get("fusion_authorizations", {}).get(sid)
+            if isinstance(extra.get("fusion_authorizations"), Mapping)
+            else None
+        )
+        grant = None
+        receipts: tuple[Any, ...] = ()
+        fusion = fusion_override
+        if incident_fusion_authorization is not None:
+            computed, grant, receipts = incident_fusion_authorization(role, incident)
+            if fusion is None:
+                fusion = computed
+        elif fusion is None:
+            fusion = "NONE"
         rows.append(
             {
                 "session_id": sid,
@@ -307,6 +318,13 @@ def build_role_rows(
                 "change_score": change_score.get(sid, 0.0),
                 "role": role,
                 "fusion_authorization": fusion or "NONE",
+                "geometry_authority": [
+                    item.as_dict() if hasattr(item, "as_dict") else item
+                    for item in receipts
+                ],
+                "authorized_edge": (
+                    f"{grant.session_a}-{grant.session_b}" if grant is not None else ""
+                ),
                 "reason": reasons.get(
                     sid, "; ".join(getattr(row, "reasons", ()) or ())
                 ),
@@ -316,7 +334,22 @@ def build_role_rows(
 
 
 def write_session_roles_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    _write_csv(path, rows, SESSION_ROLE_COLUMNS)
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        authority = item.get("geometry_authority")
+        if not isinstance(authority, str):
+            item["geometry_authority"] = json.dumps(
+                list(authority or ()),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+        if item.get("authorized_edge") is None:
+            item["authorized_edge"] = ""
+        prepared.append(item)
+    _write_csv(path, prepared, SESSION_ROLE_COLUMNS)
+
 
 
 def _fmt(value: Any) -> str:

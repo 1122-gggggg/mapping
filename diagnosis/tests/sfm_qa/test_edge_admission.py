@@ -8,6 +8,10 @@ from sfm_qa.session_select import (
     connection_is_admissible,
     usable_geometry_ready,
 )
+from sfm_qa.session_select.admission import (
+    evaluate_geometry_authority,
+    incident_fusion_authorization,
+)
 from sfm_qa.session_select.types import SessionEdgeQuality
 
 
@@ -217,3 +221,258 @@ def test_usable_geometry_ready_requires_exact_pair_contract():
         fit_evidence_ids=("a",),
         holdout_evidence_ids=("b",),
     )
+
+
+def test_split_evidence_across_edges_is_not_geometry_authorized():
+    groups_only = SessionEdgeQuality(
+        session_a="A",
+        session_b="B",
+        num_verified_pairs=80,
+        independent_bridge_groups=2,
+        independent_artifact=True,
+        evidence_scope="exact_pair",
+        geometry_complete=False,
+        group_holdout_disjoint=True,
+        fit_evidence_ids=("f1", "f2"),
+        holdout_evidence_ids=("h1", "h2"),
+        status="WEAK",
+    )
+    complete_only = SessionEdgeQuality(
+        session_a="A",
+        session_b="C",
+        num_verified_pairs=80,
+        independent_bridge_groups=0,
+        independent_artifact=True,
+        evidence_scope="exact_pair",
+        geometry_complete=True,
+        group_holdout_disjoint=False,
+        fit_evidence_ids=("f3",),
+        holdout_evidence_ids=(),
+        status="WEAK",
+    )
+    first = evaluate_geometry_authority(groups_only)
+    second = evaluate_geometry_authority(complete_only)
+    assert first.authorized is False
+    assert second.authorized is False
+    assert first.hard_status == "HARD_FAIL"
+    assert second.hard_status == "HARD_FAIL"
+    fusion, grant, receipts = incident_fusion_authorization(
+        "GEOMETRY_REINFORCEMENT",
+        [groups_only, complete_only],
+    )
+    assert grant is None
+    assert fusion == "LOCAL_RELATION_ONLY"
+    assert all(not item.authorized for item in receipts)
+    core_fusion, _, _ = incident_fusion_authorization(
+        "BASE_CORE",
+        [groups_only, complete_only],
+    )
+    assert core_fusion == "GLOBAL_BA_PENDING_APPROVAL"
+
+
+def test_role_alone_is_not_fusion_authority():
+    fusion, grant, receipts = incident_fusion_authorization("BASE_CORE", [])
+    assert grant is None
+    assert receipts == ()
+    assert fusion == "GLOBAL_BA_PENDING_APPROVAL"
+    support, _, _ = incident_fusion_authorization("BASE_SUPPORT", [])
+    assert support == "LOCAL_RELATION_ONLY"
+    vpr = SessionEdgeQuality(
+        session_a="A",
+        session_b="B",
+        num_candidate_pairs=275,
+        num_verified_pairs=0,
+        independent_bridge_groups=0,
+        evidence_scope="vpr",
+        independent_artifact=False,
+        status="REJECT",
+    )
+    vpr_fusion, vpr_grant, vpr_receipts = incident_fusion_authorization("BASE_CORE", [vpr])
+    assert vpr_grant is None
+    assert vpr_fusion == "GLOBAL_BA_PENDING_APPROVAL"
+    assert vpr_receipts[0].authorized is False
+    assert vpr_receipts[0].hard_status == "HARD_FAIL"
+    assert vpr_receipts[0].evidence_status == "INSUFFICIENT_EVIDENCE"
+
+
+def test_complete_authorized_edge_grants_geometry_authority():
+    edge = classify_session_edge(
+        "A",
+        "B",
+        num_verified_pairs=200,
+        independent_bridge_groups=2,
+        independent_artifact=True,
+        evidence_scope="exact_pair",
+        fit_evidence_ids=("f1", "f2"),
+        holdout_evidence_ids=("h1", "h2"),
+        bridge_groups=_independent_groups(),
+        **_complete_metrics(),
+    )
+    receipt = evaluate_geometry_authority(edge)
+    assert receipt.authorized is True
+    assert receipt.hard_status == "VALID"
+    assert receipt.evidence_status == "PASS"
+    assert receipt.ready is True
+    assert receipt.admit_why == "admissible"
+    assert "reporting/review" in receipt.authority
+    assert "single incident edge" in receipt.independence_assumptions
+    fusion, grant, _ = incident_fusion_authorization("BASE_CORE", [edge])
+    assert grant is not None
+    assert grant.authorized is True
+    assert fusion == "GLOBAL_BA"
+    reinforce, _, _ = incident_fusion_authorization("GEOMETRY_REINFORCEMENT", [edge])
+    assert reinforce == "LOCAL_FUSION"
+
+
+def test_shared_map_and_ambiguous_edges_are_not_authoritative():
+    shared = classify_session_edge(
+        "A",
+        "B",
+        num_verified_pairs=25066,
+        independent_bridge_groups=3,
+        trusted_geometry=True,
+        source="shared_map",
+        shared_map=True,
+        **_complete_metrics(),
+    )
+    receipt = evaluate_geometry_authority(shared)
+    assert receipt.authorized is False
+    assert receipt.hard_status == "HARD_FAIL"
+    assert receipt.evidence_scope != "exact_pair" or receipt.independent_artifact is False
+    fusion, grant, _ = incident_fusion_authorization("BASE_SUPPORT", [shared])
+    assert grant is None
+    assert fusion == "LOCAL_RELATION_ONLY"
+    one_group = SessionEdgeQuality(
+        session_a="A",
+        session_b="D",
+        num_verified_pairs=40,
+        independent_bridge_groups=1,
+        independent_artifact=True,
+        evidence_scope="exact_pair",
+        geometry_complete=True,
+        group_holdout_disjoint=True,
+        fit_evidence_ids=("f1",),
+        holdout_evidence_ids=("h1",),
+        status="USABLE",
+    )
+    local = evaluate_geometry_authority(one_group)
+    assert local.ready is True
+    assert local.authorized is False
+    assert local.evidence_status == "WARN"
+    assert local.hard_status == "HARD_FAIL"
+
+
+def _typed_authority_payload(**overrides):
+    payload = {
+        "session_a": "A",
+        "session_b": "B",
+        "independent_artifact": True,
+        "evidence_scope": "exact_pair",
+        "geometry_complete": True,
+        "group_holdout_disjoint": True,
+        "independent_bridge_groups": 2,
+        "fit_evidence_ids": ("f1", "f2"),
+        "holdout_evidence_ids": ("h1", "h2"),
+        "status": "STRONG",
+        "is_critical_bridge": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_string_false_flags_cannot_authorize_geometry():
+    receipt = evaluate_geometry_authority(
+        _typed_authority_payload(
+            independent_artifact="false",
+            geometry_complete="false",
+            group_holdout_disjoint="false",
+        )
+    )
+    assert receipt.authorized is False
+    assert receipt.independent_artifact is False
+    assert receipt.geometry_complete is False
+    assert receipt.group_holdout_disjoint is False
+    assert "independent_artifact_not_bool" in receipt.reasons
+    assert "geometry_complete_not_bool" in receipt.reasons
+    assert "group_holdout_disjoint_not_bool" in receipt.reasons
+    fusion, grant, _ = incident_fusion_authorization(
+        "BASE_CORE",
+        [_typed_authority_payload(
+            independent_artifact="false",
+            geometry_complete="false",
+            group_holdout_disjoint="false",
+        )],
+    )
+    assert grant is None
+    assert fusion != "GLOBAL_BA"
+
+
+def test_truthy_integer_flags_cannot_authorize_geometry():
+    receipt = evaluate_geometry_authority(
+        _typed_authority_payload(
+            independent_artifact=1,
+            geometry_complete=1,
+            group_holdout_disjoint=1,
+        )
+    )
+    assert receipt.authorized is False
+    assert "independent_artifact_not_bool" in receipt.reasons
+    assert "geometry_complete_not_bool" in receipt.reasons
+    assert "group_holdout_disjoint_not_bool" in receipt.reasons
+
+
+def test_bool_group_count_cannot_authorize_geometry():
+    receipt = evaluate_geometry_authority(
+        _typed_authority_payload(independent_bridge_groups=True)
+    )
+    assert receipt.authorized is False
+    assert receipt.independent_bridge_groups == 0
+    assert "independent_bridge_groups_is_bool" in receipt.reasons
+    assert "fewer_than_min_independent_bridge_groups" in receipt.reasons
+
+
+def test_fractional_group_count_is_not_truncated():
+    receipt = evaluate_geometry_authority(
+        _typed_authority_payload(independent_bridge_groups=2.9)
+    )
+    assert receipt.authorized is False
+    assert receipt.independent_bridge_groups == 0
+    assert "independent_bridge_groups_not_integral" in receipt.reasons
+    assert "fewer_than_min_independent_bridge_groups" in receipt.reasons
+
+
+def test_nan_group_count_cannot_authorize_geometry():
+    receipt = evaluate_geometry_authority(
+        _typed_authority_payload(independent_bridge_groups=float("nan"))
+    )
+    assert receipt.authorized is False
+    assert receipt.independent_bridge_groups == 0
+    assert "independent_bridge_groups_not_finite" in receipt.reasons
+
+
+def test_negative_group_count_cannot_authorize_geometry():
+    receipt = evaluate_geometry_authority(
+        _typed_authority_payload(independent_bridge_groups=-2)
+    )
+    assert receipt.authorized is False
+    assert receipt.independent_bridge_groups == 0
+    assert "independent_bridge_groups_negative" in receipt.reasons
+
+
+def test_malformed_mapping_with_strong_status_cannot_authorize_fusion():
+    payload = _typed_authority_payload(
+        independent_artifact="false",
+        geometry_complete="false",
+        group_holdout_disjoint="false",
+        independent_bridge_groups=2.9,
+    )
+    receipt = evaluate_geometry_authority(payload)
+    assert receipt.authorized is False
+    assert receipt.hard_status == "HARD_FAIL"
+    assert receipt.independent_bridge_groups != 2
+    fusion, grant, receipts = incident_fusion_authorization("BASE_CORE", [payload])
+    assert grant is None
+    assert fusion != "GLOBAL_BA"
+    assert all(not item.authorized for item in receipts)
+    reinforce, _, _ = incident_fusion_authorization("GEOMETRY_REINFORCEMENT", [payload])
+    assert reinforce != "LOCAL_FUSION"

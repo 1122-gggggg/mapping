@@ -345,6 +345,71 @@ def _pair_key(left: str, right: str) -> tuple[str, str]:
     return (left, right) if left <= right else (right, left)
 
 
+_EMPTY_STOP_REASONS = frozenset(
+    {"empty_input", "no_readable_input", "no_legacy_eligible_input"}
+)
+_MARGINAL_STOP_REASONS = frozenset(
+    {"nonpositive_marginal", "relative_marginal_collapse"}
+)
+
+
+def _stopping_evidence(
+    stop_reason: str,
+    *,
+    next_candidate_id: str | None = None,
+    marginal: float | None = None,
+    best_previous: float | None = None,
+    keep_ratio: float | None = None,
+    keep_floor: float | None = None,
+    margin: float | None = None,
+) -> dict[str, Any]:
+    """Reporting-only record of why greedy proposal stopped.
+
+    This payload never changes membership, order, or geometric authority.
+    """
+
+    if stop_reason in _EMPTY_STOP_REASONS:
+        hard_status = "HARD_FAIL"
+        evidence_status = "INSUFFICIENT_EVIDENCE"
+    elif stop_reason in _MARGINAL_STOP_REASONS:
+        hard_status = "VALID"
+        evidence_status = "QUALITY_SHORTFALL"
+    else:
+        hard_status = "VALID"
+        evidence_status = "PASS"
+    payload: dict[str, Any] = {
+        "stop_reason": stop_reason,
+        "hard_status": hard_status,
+        "evidence_status": evidence_status,
+        "requires_geometric_verification": True,
+        "authority": "reporting_review_only",
+        "grants_selection_or_merge_authority": False,
+        "independence_assumptions": (
+            "Stopping diagnostics reuse the same observed session-quality terms "
+            "and retrieval-candidate graph already consumed by greedy ranking; "
+            "they are not an independent geometric verification."
+        ),
+        "provenance_assumptions": (
+            "Pair counts are num_candidate_pairs proposal evidence only; "
+            "complete-triangle support is also retrieval-count evidence and "
+            "never a verified geometric edge."
+        ),
+    }
+    if next_candidate_id is not None:
+        payload["next_candidate_id"] = next_candidate_id
+    if marginal is not None:
+        payload["marginal"] = float(marginal)
+    if best_previous is not None:
+        payload["best_previous"] = float(best_previous)
+    if keep_ratio is not None:
+        payload["keep_ratio"] = float(keep_ratio)
+    if keep_floor is not None:
+        payload["keep_floor"] = float(keep_floor)
+    if margin is not None:
+        payload["margin"] = float(margin)
+    return payload
+
+
 def propose_prebuild_set(
     qualities: Iterable[SessionQuality],
     edges: Iterable[SessionEdgeQuality | Mapping[str, Any]],
@@ -526,6 +591,12 @@ def propose_prebuild_set(
     strengths, adjacency, triplets = _proposal_graph(proposal_edges)
     graph_available = bool(strengths)
     if not eligible:
+        if not rows:
+            stop_reason = "empty_input"
+        elif not rankable:
+            stop_reason = "no_readable_input"
+        else:
+            stop_reason = "no_legacy_eligible_input"
         return {
             "proposed_base_sessions": [],
             "validation_candidates": [],
@@ -541,6 +612,7 @@ def propose_prebuild_set(
             "relative_fallback_used": False,
             "best_available_not_release": False,
             "requires_geometric_verification": True,
+            "stopping_evidence": _stopping_evidence(stop_reason),
             "notes": [
                 "No readable video is available for a geometry probe.",
                 "Retrieval is never geometric merge authority.",
@@ -598,6 +670,8 @@ def propose_prebuild_set(
     if not graph_available:
         budget = min(budget, max_no_graph)
 
+    stop_reason = "candidates_exhausted"
+    rejected_next: dict[str, Any] | None = None
     while remaining and len(selected) < budget:
         covered = covered_neighbourhood(selected_set)
         total_weight = sum(portfolio_scores[sid] for sid in eligible) or 1.0
@@ -675,9 +749,28 @@ def propose_prebuild_set(
         ]
         best_previous = max(previous_marginals, default=marginal)
         if len(selected) >= min_base:
+            keep_floor = float(best_previous) * float(marginal_keep_ratio)
             if marginal <= 0.0:
+                stop_reason = "nonpositive_marginal"
+                rejected_next = {
+                    "next_candidate_id": sid,
+                    "marginal": float(marginal),
+                    "best_previous": float(best_previous),
+                    "keep_ratio": float(marginal_keep_ratio),
+                    "keep_floor": keep_floor,
+                    "margin": float(marginal),
+                }
                 break
-            if best_previous > 0.0 and marginal < best_previous * marginal_keep_ratio:
+            if best_previous > 0.0 and marginal < keep_floor:
+                stop_reason = "relative_marginal_collapse"
+                rejected_next = {
+                    "next_candidate_id": sid,
+                    "marginal": float(marginal),
+                    "best_previous": float(best_previous),
+                    "keep_ratio": float(marginal_keep_ratio),
+                    "keep_floor": keep_floor,
+                    "margin": float(marginal) - keep_floor,
+                }
                 break
         selected.append(sid)
         selected_set.add(sid)
@@ -691,6 +784,9 @@ def propose_prebuild_set(
             }
         )
 
+
+    if stop_reason == "candidates_exhausted" and remaining:
+        stop_reason = "budget_reached"
     validation_pool = rankable if relative_admission else eligible
     remaining_ranked = sorted(
         (sid for sid in validation_pool if sid not in selected_set),
@@ -724,6 +820,13 @@ def propose_prebuild_set(
                     int(_edge_value(edge, "num_candidate_pairs")),
                 )
         triplet_score = float(triplets.get(key, {}).get("score", 0.0))
+        complete_triangles = float(triplets.get(key, {}).get("triplets", 0.0))
+        if complete_triangles > 0.0:
+            evidence_type = "retrieval_triangle"
+        elif candidate_count > 0:
+            evidence_type = "retrieval_candidate"
+        else:
+            evidence_type = "forced_geometry_probe"
         strength = strengths.get(key, 0.0)
         priority = strength + 0.5 * triplet_score
         verification_pairs.append(
@@ -741,6 +844,9 @@ def propose_prebuild_set(
                     if candidate_count > 0
                     else "no_retrieval_support_force_geometry_probe"
                 ),
+                "evidence_type": evidence_type,
+                "count_field_provenance": "num_candidate_pairs",
+                "retrieval_triangle_priority": complete_triangles > 0.0,
             }
         )
     verification_pairs.sort(
@@ -794,6 +900,9 @@ def propose_prebuild_set(
         "relative_fallback_used": relative_fallback_used,
         "best_available_not_release": relative_fallback_used,
         "requires_geometric_verification": True,
+        "stopping_evidence": _stopping_evidence(
+            stop_reason, **(rejected_next or {})
+        ),
         "notes": [
             "This is a pre-build proposal, not merge authority.",
             "Quality thresholds are diagnostic references; relative ranking keeps a non-empty best-available probe set.",

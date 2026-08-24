@@ -67,11 +67,38 @@ def localization_deliverables_ok(run_dir: Path) -> tuple[bool, dict[str, str | N
     return ok, evidence
 
 def _gate_input_sha256(payload: dict, label: str) -> str | None:
+    provenance = payload.get("provenance")
+    artifacts = provenance.get("input_artifacts") if isinstance(provenance, dict) else None
+    if not isinstance(artifacts, dict):
+        return None
+    record = artifacts.get(label)
+    if not isinstance(record, dict):
+        return None
+    digest = record.get("sha256")
+    return digest if isinstance(digest, str) and digest else None
+
+
+def _s9_result_sha256s(s9_gate: dict) -> list[str]:
+    provenance = s9_gate.get("provenance")
+    artifacts = provenance.get("input_artifacts") if isinstance(provenance, dict) else None
+    if not isinstance(artifacts, dict):
+        return []
+    hashes: list[str] = []
+    for label, record in artifacts.items():
+        if not str(label).startswith("benchmark_result"):
+            continue
+        if isinstance(record, dict):
+            digest = record.get("sha256")
+            if isinstance(digest, str) and digest:
+                hashes.append(digest)
+    return hashes
+
+
+def _s9_package_sha256(s9_gate: dict) -> str | None:
     return (
-        payload.get("provenance", {})
-        .get("input_artifacts", {})
-        .get(label, {})
-        .get("sha256")
+        _gate_input_sha256(s9_gate, "package_edm_bundle")
+        or _gate_input_sha256(s9_gate, "package_bundle")
+        or _gate_input_sha256(s9_gate, "package_config")
     )
 
 
@@ -103,31 +130,44 @@ def release_lineage_checks(
     s8_gate: dict,
     s9_gate: dict,
 ) -> dict[str, bool]:
-    tracking_sha = artifacts["tracking_bundle"].get("sha256")
-    edm_sha = artifacts["edm_bundle"].get("sha256")
-    package_edm_sha = artifacts["package_bundle"].get("sha256")
-    checks: dict[str, bool] = {}
+    tracking_sha = artifacts.get("tracking_bundle", {}).get("sha256")
+    edm_sha = artifacts.get("edm_bundle", {}).get("sha256")
+    package_edm_sha = artifacts.get("package_bundle", {}).get("sha256")
+    package_config_sha = artifacts.get("package_config", {}).get("sha256")
     s8_edm = _gate_input_sha256(s8_gate, "edm_bundle")
     s8_tracking = _gate_input_sha256(s8_gate, "tracking_bundle")
-    if s8_edm is not None or s8_tracking is not None:
-        checks["s8_hashes_bound"] = bool(
-            edm_sha
-            and s8_edm == edm_sha
-            and tracking_sha
-            and s8_tracking == tracking_sha
-        )
     s9_edm = _gate_input_sha256(s9_gate, "edm_bundle") or _gate_input_sha256(
         s9_gate, "package_edm_bundle"
     )
     s9_tracking = _gate_input_sha256(s9_gate, "tracking_bundle")
-    if s9_edm is not None or s9_tracking is not None:
-        checks["s9_hashes_bound"] = bool(
-            (s9_edm is None or s9_edm == edm_sha)
-            and (s9_tracking is None or s9_tracking == tracking_sha)
-        )
-    if edm_sha and package_edm_sha:
-        checks["package_edm_matches_run"] = package_edm_sha == edm_sha
-    return checks
+    s9_package = _s9_package_sha256(s9_gate)
+    package_targets = [sha for sha in (package_edm_sha, package_config_sha) if sha]
+    package_required = any(
+        key in artifacts for key in ("package_bundle", "package_config")
+    )
+    return {
+        "s8_hashes_bound": bool(
+            edm_sha
+            and tracking_sha
+            and s8_edm == edm_sha
+            and s8_tracking == tracking_sha
+        ),
+        "s9_hashes_bound": bool(
+            edm_sha
+            and tracking_sha
+            and s9_edm == edm_sha
+            and s9_tracking == tracking_sha
+        ),
+        "s9_result_hashes_bound": bool(_s9_result_sha256s(s9_gate)),
+        "s9_package_bound": (
+            bool(s9_package and s9_package in package_targets)
+            if package_required
+            else True
+        ),
+        "package_edm_matches_run": bool(
+            edm_sha and package_edm_sha and package_edm_sha == edm_sha
+        ),
+    }
 
 
 

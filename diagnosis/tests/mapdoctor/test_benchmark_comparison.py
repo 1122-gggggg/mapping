@@ -198,3 +198,141 @@ def test_new_failure_rate_gate_uses_exact_fraction():
         ComparisonThresholds(max_success_rate_drop=1.0, max_new_failure_rate=0.02),
     )
     assert "new-failure rate exceeds gate" in over.gate_failures
+
+
+def _located(name: str, success: bool, x: float, y: float = 0.0, z: float = 0.0) -> QueryLocalizationResult:
+    result = _q(name, success)
+    return QueryLocalizationResult(
+        query=result.query,
+        success=result.success,
+        inliers=result.inliers,
+        inlier_ratio=result.inlier_ratio,
+        reproj_p90_px=result.reproj_p90_px,
+        hull_coverage=result.hull_coverage,
+        grid4_occupancy=result.grid4_occupancy,
+        positive_depth_ratio=result.positive_depth_ratio,
+        pose_consensus=result.pose_consensus,
+        x=x,
+        y=y,
+        z=z,
+    )
+
+
+def test_sparse_all_pass_is_not_evidentially_complete(tmp_path):
+    path = tmp_path / "sparse.json"
+    path.write_text(
+        '[{"query": "q1", "success": true}, {"query": "q2", "success": true}]',
+        encoding="utf-8",
+    )
+    results = load_localization_results(path)
+    summary = summarize_benchmark(results, LocalizationThresholds())
+
+    assert summary.strict_success_rate == 1.0
+    assert summary.failures == []
+    assert summary.interpretation == "DESCRIPTIVE_ONLY"
+    assert summary.independent_units_verified is False
+    assert set(summary.metric_evidence) == {
+        "inliers",
+        "inlier_ratio",
+        "reproj_p90_px",
+        "hull_coverage",
+        "grid4_occupancy",
+        "positive_depth_ratio",
+        "pose_consensus",
+    }
+    for evidence in summary.metric_evidence.values():
+        assert evidence["present"] == 0
+        assert evidence["failed"] == 0
+        assert evidence["fail_rate"] is None
+    assert summary.failure_reason_counts == {}
+    assert summary.leave_one_criterion_strict_success_rates == {
+        name: 1.0 for name in summary.metric_evidence
+    }
+
+
+def test_complete_conjunction_reports_metric_evidence():
+    results = load_localization_results(FIXTURES / "localization_results.csv")
+    thresholds = LocalizationThresholds()
+    summary = summarize_benchmark(results, thresholds)
+
+    assert summary.strict_success_rate == 0.5
+    assert {item["query"] for item in summary.failures} == {"q3.jpg", "q4.jpg"}
+    assert [result.passes(thresholds) for result in results] == [True, True, False, False]
+    assert summary.failure_reason_counts == {
+        "high_reprojection_error": 1,
+        "localization_failed": 1,
+        "low_grid_occupancy": 1,
+        "low_inlier_hull_coverage": 1,
+        "low_inlier_ratio": 2,
+        "low_inliers": 2,
+        "low_pose_consensus": 1,
+        "low_positive_depth_ratio": 1,
+    }
+    assert summary.metric_evidence["inliers"] == {"present": 4, "failed": 2, "fail_rate": 0.5}
+    assert summary.metric_evidence["inlier_ratio"] == {
+        "present": 4,
+        "failed": 2,
+        "fail_rate": 0.5,
+    }
+    assert summary.metric_evidence["reproj_p90_px"] == {
+        "present": 4,
+        "failed": 1,
+        "fail_rate": 0.25,
+    }
+    assert summary.metric_evidence["hull_coverage"]["present"] == 4
+    assert summary.metric_evidence["grid4_occupancy"]["failed"] == 1
+    assert summary.leave_one_criterion_strict_success_rates["inliers"] == 0.5
+    assert summary.leave_one_criterion_strict_success_rates["inlier_ratio"] == 0.5
+    assert summary.interpretation == "DESCRIPTIVE_ONLY"
+    assert summary.independent_units_verified is False
+
+
+def test_missing_required_metric_ablation_does_not_change_labels():
+    result = QueryLocalizationResult(query="q1", success=True)
+    thresholds = LocalizationThresholds(required_metrics=("inliers",))
+
+    assert result.failures(thresholds) == ["missing_inliers"]
+    assert result.passes(thresholds) is False
+
+    summary = summarize_benchmark([result], thresholds)
+
+    assert summary.strict_success_rate == 0.0
+    assert summary.failures[0]["query"] == "q1"
+    assert summary.failures[0]["reasons"] == ["missing_inliers"]
+    assert summary.failure_reason_counts == {"missing_inliers": 1}
+    assert summary.metric_evidence["inliers"] == {
+        "present": 0,
+        "failed": 0,
+        "fail_rate": None,
+    }
+    assert summary.leave_one_criterion_strict_success_rates["inliers"] == 1.0
+    assert summary.leave_one_criterion_strict_success_rates["inlier_ratio"] == 0.0
+    assert result.failures(thresholds) == ["missing_inliers"]
+    assert result.passes(thresholds) is False
+
+
+def test_one_query_cell_is_insufficient_evidence():
+    results = [
+        _located("lone.jpg", False, x=0.0),
+        _located("pair_ok.jpg", True, x=10.0),
+        _located("pair_fail.jpg", False, x=11.0),
+    ]
+    summary = summarize_benchmark(results, LocalizationThresholds())
+
+    assert summary.strict_success_rate == 1 / 3
+    by_cell = {tuple(row["cell"]): row for row in summary.weak_regions}
+    lone = by_cell[(0, 0, 0)]
+    assert lone["queries"] == 1
+    assert lone["failed_queries"] == ["lone.jpg"]
+    assert lone["strict_success_rate"] == 0.0
+    assert lone["evidence_status"] == "INSUFFICIENT_EVIDENCE"
+    assert lone["authority"] == "DESCRIPTIVE_ONLY"
+    assert lone["shortfall_amount"] == 1.0
+
+    paired = by_cell[(2, 0, 0)]
+    assert paired["queries"] == 2
+    assert paired["failed_queries"] == ["pair_fail.jpg"]
+    assert paired["strict_success_rate"] == 0.5
+    assert paired["evidence_status"] == "QUALITY_SHORTFALL"
+    assert paired["authority"] == "DESCRIPTIVE_ONLY"
+    assert paired["shortfall_amount"] == 0.5

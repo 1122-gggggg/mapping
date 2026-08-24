@@ -39,6 +39,23 @@ subject to:
 Quality preferences are relative within the available cohort. Data integrity, held-out
 leakage, geometry validity and release provenance remain hard constraints.
 
+
+## Status lattice
+
+Implemented receipts use two axes. No paper number is a production threshold.
+
+| Axis | Values | Meaning |
+| --- | --- | --- |
+| `hard_status` | `VALID`, `HARD_FAIL` | Artifact, identity, finiteness, leakage, gauge, or merge-authority invariants. |
+| `evidence_status` | `PASS`, `WARN`, `INSUFFICIENT_EVIDENCE`, `QUALITY_SHORTFALL` | Soft claim support on declared independent units. |
+
+Independent certification units are whole sessions or predeclared route/spatial
+blocks, never adjacent frames (Sattler et al. 2018; Sarlin et al. 2022;
+Roberts et al. 2017). Comparative MapDoctor summaries are `DESCRIPTIVE_ONLY`.
+Target-site release requires every S0–S9 gate `PASS` and `release_lineage_bound`
+in `verify_final_release.py`. S9 emits `hard_status` / `evidence_status` but no
+`release_authorized` field.
+
 ## Current S0–S9 wiring and gaps
 
 | Stage | Current repository path | Status | Highest-value gap |
@@ -54,8 +71,22 @@ leakage, geometry validity and release provenance remain hard constraints.
 | S6 | `audit_map_geometry.py` | Implemented | Shared-track ghost/false-merge evidence and repair closure are incomplete. |
 | S7 | `validate_tracking_bundle.py` | Validator implemented | The canonical runner validates a pre-existing bundle; bundle-build receipts are external. |
 | S8 | `validate_edm_bundle.py` | Validator implemented | EDM bundle generation is external and is not atomically receipt-bound to S7/S9. |
-| S9 | `validate_heldout_localization.py` | Validator implemented | It consumes existing result JSON; the runner does not execute and attest the real EDM localizer frame log. |
-| Diagnosis | `diagnosis/src/sfm_qa`, `sfm_diagnosis`, `mapdoctor` | Implemented/partial | Diagnosis and planners existed separately; repair execution and S9 replay remain future work. |
+| S9 | `validate_heldout_localization.py` | Implemented | Results must bind `ts_common.TEST` identities; G9.3 is typed `NOT_APPLICABLE`. The validator still consumes existing result JSON rather than executing the EDM localizer. |
+| Diagnosis | `diagnosis/src/sfm_qa`, `sfm_diagnosis`, `mapdoctor` | Implemented/partial | Additive evidence receipts landed. Repair execution and attested S9 replay remain future work. Comparative `READY` on `UNVERIFIED_PROVIDED_LOG` is not certification. |
+
+
+## Evidence receipts implemented in this change
+
+| Receipt | Code | Implemented fields vs experiment-only |
+| --- | --- | --- |
+| Prebuild stop | `sfm_qa/session_select/prebuild.py::_stopping_evidence` | `stop_reason`, signed `margin`/`keep_floor`, `hard_status`/`evidence_status`. Does not change proposed IDs. Submodular/ILP replacement is experiment-only. |
+| Retrieval vs geometry | `prebuild.py::camera_triplet_scores`, `export.py::PREBUILD_PAIR_COLUMNS` | `evidence_type`, `retrieval_triangle_priority`, `count_field_provenance=num_candidate_pairs`. Manam verified `q_ij` is not computed. |
+| Per-edge fusion | `session_select/admission.py::evaluate_geometry_authority` | One `GeometryAuthority` per edge. Fusion needs `exact_pair`, independent artifact, disjoint fit/holdout, and `independent_bridge_groups>=2`. Role alone cannot grant `GLOBAL_BA`. |
+| Benchmark completeness | `mapdoctor/benchmark.py::summarize_benchmark` | `metric_evidence`, leave-one-criterion rates, `DESCRIPTIVE_ONLY`. Leave-one rates do not change `passes`. |
+| Risk shortfall | `mapdoctor/diagnostics/risk_coverage.py::evaluate_risk_coverage` | Per-target `empirical_status`/`confidence_status`/`bound_shortfall`/`zero_failure_min_independent_units`. `independence_verified=False`. CRC/LTT/nonexchangeable weights are experiment-only. |
+| Changed-region review | `map_update/core/changed_region_evidence.py` | `proposal_status`, review-only `REVIEW_CANDIDATE`, signed margins, suppressed-not-erased rows. No geometry invalidation. Automatic replacement is experiment-only. |
+| Bridge margins | `map_update/core/update_quality_gates.py::bridge_quality_checks` | `{value,threshold,signed_margin,finite,hard_status,evidence_status}`. Non-finite is `HARD_FAIL`. Merge still uses warning strings. |
+| S9 identity/lineage | `sites/target_site/tools/validate_heldout_localization.py`, `verify_final_release.py` | Exact TEST identities, recomputed rate, zero-frame reject, G9.3 `NOT_APPLICABLE`, mandatory S8→S9 hash lineage. G9 numeric defaults unchanged. |
 
 ## Improvements implemented in this change
 
@@ -188,9 +219,25 @@ Every candidate release should report:
 - pose error where ground truth exists, continuity, jump/ghost and relocalization time;
 - strict success by session, weak/stable region, direction and appearance condition;
 - wall time, RAM/VRAM, map size and localization latency;
-- calibrated risk–coverage only on independent groups/certification data.
+- calibrated risk–coverage only on independent groups/certification data, with
+  `INSUFFICIENT_EVIDENCE` versus `QUALITY_SHORTFALL` and signed shortfalls;
+- S9 identity receipt and S8→S9 artifact hashes before any release claim.
 
 Adjacent video frames are not independent certification samples.
+Query-level Clopper–Pearson, Wilson, or CRC intervals are descriptive
+until groups and provenance are attested.
+
+## Deferred experiment-only work
+
+These remain outside the release path. Each needs development-held-out
+calibration and one frozen S9 certification run:
+
+- conformal risk control and nonexchangeable weighting (Angelopoulos et al. 2024; Farinhas et al. 2023; Barber et al. 2023);
+- group-level Learn-Then-Test and nested session calibration (Angelopoulos et al. 2025; Kull et al. 2017; Roberts et al. 2017);
+- alternate reconstruction backends: PixSfM, Detector-Free SfM, MP-SfM, RoMo, LFOE, Light3R-SfM, depth-guided SfM;
+- lifelong posterior/FreMEn/BOCPD calibration and automatic tile replacement (Rosen 2016; Krajník et al. 2017; Adams and MacKay 2007);
+- replacement of the mixed prebuild objective by a monotone submodular or ILP selector (Nemhauser et al. 1978; Gygli et al. 2015).
+
 
 ## Primary sources
 
@@ -216,3 +263,13 @@ Adjacent video frames are not independent certification samples.
 - [Long-Term Visual Map Sparsification](https://openaccess.thecvf.com/content/CVPR2022/html/Chang_Long-Term_Visual_Map_Sparsification_With_Heterogeneous_GNN_CVPR_2022_paper.html)
 - [Benchmarking 6DOF Outdoor Visual Localization in Changing Conditions](https://www.microsoft.com/en-us/research/publication/benchmarking-6dof-outdoor-visual-localization-in-changing-conditions/)
 - [Conformal Risk Control](https://arxiv.org/abs/2208.02814)
+- [LaMAR](https://arxiv.org/abs/2210.10770)
+- [RankIQA](https://arxiv.org/abs/1707.08347)
+- [Selective Classification (Geifman and El-Yaniv, 2017)](https://proceedings.neurips.cc/paper/2017/hash/4a8423d5e91fda00bb7e46540e2b0cf1-Abstract.html)
+- [Clopper and Pearson (1934)](https://doi.org/10.1093/biomet/26.4.404)
+- [Roberts et al., structured cross-validation (2017)](https://doi.org/10.1111/ecog.02881)
+- [Learn then test (2025)](https://doi.org/10.1214/24-AOAS1998)
+- [Non-Exchangeable CRC](https://arxiv.org/abs/2310.01262)
+- [ExMaps](https://openaccess.thecvf.com/content/WACV2021/html/Rotsidis_ExMaps_Long-Term_Localization_in_Dynamic_Scenes_Using_Exponential_Decay_WACV_2021_paper.html)
+- [Bürki et al., map management (2018)](https://arxiv.org/abs/1808.02658)
+- [Berrio et al. (2021)](https://arxiv.org/abs/2008.12449)

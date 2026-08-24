@@ -41,10 +41,21 @@ For each observed metric in the current cohort, the implementation uses a tie-aw
 percentile rank. Missing values remain missing.
 
 ```text
-r_ij = midrank(x_ij) / (n_j - 1)
-Q_i  = Σ(j observed) w_j r_ij / Σ(j observed) w_j
-E_i  = Σ(j observed) w_j / Σ(all j) w_j
+For n_j >= 2:
+  r_ij = (midrank_1(x_ij) - 1) / (n_j - 1)
+  Q_i  = Σ(j observed) w_j r_ij / Σ(j observed) w_j
+  E_i  = Σ(j observed) w_j / Σ(all j) w_j
 ```
+
+`midrank_1` is the one-based average of tied ranks.  The implementation
+in `diagnosis/src/sfm_qa/relative_quality.py::percentile_ranks` is the
+equivalent 0-based form `(index + end - 1) / 2 / (n - 1)`.  A fully
+tied cohort receives `0.5`.  A singleton still receives `1.0`; that is
+implemented behavior, not a paper fact.  RankIQA supports relative
+order only inside comparable distortion or device groups (Liu et al.
+2017).  Neutral singleton rank remains a recommended specification
+correction and was not applied.
+
 
 `Q_i` is relative quality and `E_i` is evidence completeness. An absolute observed score
 is retained as a weak prior so an extremely poor but top-ranked member of a uniformly bad
@@ -58,16 +69,59 @@ For a candidate video `i` and already selected set `S`, the proposal layer uses:
            + wc new_graph_coverage(i,S)
            + wd motion_diversity(i,S)
            + wa exposure_diversity(i,S)
-           + wt triplet_support(i,S)
+           + wt retrieval_triangle_priority(i,S)
            + wm multi_link_support(i,S)
            - wr risk(i)
            - wk frame_cost(i)
            - wn redundancy(i,S)
 ```
 
+`retrieval_triangle_priority` is the default
+`camera_triplet_scores(..., count_field="num_candidate_pairs")` score.
+It is **not** Manam-style verified triplet support.  Manam and Govindu
+(2024) define, for a geometrically verified edge `(i,j)` in triplet
+`t`,
+
+```text
+q_ij^t = n_ij / max_{(k,l) in t} n_kl
+q_ij   = mean of q_ij^t over incident verified triplets
+```
+
+with `n_ij` the epipolar-inlier count.  The repository still exports
+the retrieval-count value as `triplet_score` and a boolean
+`retrieval_triangle_priority`.  Pair `evidence_type` is
+`retrieval_triangle`, `retrieval_candidate`, or `forced_geometry_probe`.
+`requires_geometric_verification` remains true.  These fields may
+reorder probes only (`prebuild.py::propose_prebuild_set`,
+`export.py::PREBUILD_PAIR_COLUMNS`).
+
+The mixed objective has negative risk, cost, and redundancy terms and
+average diversity.  Nemhauser et al. (1978) and Gygli et al. (2015)
+therefore do **not** give a greedy approximation guarantee.  The
+selector is a heuristic.  Replacing it with a monotone submodular
+objective or ILP is a literature transfer requiring development-held-out
+calibration.
+
+
 The selector stops after the marginal score collapses relative to earlier additions, not
 when it crosses a universal quality number. It always reserves a validation candidate
 when the available pool permits it.
+
+`propose_prebuild_set` now emits reporting-only `stopping_evidence`
+(Bürki et al. 2018: slack is feasibility, not success):
+
+| `stop_reason` | `hard_status` | `evidence_status` |
+| --- | --- | --- |
+| `empty_input`, `no_readable_input`, `no_legacy_eligible_input` | `HARD_FAIL` | `INSUFFICIENT_EVIDENCE` |
+| `nonpositive_marginal`, `relative_marginal_collapse` | `VALID` | `QUALITY_SHORTFALL` |
+| `candidates_exhausted`, `budget_reached` | `VALID` | `PASS` |
+
+Optional fields: `next_candidate_id`, `marginal`, `best_previous`,
+`keep_ratio`, `keep_floor`, `margin`.  Authority is
+`reporting_review_only`; `grants_selection_or_merge_authority` is
+false.  Membership, weights, `keep_ratio`, and proposed IDs are
+unchanged.
+
 
 After reconstruction, mapped sessions use:
 
@@ -90,16 +144,19 @@ row cannot silently become map geometry.
 | [Park & Yoon, Optimal key-frame selection for video-based SfM, 2011](https://doi.org/10.1049/el.2011.2674) | Feature lifetime, baseline, redundancy, and degeneracy jointly matter for key-frame selection. | Keep quality, motion, and redundancy as separate terms rather than one blur gate. |
 | [Snavely et al., Skeletal Graphs for Efficient Structure from Motion, CVPR 2008](https://www.cs.cornell.edu/~snavely/projects/skeletalset/) | A small view skeleton can preserve coverage and bounded uncertainty, with remaining images registered later. | Build a bounded session portfolio first; keep nonselected sessions for validation, appearance support, or later registration. |
 | [Shah et al., View-graph Selection Framework for SfM, ECCV 2018](https://openaccess.thecvf.com/content_ECCV_2018/html/Rajvi_Shah_View-graph_Selection_Framework_ECCV_2018_paper.html) | Task-specific image/pair costs can target accuracy, efficiency, coverage, or disambiguation through an approximate network-flow formulation. | Use a multi-term portfolio objective and preserve explicit image/edge evidence. |
-| [Manam & Govindu, Leveraging Camera Triplets for Efficient and Accurate SfM, CVPR 2024](https://openaccess.thecvf.com/content/CVPR2024/html/Manam_Leveraging_Camera_Triplets_for_Efficient_and_Accurate_Structure-from-Motion_CVPR_2024_paper.html) | Edge support relative to the strongest edge in a camera triplet helps remove redundancy and false edges while maintaining reconstruction quality. | Candidate-count triplet scores prioritize probes only; verified image-level triplets remain the stronger later-stage evidence. |
+| [Manam & Govindu, Leveraging Camera Triplets for Efficient and Accurate SfM, CVPR 2024](https://openaccess.thecvf.com/content/CVPR2024/html/Manam_Leveraging_Camera_Triplets_for_Efficient_and_Accurate_Structure-from-Motion_CVPR_2024_paper.html) | For a **geometrically verified** edge, `q_ij^t=n_ij/max_t n_kl` uses epipolar-inlier counts; the paper states one threshold is unsuitable across datasets and sequential low-redundancy sets over-split. | Candidate-count complete triangles emit `retrieval_triangle_priority` and `evidence_type=retrieval_triangle`. They prioritize probes only. Verified image-level triplets remain later-stage evidence. |
 | [Sarlin et al., LaMAR: Benchmarking Localization and Mapping for Augmented Reality, ECCV 2022](https://www.microsoft.com/en-us/research/uploads/prod/2022/10/sarlin2022eccv.pdf) | Long-term, multi-floor mapping/query sequence selection is formulated around cross-sequence coverage, with day/night, viewpoint, device, and time changes. | Reserve whole sessions as queries and assess condition coverage rather than randomly splitting adjacent frames. |
-| [Gygli et al., Video Summarization by Learning Submodular Mixtures of Objectives, CVPR 2015](https://www.cv-foundation.org/openaccess/content_cvpr_2015/html/Gygli_Video_Summarization_by_2015_CVPR_paper.html) | Submodular mixtures can jointly optimize summary objectives such as importance, representativeness, and uniformity under a length budget. | Greedy marginal selection is appropriate for the inexpensive proposal stage; it is not merge authority. |
+| [Gygli et al., Video Summarization by Learning Submodular Mixtures of Objectives, CVPR 2015](https://www.cv-foundation.org/openaccess/content_cvpr_2015/html/Gygli_Video_Summarization_by_2015_CVPR_paper.html) | Submodular mixtures can jointly optimize summary objectives under a budget when components are nonnegative and monotone; learned weights change by dataset/length. | Greedy proposal is appropriate only as a heuristic. The current mixed `ΔJ` is not covered by that guarantee. It is not merge authority. |
+| [Liu, van de Weijer & Bagdanov, RankIQA, ICCV 2017](https://arxiv.org/abs/1707.08347) | Pairwise ranking is valid inside a comparable distortion family; ranking-only output is not an accurate absolute IQA score. | Cohort rank is order evidence among comparable camera/front-end strata, never an absolute good/bad label. Singleton `1.0` is not exceptional quality. |
+| [Nemhauser, Wolsey & Fisher, 1978](https://doi.org/10.1007/BF01588971) | Greedy attains `1-(1-1/K)^K` of optimum only for a normalized nonnegative monotone submodular function under cardinality `K`. | Do not claim that bound for the current mixed `ΔJ`. |
+| [Bürki et al., Map Management for Efficient Long-Term Visual Localization, IEEE IV 2018](https://arxiv.org/abs/1808.02658) | Penalized slack keeps a coverage ILP feasible under a budget; slack is not success. Paper map sizes and centimetre ratios are not portable. | Emit stop reason, next-candidate margin, and keep-floor rather than a silent stop. |
 
 ### 3.2 View graph and intermediate reconstruction
 
 | Primary source | Source result | Transfer used here |
 | --- | --- | --- |
 | [Schönberger & Frahm, Structure-from-Motion Revisited, CVPR 2016](https://openaccess.thecvf.com/content_cvpr_2016/html/Schonberger_Structure-From-Motion_Revisited_CVPR_2016_paper.html) | Registration and triangulation benefit from visible-point count, uniform image-plane distribution, triangulation angle, positive depth, reprojection control, and iterative refinement. | Track distribution, not raw point count alone; rank weak regions using track, angle, coverage, and reprojection evidence. |
-| [Sweeney et al., Optimizing the Viewing Graph for Structure-from-Motion, ICCV 2015](https://openaccess.thecvf.com/content_iccv_2015/html/Sweeney_Optimizing_the_Viewing_ICCV_2015_paper.html) | Triplet point-transfer consistency can identify and improve inaccurate epipolar geometry before global reconstruction. | Cycle residuals are soft edge penalties and investigation priorities; an unverified edge still cannot merge sessions. |
+| [Sweeney et al., Optimizing the Viewing Graph for Structure-from-Motion, ICCV 2015](https://openaccess.thecvf.com/content_iccv_2015/html/Sweeney_Optimizing_the_Viewing_ICCV_2015_paper.html) | View-graph edges are pairwise relative geometries; triplet point-transfer consistency can identify inaccurate epipolar geometry before global reconstruction. | Cycle residuals are soft edge penalties. Fusion authority is per exact-pair edge (`admission.py::evaluate_geometry_authority`); retrieval/learned scores cannot create `GLOBAL_BA`. |
 | [Cui et al., Tracks Selection for Robust, Efficient and Scalable Large-Scale Structure from Motion, 2017](https://doi.org/10.1016/j.patcog.2017.08.002) | Compactness, accuracy, and connectedness can select far fewer tracks while preserving reconstruction quality and scalable bundle adjustment. | Penalize redundant track cost while protecting coverage and graph connectivity. |
 | [Doherty et al., Spectral Measurement Sparsification for Pose-Graph SLAM, IROS 2022](https://arxiv.org/abs/2203.13897) | Algebraic connectivity can guide edge-budget selection while preserving pose-graph estimation quality. | Report Fiedler value, bridges, articulation points, and threshold sensitivity as within-map fragility ranks. |
 | [Zhang & Scaramuzza, Fisher Information Field, 2020](https://arxiv.org/abs/2008.03324) | A sum of visible-landmark Fisher information models pose observability and is useful for planning/localization quality. | Keep FIM rank, log-determinant, condition, and weak direction as relative observability evidence, not a success probability. |
@@ -122,6 +179,25 @@ row cannot silently become map geometry.
 
 ## 4. Post-map relative localization diagnosis
 
+`summarize_benchmark` adds `metric_evidence[metric].{present,failed,fail_rate}`
+(`fail_rate` is `None` when `present=0`) and
+`leave_one_criterion_strict_success_rates`.  Those rates do not change
+`passes`.  The summary is `interpretation=DESCRIPTIVE_ONLY` with
+`independent_units_verified=False`
+(`diagnosis/src/mapdoctor/benchmark.py`).  Weak XYZ cells with `n<2`
+are `INSUFFICIENT_EVIDENCE`; `n>=2` misses are `QUALITY_SHORTFALL`.
+Cells without XYZ are omitted, not labeled healthy.
+
+`evaluate_risk_coverage` emits per-target
+`target_diagnostics` with `empirical_status`, `confidence_status`,
+`hard_status`, `evidence_status`, `bound_shortfall`,
+`zero_failure_min_independent_units`, and
+`independence_verified=False`
+(`diagnosis/src/mapdoctor/diagnostics/risk_coverage.py`).  Clopper–Pearson
+bounds assume independent Bernoulli units.  Adjacent frames violate
+that assumption (Roberts et al. 2017).  CRC and nonexchangeable
+weighting remain experiment-only.
+
 Each query in the provided log receives cohort-relative ranks for:
 
 - PnP inlier count and inlier ratio;
@@ -143,8 +219,10 @@ than requiring every query to pass. When provided localization meets its target 
 advisory map-health heuristic fails, the combined status is
 `READY_WITH_MAP_WARNINGS`; the warning is retained and the downstream outcome is not
 overridden. Structural map integrity remains hard. The diagnostic command labels input
-logs as `UNVERIFIED_PROVIDED_LOG`; S0/S9 hashes or an external manifest must prove they
-are actually untouched held-out data.
+logs as `UNVERIFIED_PROVIDED_LOG` with `heldout_provenance_verified=False`
+(`sfm_qa/pipeline.py::check_localize`). That status is not a certification
+claim. Target-site release uses `validate_heldout_localization.py` identity
+binding plus `verify_final_release.py::release_lineage_checks`.
 
 ## 5. Required validation protocol
 
@@ -164,7 +242,8 @@ are actually untouched held-out data.
    translation/rotation tolerances where ground truth exists, p50/p90 errors, query
    risk–coverage, and performance by illumination/viewpoint/session/spatial group.
 7. Select weights on development data only. Run certification once after selection logic,
-   thresholds, and risk calibration are frozen.
+   thresholds, and risk calibration are frozen. Query-level CP/CRC intervals
+   cannot authorize release without attested independent groups.
 
 ## 6. Evidence versus inference
 
@@ -180,12 +259,15 @@ Supported directly by the cited literature:
 
 Repository-specific engineering inferences:
 
-- use tie-aware percentile ranks as the common normalization;
+- use tie-aware percentile ranks as the common normalization, with the
+  one-based formula `(midrank_1-1)/(n-1)` for `n>=2`;
 - combine absolute score and cohort rank with explicit evidence completeness;
 - keep at least a best-available non-empty geometry-probe set;
-- use relative marginal collapse as the default proposal stop;
+- use relative marginal collapse as the default proposal stop and report
+  the next-candidate shortfall;
 - allow mapped `WEAK` sessions to compete under the joint objective;
 - treat 95% as this project's default aggregate held-out target because the active S9
-  contract already uses that target. It is not a universal number from the papers.
+  contract already uses that target. It is not a universal number from the papers;
+- keep retrieval triangles and verified geometric triplets in separate fields.
 
 No paper score or threshold above is copied into production as a universal constant.

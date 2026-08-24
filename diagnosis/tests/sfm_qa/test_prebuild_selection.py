@@ -259,7 +259,147 @@ def test_zero_relative_marginal_ratio_disables_ratio_stop() -> None:
 
     plan = propose_prebuild_set(sessions, [], cfg)
 
-    assert len(plan["proposed_base_sessions"]) == 4
+    assert plan["proposed_base_sessions"] == ["D", "C", "B", "A"]
+    evidence = plan["stopping_evidence"]
+    assert evidence["stop_reason"] == "candidates_exhausted"
+    assert evidence["stop_reason"] != "relative_marginal_collapse"
+    assert evidence["requires_geometric_verification"] is True
+    assert evidence["hard_status"] == "VALID"
+    assert evidence["evidence_status"] == "PASS"
+    assert "margin" not in evidence
+    assert plan["requires_geometric_verification"] is True
+
+
+def _assert_reporting_stop(evidence: dict) -> None:
+    assert evidence["requires_geometric_verification"] is True
+    assert evidence["hard_status"] in {"VALID", "HARD_FAIL"}
+    assert evidence["evidence_status"] in {
+        "PASS",
+        "WARN",
+        "INSUFFICIENT_EVIDENCE",
+        "QUALITY_SHORTFALL",
+    }
+    assert evidence["authority"] == "reporting_review_only"
+    assert evidence["grants_selection_or_merge_authority"] is False
+    assert evidence["independence_assumptions"]
+    assert evidence["provenance_assumptions"]
+
+
+def test_empty_input_stopping_evidence() -> None:
+    plan = propose_prebuild_set([], [], load_config())
+
+    assert plan["proposed_base_sessions"] == []
+    assert plan["validation_candidates"] == []
+    assert plan["verification_pairs"] == []
+    evidence = plan["stopping_evidence"]
+    assert evidence["stop_reason"] == "empty_input"
+    assert evidence["hard_status"] == "HARD_FAIL"
+    assert evidence["evidence_status"] == "INSUFFICIENT_EVIDENCE"
+    _assert_reporting_stop(evidence)
+    assert plan["requires_geometric_verification"] is True
+
+
+def test_no_readable_input_stopping_evidence() -> None:
+    sessions = [
+        _session("BROKEN", reasons=("unreadable_video",)),
+        _session("GONE", reasons=("missing_video",)),
+    ]
+
+    plan = propose_prebuild_set(sessions, [_candidate("BROKEN", "GONE", 40)], load_config())
+
+    assert plan["proposed_base_sessions"] == []
+    assert plan["rejected"]["BROKEN"] == "unrecoverable_input=unreadable_video"
+    assert plan["rejected"]["GONE"] == "unrecoverable_input=missing_video"
+    evidence = plan["stopping_evidence"]
+    assert evidence["stop_reason"] == "no_readable_input"
+    assert evidence["hard_status"] == "HARD_FAIL"
+    assert evidence["evidence_status"] == "INSUFFICIENT_EVIDENCE"
+    _assert_reporting_stop(evidence)
+    assert plan["requires_geometric_verification"] is True
+
+
+def test_no_legacy_eligible_input_stopping_evidence() -> None:
+    cfg = load_config()
+    cfg["prebuild"]["relative_admission"] = False
+    bad = _session("BAD", internal_status="REJECT", internal_quality_score=0.1)
+
+    plan = propose_prebuild_set([bad], [], cfg)
+
+    assert plan["proposed_base_sessions"] == []
+    assert plan["validation_candidates"] == []
+    assert "BAD" in plan["rejected"]
+    evidence = plan["stopping_evidence"]
+    assert evidence["stop_reason"] == "no_legacy_eligible_input"
+    assert evidence["hard_status"] == "HARD_FAIL"
+    assert evidence["evidence_status"] == "INSUFFICIENT_EVIDENCE"
+    _assert_reporting_stop(evidence)
+    assert plan["requires_geometric_verification"] is True
+
+
+def test_relative_marginal_collapse_records_signed_margin_without_changing_selection() -> None:
+    cfg = load_config()
+    cfg["prebuild"]["validation_candidates"] = 0
+    cfg["prebuild"]["max_sessions"] = 4
+    cfg["prebuild"]["relative_marginal_keep_ratio"] = 0.80
+    anchor = _session("ANCHOR", internal_quality_score=0.95)
+    bridge = _session("BRIDGE", internal_quality_score=0.90)
+    extra_one = _session("EXTRA1", internal_quality_score=0.90)
+    extra_two = _session("EXTRA2", internal_quality_score=0.90)
+    edges = [_candidate("ANCHOR", "BRIDGE", 200)]
+
+    plan = propose_prebuild_set(
+        [anchor, bridge, extra_one, extra_two],
+        edges,
+        cfg,
+    )
+
+    assert plan["proposed_base_sessions"] == ["ANCHOR", "BRIDGE"]
+    assert [step["session_id"] for step in plan["ranked_steps"]] == ["ANCHOR", "BRIDGE"]
+    evidence = plan["stopping_evidence"]
+    assert evidence["stop_reason"] == "relative_marginal_collapse"
+    assert evidence["next_candidate_id"] in {"EXTRA1", "EXTRA2"}
+    assert evidence["keep_ratio"] == pytest.approx(0.80)
+    assert evidence["keep_floor"] == pytest.approx(
+        evidence["best_previous"] * evidence["keep_ratio"]
+    )
+    assert evidence["margin"] == pytest.approx(
+        evidence["marginal"] - evidence["keep_floor"]
+    )
+    assert evidence["margin"] < 0.0
+    assert evidence["hard_status"] == "VALID"
+    assert evidence["evidence_status"] == "QUALITY_SHORTFALL"
+    _assert_reporting_stop(evidence)
+    assert plan["requires_geometric_verification"] is True
+    pair = plan["verification_pairs"][0]
+    assert pair["evidence_type"] == "retrieval_candidate"
+    assert pair["retrieval_triangle_priority"] is False
+    assert pair["count_field_provenance"] == "num_candidate_pairs"
+    assert pair["reason"] == "retrieval_candidate_requires_geometry"
+
+
+def test_complete_triangle_is_the_only_triangle_priority_evidence() -> None:
+    cfg = load_config()
+    cfg["prebuild"]["min_base_sessions"] = 3
+    cfg["prebuild"]["max_sessions"] = 3
+    cfg["prebuild"]["validation_candidates"] = 0
+    sessions = [_session(name) for name in ("A", "B", "C")]
+    edges = [
+        _candidate("A", "B", 80),
+        _candidate("B", "C", 70),
+        _candidate("A", "C", 60),
+    ]
+
+    plan = propose_prebuild_set(sessions, edges, cfg)
+
+    assert set(plan["proposed_base_sessions"]) == {"A", "B", "C"}
+    assert plan["verification_pairs"]
+    for pair in plan["verification_pairs"]:
+        assert pair["evidence_type"] == "retrieval_triangle"
+        assert pair["retrieval_triangle_priority"] is True
+        assert pair["count_field_provenance"] == "num_candidate_pairs"
+        assert pair["reason"] == "retrieval_candidate_requires_geometry"
+        assert pair["requires_geometric_verification"] is True
+
 
 
 def test_objective_normalizes_grid_cell_count_and_ignores_timestamp_as_view_proxy() -> None:

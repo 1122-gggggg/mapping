@@ -56,6 +56,7 @@ class RiskCoverageReport:
     calibration_bins: tuple[CalibrationBin, ...]
     operating_points: dict[str, dict[str, float | int] | None]
     safe_operating_points: dict[str, dict[str, float | int] | None]
+    target_diagnostics: dict[str, dict[str, object]]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -77,6 +78,7 @@ class RiskCoverageReport:
             ],
             "operating_points": self.operating_points,
             "safe_operating_points": self.safe_operating_points,
+            "target_diagnostics": self.target_diagnostics,
             "certification_note": (
                 "Safe operating points use simultaneous one-sided Clopper-Pearson "
                 "bounds with Bonferroni correction over complete score thresholds. "
@@ -254,6 +256,64 @@ def _simultaneous_failure_upper_bound(
     return float(min(1.0, max(0.0, bound)))
 
 
+_REPORTING_AUTHORITY = "reporting"
+_INDEPENDENCE_ASSUMPTION = (
+    "Each query is treated as an independent Bernoulli trial. "
+    "Independence and identical distribution are not verified; "
+    "adjacent video frames and spatially clustered queries may be dependent."
+)
+_PROVENANCE_ASSUMPTION = (
+    "Risk scores, the calibrator, and the strict-failure labels are taken as "
+    "given. This diagnostic does not verify that scores were fixed without "
+    "using these labels."
+)
+
+
+def _zero_failure_min_independent_units(
+    target: float,
+    *,
+    confidence_level: float,
+    hypotheses: int,
+) -> int | None:
+    if not math.isfinite(target) or target <= 0.0:
+        return None
+    if target >= 1.0:
+        return 1
+    family_alpha = 1.0 - confidence_level
+    pointwise_alpha = family_alpha / max(hypotheses, 1)
+    if not 0.0 < pointwise_alpha < 1.0:
+        return None
+    raw = math.log(pointwise_alpha) / math.log(1.0 - target)
+    if not math.isfinite(raw) or raw <= 0.0:
+        return None
+    minimum = max(1, math.ceil(raw - 1e-15))
+    while (
+        _simultaneous_failure_upper_bound(
+            0,
+            minimum,
+            confidence_level=confidence_level,
+            hypotheses=hypotheses,
+        )
+        > target
+    ):
+        minimum += 1
+    return minimum
+
+
+def _target_evidence_status(
+    empirical_status: str,
+    confidence_status: str,
+) -> str:
+    if empirical_status == "NO_RESOLVABLE_SELECTIVITY":
+        return "INSUFFICIENT_EVIDENCE"
+    if confidence_status == "NO_EMPIRICAL_FEASIBLE_POINT":
+        return "QUALITY_SHORTFALL"
+    if confidence_status == "INSUFFICIENT_EVIDENCE":
+        return "INSUFFICIENT_EVIDENCE"
+    return "WARN"
+
+
+
 def evaluate_risk_coverage(
     results: Sequence[QueryLocalizationResult],
     risks: Mapping[str, float],
@@ -353,6 +413,10 @@ def evaluate_risk_coverage(
 
     operating_points: dict[str, dict[str, float | int] | None] = {}
     safe_operating_points: dict[str, dict[str, float | int] | None] = {}
+    target_diagnostics: dict[str, dict[str, object]] = {}
+    complete = [point for point in points if not point.randomized_within_tie]
+    largest_tie = max(point.tie_group_size for point in complete)
+    accept_all = complete[-1]
     for raw_target in target_failure_rates:
         if isinstance(raw_target, bool):
             raise ValueError("target failure rates must be finite and in [0, 1]")
@@ -364,9 +428,6 @@ def evaluate_risk_coverage(
             ) from exc
         if not math.isfinite(target) or not 0.0 <= target <= 1.0:
             raise ValueError("target failure rates must be finite and in [0, 1]")
-        complete = [
-            point for point in points if not point.randomized_within_tie
-        ]
         eligible = [
             point for point in complete if point.selective_risk <= target
         ]
@@ -407,6 +468,84 @@ def evaluate_risk_coverage(
             else None
         )
 
+        confidence_candidate = min(
+            complete,
+            key=lambda point: (
+                (
+                    point.simultaneous_failure_upper_bound
+                    if point.simultaneous_failure_upper_bound is not None
+                    else 2.0
+                ),
+                -point.coverage,
+            ),
+        )
+        candidate_bound = confidence_candidate.simultaneous_failure_upper_bound
+        bound_shortfall = (
+            None
+            if candidate_bound is None
+            else max(0.0, float(candidate_bound) - target)
+        )
+        accept_all_bound = accept_all.simultaneous_failure_upper_bound
+        accept_all_shortfall = (
+            None
+            if accept_all_bound is None
+            else max(0.0, float(accept_all_bound) - target)
+        )
+        if complete_thresholds < 2:
+            empirical_status = "NO_RESOLVABLE_SELECTIVITY"
+        elif best is not None:
+            empirical_status = "OPERATING_POINT_AVAILABLE"
+        else:
+            empirical_status = "NO_EMPIRICAL_FEASIBLE_POINT"
+        if best is None:
+            confidence_status = "NO_EMPIRICAL_FEASIBLE_POINT"
+        elif safe_best is not None:
+            confidence_status = "BOUND_AVAILABLE_ASSUMPTIONS_UNVERIFIED"
+        else:
+            confidence_status = "INSUFFICIENT_EVIDENCE"
+        key = f"{target:.6g}"
+        target_diagnostics[key] = {
+            "target": target,
+            "empirical_status": empirical_status,
+            "confidence_status": confidence_status,
+            "complete_thresholds": complete_thresholds,
+            "largest_tie": largest_tie,
+            "queries_as_independent_units": len(results),
+            "independence_verified": False,
+            "best_empirical_point": operating_points[key],
+            "best_confidence_candidate": {
+                "accepted": confidence_candidate.accepted,
+                "coverage": confidence_candidate.coverage,
+                "observed_selective_risk": confidence_candidate.selective_risk,
+                "failure_rate_upper_bound": candidate_bound,
+                "threshold": confidence_candidate.threshold,
+            },
+            "bound_shortfall": bound_shortfall,
+            "zero_failure_min_independent_units": (
+                _zero_failure_min_independent_units(
+                    target,
+                    confidence_level=confidence_level,
+                    hypotheses=complete_thresholds,
+                )
+            ),
+            "accept_all_baseline": {
+                "accepted": accept_all.accepted,
+                "coverage": accept_all.coverage,
+                "observed_selective_risk": accept_all.selective_risk,
+                "failure_rate_upper_bound": accept_all_bound,
+                "bound_shortfall": accept_all_shortfall,
+                "threshold": accept_all.threshold,
+            },
+            "authority": _REPORTING_AUTHORITY,
+            "independence_assumption": _INDEPENDENCE_ASSUMPTION,
+            "provenance_assumption": _PROVENANCE_ASSUMPTION,
+            "hard_status": "VALID",
+            "evidence_status": _target_evidence_status(
+                empirical_status,
+                confidence_status,
+            ),
+        }
+
     return RiskCoverageReport(
         queries=len(results),
         strict_failures=sum(failure_labels),
@@ -425,4 +564,5 @@ def evaluate_risk_coverage(
         calibration_bins=calibration_bins,
         operating_points=operating_points,
         safe_operating_points=safe_operating_points,
+        target_diagnostics=target_diagnostics,
     )

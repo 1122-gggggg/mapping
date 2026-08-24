@@ -425,6 +425,33 @@ def main(argv: list[str] | None = None) -> int:
             f"Safe bounds: {report.confidence_level:.1%} "
             "simultaneous confidence"
         )
+        for diagnostic in report.target_diagnostics.values():
+            shortfall = diagnostic["bound_shortfall"]
+            shortfall_text = (
+                "n/a" if shortfall is None else f"{shortfall:.6f}"
+            )
+            print(
+                f"Target {diagnostic['target']}: "
+                f"empirical={diagnostic['empirical_status']}; "
+                f"confidence={diagnostic['confidence_status']}; "
+                f"bound_shortfall={shortfall_text}"
+            )
+            baseline_shortfall = diagnostic["accept_all_baseline"][
+                "bound_shortfall"
+            ]
+            baseline_text = (
+                "n/a"
+                if baseline_shortfall is None
+                else f"{baseline_shortfall:.6f}"
+            )
+            print(
+                f"  accept-all baseline shortfall={baseline_text} "
+                "(not the selective result)"
+            )
+        print(
+            "Independence of query units is unverified; "
+            "Clopper-Pearson bounds are reporting-only."
+        )
         print(f"JSON: {path}")
         return 0
     if args.command == "calibrate-risk":

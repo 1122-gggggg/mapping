@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -124,9 +125,29 @@ class BenchmarkSummary:
     reprojection_p90_across_queries_px: float | None
     failures: list[dict[str, Any]]
     weak_regions: list[dict[str, Any]]
+    failure_reason_counts: dict[str, int] = field(default_factory=dict)
+    metric_evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
+    leave_one_criterion_strict_success_rates: dict[str, float] = field(default_factory=dict)
+    interpretation: str = "DESCRIPTIVE_ONLY"
+    independent_units_verified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+_QUALITY_CRITERIA: tuple[tuple[str, str], ...] = (
+    ("inliers", "low_inliers"),
+    ("inlier_ratio", "low_inlier_ratio"),
+    ("reproj_p90_px", "high_reprojection_error"),
+    ("hull_coverage", "low_inlier_hull_coverage"),
+    ("grid4_occupancy", "low_grid_occupancy"),
+    ("positive_depth_ratio", "low_positive_depth_ratio"),
+    ("pose_consensus", "low_pose_consensus"),
+)
+
+
+def _criterion_reasons(metric: str, quality_reason: str) -> frozenset[str]:
+    return frozenset({quality_reason, f"missing_{metric}"})
 
 
 def _percentile(values: list[float], q: float) -> float | None:
@@ -276,12 +297,37 @@ def summarize_benchmark(
         raise ValueError("Localization benchmark contains no queries")
     if not math.isfinite(cell_size) or cell_size <= 0:
         raise ValueError("region cell size must be finite and > 0")
-    strict = [result.passes(thresholds) for result in results]
+    reasons_by_result = [result.failures(thresholds) for result in results]
+    strict = [not reasons for reasons in reasons_by_result]
     failures = [
-        {"query": result.query, "reasons": result.failures(thresholds), **result.to_dict()}
-        for result in results
-        if not result.passes(thresholds)
+        {"query": result.query, "reasons": reasons, **result.to_dict()}
+        for result, reasons in zip(results, reasons_by_result)
+        if reasons
     ]
+    reason_counts: Counter[str] = Counter()
+    for reasons in reasons_by_result:
+        reason_counts.update(reasons)
+    metric_evidence: dict[str, dict[str, Any]] = {}
+    leave_one_criterion_strict_success_rates: dict[str, float] = {}
+    n_queries = len(results)
+    for metric, quality_reason in _QUALITY_CRITERIA:
+        present = 0
+        failed = 0
+        dropped = _criterion_reasons(metric, quality_reason)
+        ablated_passes = 0
+        for result, reasons in zip(results, reasons_by_result):
+            if getattr(result, metric) is not None:
+                present += 1
+                if quality_reason in reasons:
+                    failed += 1
+            if not any(reason not in dropped for reason in reasons):
+                ablated_passes += 1
+        metric_evidence[metric] = {
+            "present": present,
+            "failed": failed,
+            "fail_rate": None if present == 0 else failed / present,
+        }
+        leave_one_criterion_strict_success_rates[metric] = ablated_passes / n_queries
     cells: dict[tuple[int, int, int], list[QueryLocalizationResult]] = {}
     for result in results:
         if result.x is not None and result.y is not None and result.z is not None:
@@ -295,23 +341,34 @@ def summarize_benchmark(
     for key, members in cells.items():
         rate = sum(result.passes(thresholds) for result in members) / len(members)
         if rate < 1.0:
+            query_count = len(members)
             weak_regions.append(
                 {
                     "cell": list(key),
-                    "queries": len(members),
+                    "queries": query_count,
                     "strict_success_rate": rate,
                     "failed_queries": [result.query for result in members if not result.passes(thresholds)],
+                    "evidence_status": (
+                        "INSUFFICIENT_EVIDENCE" if query_count < 2 else "QUALITY_SHORTFALL"
+                    ),
+                    "authority": "DESCRIPTIVE_ONLY",
+                    "shortfall_amount": 1.0 - rate,
                 }
             )
     inliers = [float(result.inliers) for result in results if result.inliers is not None]
     reprojection = [result.reproj_p90_px for result in results if result.reproj_p90_px is not None]
     return BenchmarkSummary(
-        total_queries=len(results),
-        raw_success_rate=sum(result.success for result in results) / len(results),
-        strict_success_rate=sum(strict) / len(results),
+        total_queries=n_queries,
+        raw_success_rate=sum(result.success for result in results) / n_queries,
+        strict_success_rate=sum(strict) / n_queries,
         median_inliers=_percentile(inliers, 0.5),
         p10_inliers=_percentile(inliers, 0.1),
         reprojection_p90_across_queries_px=_percentile(reprojection, 0.9),
         failures=failures,
         weak_regions=sorted(weak_regions, key=lambda item: item["strict_success_rate"]),
+        failure_reason_counts=dict(sorted(reason_counts.items())),
+        metric_evidence=metric_evidence,
+        leave_one_criterion_strict_success_rates=leave_one_criterion_strict_success_rates,
+        interpretation="DESCRIPTIVE_ONLY",
+        independent_units_verified=False,
     )

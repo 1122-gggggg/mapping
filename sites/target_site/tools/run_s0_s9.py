@@ -260,6 +260,11 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
             "needs": {
                 "--result": args.result,
                 "--forced-manifest": forced_json,
+                "--corpus-manifest": corpus_manifest,
+                "--edm-bundle": edm,
+                "--tracking-bundle": tracking,
+                **({} if args.package_bundle is None else {"--package-bundle": args.package_bundle}),
+                **({} if args.package_config is None else {"--package-config": args.package_config}),
             },
             "cmd": [
                 python,
@@ -267,6 +272,14 @@ def plan_stages(args: argparse.Namespace) -> list[dict]:
                 *[item for path in (args.result or []) for item in ("--result", path)],
                 "--forced-manifest",
                 forced_json,
+                "--corpus-manifest",
+                corpus_manifest,
+                "--edm-bundle",
+                edm,
+                "--tracking-bundle",
+                tracking,
+                *([] if args.package_bundle is None else ["--package-bundle", args.package_bundle]),
+                *([] if args.package_config is None else ["--package-config", args.package_config]),
                 "--out",
                 gates / "S9_heldout_localization.json",
             ],
@@ -302,6 +315,8 @@ def main() -> None:
     parser.add_argument("--edm-bundle", type=Path)
     parser.add_argument("--baseline-bundle", type=Path)
     parser.add_argument("--result", type=Path, action="append")
+    parser.add_argument("--package-bundle", type=Path)
+    parser.add_argument("--package-config", type=Path)
     parser.add_argument("--start-from", default="S0")
     args = parser.parse_args()
 

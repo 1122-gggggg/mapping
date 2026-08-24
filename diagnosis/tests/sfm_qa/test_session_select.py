@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -23,6 +25,12 @@ from sfm_qa.session_select import (
 )
 from sfm_qa.session_select import SessionEdgeQuality, SessionQuality
 from sfm_qa.session_select.select_core import connecting_edges
+from sfm_qa.session_select.export import (
+    SESSION_ROLE_COLUMNS,
+    build_role_rows,
+    write_session_roles_csv,
+)
+
 
 
 ALLOWED_ROLES = frozenset(
@@ -778,3 +786,214 @@ def test_sparse_edges_both_directions_preserve_order_and_roles():
     selected_ids = set(_as_id_list(picked.get("selected")))
     assert picked["seed"] == "CORE"
     assert selected_ids.isdisjoint({"NOISE", "ISOLATED", "BLOCKED"})
+
+
+def test_build_role_rows_role_only_base_is_not_global_ba():
+    rows = build_role_rows(
+        [_make_session(session_id="CORE")],
+        [],
+        {"CORE": "BASE_CORE"},
+        {},
+    )
+    assert len(rows) == 1
+    assert rows[0]["role"] == "BASE_CORE"
+    assert rows[0]["fusion_authorization"] == "GLOBAL_BA_PENDING_APPROVAL"
+    assert rows[0]["authorized_edge"] == ""
+    assert rows[0]["geometry_authority"] == []
+    support = build_role_rows(
+        [_make_session(session_id="SUP")],
+        [],
+        {"SUP": "BASE_SUPPORT"},
+        {},
+    )
+    assert support[0]["fusion_authorization"] == "LOCAL_RELATION_ONLY"
+
+
+def test_build_role_rows_split_evidence_does_not_compose_authority():
+    sessions = [
+        _make_session(session_id="CORE"),
+        _make_session(session_id="B"),
+        _make_session(session_id="C"),
+    ]
+    edges = [
+        _make_edge(
+            session_a="CORE",
+            session_b="B",
+            independent_bridge_groups=2,
+            independent_artifact=True,
+            evidence_scope="exact_pair",
+            geometry_complete=False,
+            group_holdout_disjoint=True,
+            fit_evidence_ids=("f1", "f2"),
+            holdout_evidence_ids=("h1", "h2"),
+            status="WEAK",
+        ),
+        _make_edge(
+            session_a="CORE",
+            session_b="C",
+            independent_bridge_groups=0,
+            independent_artifact=True,
+            evidence_scope="exact_pair",
+            geometry_complete=True,
+            group_holdout_disjoint=False,
+            fit_evidence_ids=("f3",),
+            holdout_evidence_ids=(),
+            status="WEAK",
+        ),
+    ]
+    rows = build_role_rows(
+        sessions,
+        edges,
+        {
+            "CORE": "BASE_CORE",
+            "B": "GEOMETRY_REINFORCEMENT",
+            "C": "GEOMETRY_REINFORCEMENT",
+        },
+        {},
+    )
+    by_id = {row["session_id"]: row for row in rows}
+    assert by_id["CORE"]["fusion_authorization"] == "GLOBAL_BA_PENDING_APPROVAL"
+    assert by_id["B"]["fusion_authorization"] == "LOCAL_RELATION_ONLY"
+    assert by_id["C"]["fusion_authorization"] == "LOCAL_RELATION_ONLY"
+    assert by_id["CORE"]["authorized_edge"] == ""
+    assert all(not item["authorized"] for item in by_id["CORE"]["geometry_authority"])
+    assert by_id["CORE"]["num_independent_bridge_groups"] == 2
+
+
+def test_build_role_rows_authorized_edge_grants_global_ba():
+    edge = _make_edge(
+        session_a="CORE",
+        session_b="SUP",
+        independent_artifact=True,
+        evidence_scope="exact_pair",
+        geometry_complete=True,
+        group_holdout_disjoint=True,
+        independent_bridge_groups=2,
+        fit_evidence_ids=("f1", "f2"),
+        holdout_evidence_ids=("h1", "h2"),
+        status="STRONG",
+    )
+    rows = build_role_rows(
+        [_make_session(session_id="CORE"), _make_session(session_id="SUP")],
+        [edge],
+        {"CORE": "BASE_CORE", "SUP": "BASE_SUPPORT"},
+        {},
+    )
+    by_id = {row["session_id"]: row for row in rows}
+    assert by_id["CORE"]["fusion_authorization"] == "GLOBAL_BA"
+    assert by_id["SUP"]["fusion_authorization"] == "GLOBAL_BA"
+    assert by_id["CORE"]["authorized_edge"] == "CORE-SUP"
+    assert any(item["authorized"] for item in by_id["CORE"]["geometry_authority"])
+    assert any(item["hard_status"] == "VALID" for item in by_id["CORE"]["geometry_authority"])
+    reinforce = build_role_rows(
+        [_make_session(session_id="SIDE")],
+        [
+            _make_edge(
+                session_a="SIDE",
+                session_b="CORE",
+                independent_artifact=True,
+                evidence_scope="exact_pair",
+                geometry_complete=True,
+                group_holdout_disjoint=True,
+                independent_bridge_groups=2,
+                fit_evidence_ids=("f1", "f2"),
+                holdout_evidence_ids=("h1", "h2"),
+                status="STRONG",
+            )
+        ],
+        {"SIDE": "GEOMETRY_REINFORCEMENT"},
+        {},
+    )
+    assert reinforce[0]["fusion_authorization"] == "LOCAL_FUSION"
+
+
+def test_build_role_rows_preserves_non_base_fusion_without_authorized_edge():
+    rows = build_role_rows(
+        [
+            _make_session(session_id="U"),
+            _make_session(session_id="A"),
+            _make_session(session_id="N"),
+            _make_session(session_id="V"),
+        ],
+        [],
+        {
+            "U": "UPDATE_CANDIDATE",
+            "A": "APPEARANCE_REF",
+            "N": "NEW_SUBMAP",
+            "V": "VALIDATION_ONLY",
+        },
+        {},
+    )
+    by_id = {row["session_id"]: row for row in rows}
+    assert by_id["U"]["fusion_authorization"] == "LOCAL_FUSION_PENDING_LOO"
+    assert by_id["A"]["fusion_authorization"] == "LOCALIZATION_ONLY"
+    assert by_id["N"]["fusion_authorization"] == "SUBMAP_ONLY"
+    assert by_id["V"]["fusion_authorization"] == "EVALUATION_ONLY"
+
+
+def test_write_session_roles_csv_persists_geometry_authority_receipt(tmp_path: Path):
+    edge = _make_edge(
+        session_a="CORE",
+        session_b="SUP",
+        independent_artifact=True,
+        evidence_scope="exact_pair",
+        geometry_complete=True,
+        group_holdout_disjoint=True,
+        independent_bridge_groups=2,
+        fit_evidence_ids=("f1", "f2"),
+        holdout_evidence_ids=("h1", "h2"),
+        status="STRONG",
+    )
+    rows = build_role_rows(
+        [_make_session(session_id="CORE"), _make_session(session_id="SUP")],
+        [edge],
+        {"CORE": "BASE_CORE", "SUP": "BASE_SUPPORT"},
+        {},
+    )
+    path = tmp_path / "session_roles.csv"
+    write_session_roles_csv(path, rows)
+    with path.open(encoding="utf-8", newline="") as handle:
+        written = list(csv.DictReader(handle))
+    assert written
+    assert list(written[0].keys()) == SESSION_ROLE_COLUMNS
+    assert "fusion_authorization" in written[0]
+    assert "reason" in written[0]
+    by_id = {row["session_id"]: row for row in written}
+    for sid, expected in (("CORE", "GLOBAL_BA"), ("SUP", "GLOBAL_BA")):
+        row = by_id[sid]
+        assert row["fusion_authorization"] == expected
+        assert row["authorized_edge"] == "CORE-SUP"
+        receipts = json.loads(row["geometry_authority"])
+        assert isinstance(receipts, list)
+        assert any(item["authorized"] is True for item in receipts)
+        grant = next(item for item in receipts if item["authorized"] is True)
+        assert grant["session_a"] == "CORE"
+        assert grant["session_b"] == "SUP"
+        assert grant["hard_status"] == "VALID"
+    reinforce_rows = build_role_rows(
+        [_make_session(session_id="SIDE")],
+        [
+            _make_edge(
+                session_a="SIDE",
+                session_b="CORE",
+                independent_artifact=True,
+                evidence_scope="exact_pair",
+                geometry_complete=True,
+                group_holdout_disjoint=True,
+                independent_bridge_groups=2,
+                fit_evidence_ids=("f1", "f2"),
+                holdout_evidence_ids=("h1", "h2"),
+                status="STRONG",
+            )
+        ],
+        {"SIDE": "GEOMETRY_REINFORCEMENT"},
+        {},
+    )
+    reinforce_path = tmp_path / "reinforce_roles.csv"
+    write_session_roles_csv(reinforce_path, reinforce_rows)
+    with reinforce_path.open(encoding="utf-8", newline="") as handle:
+        reinforce = list(csv.DictReader(handle))
+    assert reinforce[0]["fusion_authorization"] == "LOCAL_FUSION"
+    assert reinforce[0]["authorized_edge"] == "SIDE-CORE"
+    local = json.loads(reinforce[0]["geometry_authority"])
+    assert any(item["authorized"] is True for item in local)

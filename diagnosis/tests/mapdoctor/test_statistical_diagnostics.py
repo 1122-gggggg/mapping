@@ -193,3 +193,51 @@ def test_region_assignments_fail_on_unknown_query():
             LocalizationThresholds(),
             assignments={"q1": "route-a", "typo": "route-a"},
         )
+
+
+def test_one_tie_target_diagnostics_are_not_accept_all_selective_result():
+    results = [
+        query("s1", passes=True),
+        query("s2", passes=True),
+        query("f1", passes=False),
+        query("f2", passes=False),
+    ]
+    report = evaluate_risk_coverage(
+        results,
+        {result.query: 0.5 for result in results},
+        LocalizationThresholds(),
+        target_failure_rates=(0.25,),
+    )
+    assert report.operating_points["0.25"] is None
+    diagnostic = report.target_diagnostics["0.25"]
+    assert diagnostic["empirical_status"] == "NO_RESOLVABLE_SELECTIVITY"
+    assert diagnostic["confidence_status"] == "NO_EMPIRICAL_FEASIBLE_POINT"
+    assert diagnostic["best_empirical_point"] is None
+    assert diagnostic["accept_all_baseline"]["accepted"] == 4
+    assert diagnostic["accept_all_baseline"]["bound_shortfall"] == diagnostic[
+        "bound_shortfall"
+    ]
+    assert diagnostic["independence_verified"] is False
+
+
+def test_distinct_scores_without_feasible_point_are_empirical_infeasible():
+    results = [
+        query("f1", passes=False),
+        query("f2", passes=False),
+        query("s1", passes=True),
+        query("s2", passes=True),
+    ]
+    report = evaluate_risk_coverage(
+        results,
+        {"f1": 0.1, "f2": 0.2, "s1": 0.8, "s2": 0.9},
+        LocalizationThresholds(),
+        target_failure_rates=(0.25,),
+    )
+    assert report.operating_points["0.25"] is None
+    diagnostic = report.target_diagnostics["0.25"]
+    assert diagnostic["empirical_status"] == "NO_EMPIRICAL_FEASIBLE_POINT"
+    assert diagnostic["confidence_status"] == "NO_EMPIRICAL_FEASIBLE_POINT"
+    assert diagnostic["complete_thresholds"] == 4
+    assert diagnostic["largest_tie"] == 1
+    assert diagnostic["best_empirical_point"] is None
+    assert diagnostic["accept_all_baseline"]["observed_selective_risk"] > 0.25

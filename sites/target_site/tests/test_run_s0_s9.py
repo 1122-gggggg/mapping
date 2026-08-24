@@ -29,6 +29,8 @@ def _args(tmp_path: Path, **overrides) -> Namespace:
         edm_bundle=None,
         baseline_bundle=None,
         result=None,
+        package_bundle=None,
+        package_config=None,
         start_from="S0",
     )
     values.update(overrides)
@@ -76,3 +78,43 @@ def test_gate_passed_requires_status_pass(tmp_path: Path) -> None:
     assert gate_passed(missing)[0] is False
     missing.write_text('{"status": "PASS"}', encoding="utf-8")
     assert gate_passed(missing)[0] is True
+
+
+def test_s9_canonical_command_wires_lineage_inputs(tmp_path: Path) -> None:
+    run_dir = tmp_path / "target_site_v1"
+    run_dir.mkdir()
+    (run_dir / "forced_bridges.json").write_text("{}", encoding="utf-8")
+    (run_dir / "corpus_manifest.json").write_text("{}", encoding="utf-8")
+    edm_dir = run_dir / "edm"
+    edm_dir.mkdir()
+    tracking = edm_dir / "target_site_v1_seed_tracking.pt"
+    edm = edm_dir / "target_site_v1_reloc_map_edm.pt"
+    tracking.write_bytes(b"tracking")
+    edm.write_bytes(b"edm")
+    result_a = tmp_path / "t01.json"
+    result_b = tmp_path / "t02.json"
+    result_a.write_text("{}", encoding="utf-8")
+    result_b.write_text("{}", encoding="utf-8")
+
+    spec = next(
+        item
+        for item in plan_stages(_args(tmp_path, result=[result_a, result_b]))
+        if item["stage"] == "S9"
+    )
+    cmd = resolve_stage_command(spec)
+    assert "--corpus-manifest" in cmd
+    assert "--edm-bundle" in cmd
+    assert "--tracking-bundle" in cmd
+    assert "--package-bundle" not in cmd
+    assert "--package-config" not in cmd
+    assert str((run_dir / "corpus_manifest.json").resolve()) in cmd
+    assert str(edm.resolve()) in cmd
+    assert str(tracking.resolve()) in cmd
+    assert str(result_a) in cmd
+    assert str(result_b) in cmd
+
+    missing = next(
+        item for item in plan_stages(_args(tmp_path)) if item["stage"] == "S9"
+    )
+    with pytest.raises(SystemExit, match="S9"):
+        resolve_stage_command(missing)
