@@ -33,6 +33,7 @@ sfm-qa = "sfm_qa.cli:main"
 mapdoctor = "mapdoctor.cli:main"
 sfm-diagnosis = "sfm_diagnosis.cli:main"
 update-map = "update_map.cli:app"
+sfm-graph-harden = "sfm_qa.session_select.paper_graph_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/1122-gggggg/mapping"

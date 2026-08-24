@@ -24,6 +24,15 @@ from .objective import (
     efficiency_coverage,
     efficiency_info,
 )
+from .paper_graph import (
+    edge_reliability,
+    harden_session_graph,
+    load_edge_rows,
+    merge_probe_metrics,
+    paper_graph_config,
+    planar_consistency,
+    write_hardening_outputs,
+)
 from .prebuild import (
     camera_triplet_scores,
     motion_profile_distance,
@@ -77,4 +86,11 @@ __all__ = [
     "propose_prebuild_set",
     "video_admission_score",
     "video_risk",
+    "edge_reliability",
+    "harden_session_graph",
+    "load_edge_rows",
+    "merge_probe_metrics",
+    "paper_graph_config",
+    "planar_consistency",
+    "write_hardening_outputs",
 ]

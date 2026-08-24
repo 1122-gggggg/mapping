@@ -100,6 +100,63 @@ edge:
   require_exact_pair_scope: true         # fail-closed invariant
   require_group_disjoint_holdout: true   # fail-closed invariant
   require_complete_geometry: true        # fail-closed invariant
+
+# S3.5: run only after exact-pair geometry has been produced. This block adapts
+# G-MASt3R-SfM graph view pruning / staged optimization and Planar-SfM
+# homography graph embedding. It never turns a VPR candidate into geometry and
+# never upgrades an existing edge status.
+paper_graph:
+  enabled: true
+  seed: 17
+  geometric_statuses: [STRONG, USABLE]
+  require_exact_pair: true
+  require_independent_artifact: true
+  require_complete_geometry: true
+  require_group_disjoint_holdout: true
+  reliability:
+    support_reference: 200.0
+    rotation_scale_deg: 5.0
+    translation_scale_deg: 15.0
+    scale_consensus_scale: 0.15
+    reprojection_scale_px: 5.0
+    parallax_scale_deg: 1.0
+    weights:
+      declared_quality: 0.15
+      verified_support: 0.15
+      inlier_ratio: 0.15
+      geometry: 0.35
+      planar_consistency: 0.20
+  planar:
+    rotation_agreement_scale_deg: 5.0
+    normal_angle_scale_deg: 15.0
+    minimum_observed_terms: 2
+    validated_score: 0.65
+    maximum_hypotheses_per_pair: 8
+  community:
+    resolution: 1.0
+    layout_iterations: 200
+    separation_threshold: 1.5
+    maximum_outlier_fraction: 0.25
+    maximum_outlier_sessions: 2
+    maximum_external_weight_ratio: 0.20
+    minimum_keep_reliability: 0.55
+    minimum_new_submap_reliability: 0.65
+    minimum_new_submap_sessions: 2
+  embedding:
+    dense_eigendecomposition_limit: 512
+    exact_minimum_range_edge_limit: 600
+    prune_margin: 1.5
+    relative_feature_anomaly_threshold: 3.5
+    low_reliability_ratio: 0.85
+    maximum_cycle_augmentations: 64
+  optimization:
+    recent_error_window: 5
+    minimum_relative_improvement: 0.0001
+    local_max_iterations: 50
+    neighbor_max_iterations: 30
+    global_max_iterations: 100
+    rollback_on_error_increase: true
+
 image_qa:
   sharpness_sample_limit: 32             # heuristic
   underexposure_mean: 20.0               # heuristic 8-bit mean
