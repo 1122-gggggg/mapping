@@ -24,6 +24,20 @@ def _edges(rows: Iterable[SessionEdgeQuality]) -> list[SessionEdgeQuality]:
     return list(rows)
 
 
+def _incident_edge_index(
+    edges: Sequence[SessionEdgeQuality],
+) -> dict[str, list[SessionEdgeQuality]]:
+    """Undirected endpoint → incident edges, each list in original edge order."""
+
+    index: dict[str, list[SessionEdgeQuality]] = {}
+    for edge in edges:
+        index.setdefault(edge.session_a, []).append(edge)
+        if edge.session_b != edge.session_a:
+            index.setdefault(edge.session_b, []).append(edge)
+    return index
+
+
+
 def _has_map_evidence(row: SessionQuality) -> bool:
     """Video-only WEAK rows are proposals; mapped WEAK rows can be ranked."""
 
@@ -68,9 +82,11 @@ def connecting_edges(
     session_id: str,
     selected: set[str],
     edges: Sequence[SessionEdgeQuality],
+    index: Mapping[str, Sequence[SessionEdgeQuality]] | None = None,
 ) -> list[SessionEdgeQuality]:
+    candidates = edges if index is None else index.get(session_id, ())
     found: list[SessionEdgeQuality] = []
-    for edge in edges:
+    for edge in candidates:
         ends = {edge.session_a, edge.session_b}
         if session_id in ends and (ends - {session_id}) & selected:
             found.append(edge)
@@ -116,12 +132,14 @@ def connection_is_admissible(
     session_id: str,
     selected: set[str],
     edges: Sequence[SessionEdgeQuality],
+    index: Mapping[str, Sequence[SessionEdgeQuality]] | None = None,
 ) -> tuple[bool, str]:
     """Fail-closed: no REJECT / AMBIGUOUS / single-critical-bridge merge into the core."""
 
     if not selected:
         return True, "empty_core"
-    links = connecting_edges(session_id, selected, edges)
+    links = connecting_edges(session_id, selected, edges, index)
+
     if not links:
         return False, "no_connection_to_core"
     blocked = [edge for edge in links if edge.status in _BLOCKED_EDGE]
@@ -240,6 +258,7 @@ def _close_cycles(
     qualities: Mapping[str, SessionQuality],
     edges: Sequence[SessionEdgeQuality],
     config: Mapping[str, Any],
+    index: Mapping[str, Sequence[SessionEdgeQuality]] | None = None,
 ) -> list[str]:
     """If the selected graph is a tree, add one USABLE closer that does not explode tracks."""
 
@@ -259,10 +278,12 @@ def _close_cycles(
     if tree_like >= n:
         return selected
     closer_ids: list[str] = []
+    selected_set = set(selected)
     for row in leftover:
         if not _session_is_selectable(row):
             continue
-        links = connecting_edges(row.session_id, set(selected), edges)
+        links = connecting_edges(row.session_id, selected_set, edges, index)
+
         usable = [
             edge
             for edge in links
@@ -289,6 +310,8 @@ def greedy_select_core(
     cfg = dict(config or {})
     quality_by_id = _qualities(qualities)
     edge_rows = _edges(edges)
+    edge_index = _incident_edge_index(edge_rows)
+
     weights = lookup(cfg, "selection.weights")
     blocked = set(exclude)
 
@@ -340,7 +363,8 @@ def greedy_select_core(
                 continue
             if not _budget_ok(selected_set, row, quality_by_id, cfg):
                 continue
-            ok, why = connection_is_admissible(sid, selected_set, edge_rows)
+            ok, why = connection_is_admissible(sid, selected_set, edge_rows, edge_index)
+
             if not ok:
                 continue
             after = compute_objective_terms(quality_by_id.values(), edge_rows, selected + [sid], cfg)
@@ -372,7 +396,8 @@ def greedy_select_core(
         for sid in quality_by_id
         if sid not in selected_set and sid not in blocked
     ]
-    selected = _close_cycles(selected, leftover_rows, quality_by_id, edge_rows, cfg)
+    selected = _close_cycles(selected, leftover_rows, quality_by_id, edge_rows, cfg, edge_index)
+
     core, support = split_core_vs_support(selected, quality_by_id.values(), edge_rows, cfg)
     scores = compute_objective_terms(quality_by_id.values(), edge_rows, selected, cfg)
     scores["seed"] = seed

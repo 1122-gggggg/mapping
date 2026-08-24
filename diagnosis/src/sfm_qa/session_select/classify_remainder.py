@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
+
 from typing import Any
 
 from .intake_tree import classify_leftover_vs_frozen_base, role_or_quarantine
+from .select_core import _incident_edge_index, connecting_edges
+
 from .types import ROLES, SessionEdgeQuality, SessionInfluence, SessionQuality, edge_is_vpr_only
 
 _CORE_OK = frozenset({"STRONG", "USABLE"})
@@ -20,13 +23,12 @@ def _links(
     session_id: str,
     others: set[str],
     edges: Iterable[SessionEdgeQuality],
+    index: Mapping[str, Sequence[SessionEdgeQuality]] | None = None,
 ) -> list[SessionEdgeQuality]:
-    found = []
-    for edge in edges:
-        ends = {edge.session_a, edge.session_b}
-        if session_id in ends and (ends - {session_id}) & others:
-            found.append(edge)
-    return found
+    if index is not None:
+        return connecting_edges(session_id, others, (), index)
+    sequence = edges if isinstance(edges, Sequence) else list(edges)
+    return connecting_edges(session_id, others, sequence)
 
 
 def _loc_counts(loc_row: Mapping[str, Any]) -> tuple[Any, Any, Any]:
@@ -46,7 +48,9 @@ def classify_one(session: SessionQuality, context: Mapping[str, Any]) -> str:
     core: set[str] = set(context.get("core") or ())
     support: set[str] = set(context.get("support") or ())
     base = core | support
-    edges: list[SessionEdgeQuality] = list(context.get("edges") or ())
+    edges = context.get("edges") or ()
+    index = context.get("edge_index")
+
     change_score = extra.get("change_score") or {}
     loc = extra.get("loc") or {}
     influences = extra.get("influences") or {}
@@ -59,7 +63,8 @@ def classify_one(session: SessionQuality, context: Mapping[str, Any]) -> str:
     elif isinstance(influence, Mapping):
         high_influence = bool(influence.get("high_influence"))
 
-    links = _links(session.session_id, base, edges) if base else []
+    links = _links(session.session_id, base, edges, index) if base else []
+
     blocked = [edge for edge in links if edge.status in _BLOCKED]
     usable = [edge for edge in links if edge.status not in _BLOCKED and not edge_is_vpr_only(edge)]
     independent = max((edge.independent_bridge_groups for edge in usable), default=0)
@@ -114,6 +119,8 @@ def classify_remainder(
     del config
     quality_by_id = _quality_map(qualities)
     edge_rows = list(edges)
+    edge_index = _incident_edge_index(edge_rows)
+
     core_ids = [sid for sid in core if sid in quality_by_id]
     support_ids = [sid for sid in support if sid in quality_by_id]
     assigned: dict[str, str] = {}
@@ -142,11 +149,13 @@ def classify_remainder(
             "core": core_ids,
             "support": support_ids,
             "edges": edge_rows,
+            "edge_index": edge_index,
             "extra": extra,
             "base_has_weak_region": base_has_weak,
             "need_validation_holdout": need_validation,
             "has_validation": has_validation,
         }
+
         role = classify_one(row, context)
         if role not in ROLES:
             role = "QUARANTINE"

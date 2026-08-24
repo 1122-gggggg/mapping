@@ -205,20 +205,39 @@ def rank_candidates_by_uniqueness(
 
     remaining = {candidate.feature_id: candidate for candidate in candidates}
     references = [np.asarray(item) for item in map_descriptors]
+    reference_shapes = {item.shape for item in references}
+    scores: dict[str, float] = {}
+    has_compatible: dict[str, bool] = {}
+    for feature_id, candidate in remaining.items():
+        scores[feature_id] = descriptor_uniqueness(candidate.descriptor, references, metric)
+        if candidate.descriptor is None:
+            has_compatible[feature_id] = False
+        else:
+            has_compatible[feature_id] = np.asarray(candidate.descriptor).shape in reference_shapes
     ranked: list[tuple[FeatureCandidate, float]] = []
     while remaining:
-        scored = [
-            (
-                descriptor_uniqueness(candidate.descriptor, references, metric),
-                candidate.feature_id,
-                candidate,
-            )
-            for candidate in remaining.values()
-        ]
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        uniqueness, feature_id, candidate = scored[0]
-        ranked.append((candidate, float(uniqueness)))
+        feature_id, candidate = min(
+            remaining.items(),
+            key=lambda item: (-scores[item[0]], item[0]),
+        )
+        ranked.append((candidate, float(scores[feature_id])))
         remaining.pop(feature_id)
-        if candidate.descriptor is not None:
-            references.append(candidate.descriptor)
+        selected = candidate.descriptor
+        if selected is None:
+            continue
+        selected_arr = np.asarray(selected)
+        selected_shape = selected_arr.shape
+        for other_id, other in remaining.items():
+            other_desc = other.descriptor
+            if other_desc is None:
+                continue
+            other_arr = np.asarray(other_desc)
+            if other_arr.shape != selected_shape:
+                continue
+            distance = descriptor_distance(other_arr, selected_arr, metric)
+            if not has_compatible[other_id]:
+                scores[other_id] = distance
+                has_compatible[other_id] = True
+            else:
+                scores[other_id] = min(scores[other_id], distance)
     return ranked

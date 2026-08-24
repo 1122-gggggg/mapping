@@ -22,6 +22,8 @@ from sfm_qa.session_select import (
     tag_suspicious_edges,
 )
 from sfm_qa.session_select import SessionEdgeQuality, SessionQuality
+from sfm_qa.session_select.select_core import connecting_edges
+
 
 ALLOWED_ROLES = frozenset(
     {
@@ -696,3 +698,83 @@ def test_emitted_roles_are_subset_of_allowed_set():
     unknown = set(roles.values()) - ALLOWED_ROLES
     assert not unknown, f"unknown roles: {unknown}"
     assert set(roles.values()) <= ALLOWED_ROLES
+
+
+def test_sparse_edges_both_directions_preserve_order_and_roles():
+    core = _make_session(session_id="CORE", internal_quality_score=0.95)
+    support = _make_session(
+        session_id="SUPPORT",
+        internal_quality_score=0.80,
+        convex_hull_coverage=0.20,
+    )
+    left = _make_session(session_id="LEFT", internal_status="STRONG")
+    right = _make_session(session_id="RIGHT", internal_status="STRONG")
+    blocked = _make_session(session_id="BLOCKED", internal_status="STRONG")
+    noise = _make_session(session_id="NOISE", internal_status="STRONG")
+    isolated = _make_session(session_id="ISOLATED", internal_status="STRONG")
+
+    noise_isolated = _make_edge(session_a="NOISE", session_b="ISOLATED", status="STRONG")
+    left_to_core = _make_edge(
+        session_a="LEFT",
+        session_b="CORE",
+        status="STRONG",
+        independent_bridge_groups=3,
+    )
+    core_to_right = _make_edge(
+        session_a="CORE",
+        session_b="RIGHT",
+        status="USABLE",
+        independent_bridge_groups=3,
+    )
+    support_core = _make_edge(session_a="SUPPORT", session_b="CORE", status="USABLE")
+    left_again = _make_edge(
+        session_a="CORE",
+        session_b="LEFT",
+        status="USABLE",
+        independent_bridge_groups=2,
+    )
+    noise_to_left = _make_edge(session_a="NOISE", session_b="LEFT", status="WEAK")
+    blocked_to_core = _make_edge(
+        session_a="BLOCKED",
+        session_b="CORE",
+        status="AMBIGUOUS",
+        independent_bridge_groups=1,
+    )
+    edges = [
+        noise_isolated,
+        left_to_core,
+        core_to_right,
+        support_core,
+        left_again,
+        noise_to_left,
+        blocked_to_core,
+    ]
+    selected = {"CORE", "SUPPORT"}
+
+    assert connecting_edges("LEFT", selected, edges) == [left_to_core, left_again]
+    assert connecting_edges("RIGHT", selected, edges) == [core_to_right]
+    assert connecting_edges("BLOCKED", selected, edges) == [blocked_to_core]
+    assert connecting_edges("ISOLATED", selected, edges) == []
+    assert connecting_edges("NOISE", selected, edges) == []
+
+    sessions = [core, support, left, right, blocked, noise, isolated]
+    cfg = load_config()
+    first = _roles_from_classify(
+        classify_remainder(sessions, edges, ["CORE"], ["SUPPORT"], cfg)
+    )
+    second = _roles_from_classify(
+        classify_remainder(sessions, edges, ["CORE"], ["SUPPORT"], cfg)
+    )
+    assert first == second
+    assert first["CORE"] == "BASE_CORE"
+    assert first["SUPPORT"] == "BASE_SUPPORT"
+    assert first["LEFT"] == "GEOMETRY_REINFORCEMENT"
+    assert first["RIGHT"] == "GEOMETRY_REINFORCEMENT"
+    assert first["BLOCKED"] == "QUARANTINE"
+    assert first["NOISE"] == "NEW_SUBMAP"
+    assert first["ISOLATED"] == "NEW_SUBMAP"
+
+    picked = greedy_select_core(sessions, edges, cfg)
+    selected_ids = set(_as_id_list(picked.get("selected")))
+    assert picked["seed"] == "CORE"
+    assert selected_ids.isdisjoint({"NOISE", "ISOLATED", "BLOCKED"})

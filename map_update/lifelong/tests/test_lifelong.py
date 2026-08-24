@@ -1,8 +1,12 @@
 from __future__ import annotations
+from collections.abc import Sequence
+
 
 from pathlib import Path
 
 import numpy as np
+import pytest
+
 
 from update_map.config import LifelongConfig, UpdateMapConfig, load_config, save_config
 from update_map.lifelong import (
@@ -18,6 +22,44 @@ from update_map.lifelong import (
     fit_fremen_model,
     rank_candidates_by_uniqueness,
 )
+
+
+def _rank_candidates_by_uniqueness_reference(
+    candidates: Sequence[FeatureCandidate],
+    map_descriptors: Sequence[np.ndarray],
+    metric: str,
+) -> list[tuple[FeatureCandidate, float]]:
+    remaining = {candidate.feature_id: candidate for candidate in candidates}
+    references = [np.asarray(item) for item in map_descriptors]
+    ranked: list[tuple[FeatureCandidate, float]] = []
+    while remaining:
+        scored = [
+            (
+                descriptor_uniqueness(candidate.descriptor, references, metric),
+                candidate.feature_id,
+                candidate,
+            )
+            for candidate in remaining.values()
+        ]
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        uniqueness, feature_id, candidate = scored[0]
+        ranked.append((candidate, float(uniqueness)))
+        remaining.pop(feature_id)
+        if candidate.descriptor is not None:
+            references.append(candidate.descriptor)
+    return ranked
+
+
+def _assert_uniqueness_ranking_matches(
+    candidates: Sequence[FeatureCandidate],
+    map_descriptors: Sequence[np.ndarray],
+    metric: str,
+) -> None:
+    expected = _rank_candidates_by_uniqueness_reference(candidates, map_descriptors, metric)
+    actual = rank_candidates_by_uniqueness(candidates, map_descriptors, metric)
+    assert [(item, float(score)) for item, score in actual] == expected
+    assert all(type(score) is float for _item, score in actual)
+
 
 
 def _manager(count: int, config: LifelongConfig) -> PredictiveAdaptiveMapManager:
@@ -150,6 +192,154 @@ def test_descriptor_uniqueness_and_greedy_ranking() -> None:
     )
     ranked = rank_candidates_by_uniqueness([near, far], baseline, "l2")
     assert [item.feature_id for item, _score in ranked] == ["far", "near"]
+
+
+
+@pytest.mark.parametrize(
+    ("candidates", "map_descriptors", "metric"),
+    [
+        pytest.param(
+            [
+                FeatureCandidate("near", 1, np.asarray([0.1, 0.0]), True),
+                FeatureCandidate("far", 2, np.asarray([10.0, 0.0]), True),
+            ],
+            [np.asarray([0.0, 0.0])],
+            "l2",
+            id="l2-map-near-far",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("mid", 1, np.asarray([1.0]), True),
+                FeatureCandidate("close", 2, np.asarray([0.1]), True),
+                FeatureCandidate("far", 3, np.asarray([10.0]), True),
+            ],
+            [np.asarray([0.0]), np.asarray([0.2])],
+            "l2",
+            id="l2-multi-map-refs",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("a", 1, np.asarray([0.0]), True),
+                FeatureCandidate("b", 2, np.asarray([0.1]), True),
+                FeatureCandidate("c", 3, np.asarray([10.0]), True),
+            ],
+            [],
+            "l2",
+            id="l2-empty-map-tie-then-far",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("twin_a", 1, np.asarray([5.0, 0.0]), True),
+                FeatureCandidate("twin_b", 2, np.asarray([5.05, 0.0]), True),
+                FeatureCandidate("outlier", 3, np.asarray([-8.0, 1.0]), True),
+            ],
+            [np.asarray([0.0, 0.0])],
+            "l2",
+            id="l2-duplicate-shaped-near-duplicates",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("match2", 1, np.asarray([0.2, 0.0]), True),
+                FeatureCandidate("shape3", 2, np.asarray([9.0, 1.0, 0.0]), True),
+                FeatureCandidate("other2", 3, np.asarray([8.0, 0.0]), True),
+            ],
+            [np.asarray([0.0, 0.0])],
+            "l2",
+            id="l2-incompatible-shapes",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("g2a", 1, np.asarray([0.0, 0.0]), True),
+                FeatureCandidate("g2b", 2, np.asarray([0.2, 0.0]), True),
+                FeatureCandidate("g3a", 3, np.asarray([0.0, 0.0, 0.0]), True),
+                FeatureCandidate("g3b", 4, np.asarray([10.0, 0.0, 0.0]), True),
+            ],
+            [np.asarray([1.0, 0.0])],
+            "l2",
+            id="l2-shape-groups-delayed-first-compat",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("none_a", 1, None, True),
+                FeatureCandidate("kept", 2, np.asarray([4.0, 0.0]), True),
+                FeatureCandidate("none_b", 3, None, True),
+            ],
+            [np.asarray([0.0, 0.0])],
+            "l2",
+            id="l2-none-descriptors",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("dup", 1, np.asarray([0.0, 0.0]), True),
+                FeatureCandidate("dup", 2, np.asarray([6.0, 0.0]), True),
+                FeatureCandidate("other", 3, np.asarray([0.2, 0.0]), True),
+            ],
+            [np.asarray([0.0, 0.0])],
+            "l2",
+            id="l2-duplicate-feature-ids-last-wins",
+        ),
+        pytest.param([], [np.asarray([0.0, 0.0])], "l2", id="l2-empty-candidates"),
+        pytest.param(
+            [
+                FeatureCandidate("same", 1, np.asarray([1.0, 0.0]), True),
+                FeatureCandidate("ortho", 2, np.asarray([0.0, 1.0]), True),
+                FeatureCandidate("zero", 3, np.asarray([0.0, 0.0]), True),
+                FeatureCandidate("anti", 4, np.asarray([-1.0, 0.0]), True),
+            ],
+            [np.asarray([1.0, 0.0])],
+            "cosine",
+            id="cosine-map-zero-and-axis",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("zero_a", 1, np.asarray([0.0, 0.0]), True),
+                FeatureCandidate("zero_b", 2, np.asarray([0.0, 0.0]), True),
+                FeatureCandidate("unit", 3, np.asarray([1.0, 0.0]), True),
+            ],
+            [np.asarray([0.0, 0.0])],
+            "cosine",
+            id="cosine-zero-vectors",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("h0", 1, np.asarray([0, 0], dtype=np.uint8), True),
+                FeatureCandidate("h1", 2, np.asarray([0, 255], dtype=np.uint8), True),
+                FeatureCandidate("h2", 3, np.asarray([255, 255], dtype=np.uint8), True),
+            ],
+            [np.asarray([0, 0], dtype=np.uint8)],
+            "hamming",
+            id="hamming-uint8",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("b0", 1, np.asarray([True, False, True, False]), True),
+                FeatureCandidate("b1", 2, np.asarray([True, False, True, True]), True),
+                FeatureCandidate("b2", 3, np.asarray([False, True, False, True]), True),
+            ],
+            [np.asarray([True, False, True, False])],
+            "hamming",
+            id="hamming-bool",
+        ),
+        pytest.param(
+            [
+                FeatureCandidate("none", 1, None, True),
+                FeatureCandidate("shape3", 2, np.asarray([1.0, 0.0, 0.0]), True),
+                FeatureCandidate("dup", 3, np.asarray([0.0, 1.0]), True),
+                FeatureCandidate("dup", 4, np.asarray([0.0, 0.0]), True),
+                FeatureCandidate("zero", 5, np.asarray([0.0, 0.0]), True),
+            ],
+            [np.asarray([1.0, 0.0])],
+            "cosine",
+            id="cosine-mixed-none-dup-incompatible-zero",
+        ),
+    ],
+)
+def test_rank_candidates_by_uniqueness_matches_greedy_reference(
+    candidates: list[FeatureCandidate],
+    map_descriptors: list[np.ndarray],
+    metric: str,
+) -> None:
+    _assert_uniqueness_ranking_matches(candidates, map_descriptors, metric)
 
 
 def test_fremen_learns_daily_visibility_cycle() -> None:
