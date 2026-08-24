@@ -1,5 +1,11 @@
 """Site-agnostic multi-session video selection."""
 
+from .admission import (
+    assess_declared_bridge_groups,
+    classify_fusion_authorization,
+    geometry_metrics_complete,
+    usable_geometry_ready,
+)
 from .classify_remainder import classify_one, classify_remainder
 from .config import DEFAULT_CONFIG_PATH, heuristic_note, load_config, lookup
 from .critical_bridges import (
@@ -62,6 +68,10 @@ __all__ = [
     "efficiency_info",
     "classify_leftover_vs_frozen_base",
     "classify_session_edge",
+    "classify_fusion_authorization",
+    "assess_declared_bridge_groups",
+    "geometry_metrics_complete",
+    "usable_geometry_ready",
     "camera_triplet_scores",
     "motion_profile_distance",
     "propose_prebuild_set",

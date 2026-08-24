@@ -12,8 +12,8 @@ from .objective import compute_objective_terms, delta_utility, efficiency_covera
 from .types import SessionEdgeQuality, SessionQuality, edge_is_vpr_only
 
 _CORE_OK = frozenset({"STRONG", "USABLE"})
-_GEOMETRIC_EDGE_STATUS = frozenset({"STRONG", "USABLE", "WEAK"})
-_BLOCKED_EDGE = frozenset({"AMBIGUOUS", "REJECT"})
+_GEOMETRIC_EDGE_STATUS = frozenset({"STRONG", "USABLE"})
+_BLOCKED_EDGE = frozenset({"AMBIGUOUS", "REJECT", "WEAK"})
 
 
 def _qualities(rows: Iterable[SessionQuality]) -> dict[str, SessionQuality]:

@@ -39,6 +39,7 @@ from .route import (
     save_route_audit,
 )
 from .view_support import ViewSupportConfig, ViewSupportMetrics, compute_view_support
+from .risk_ply import write_risk_ply
 from .weak_regions import (
     WeakRegionAnalysis,
     WeakRegionCause,
@@ -85,10 +86,10 @@ __all__ = [
     "load_gluemap",
     "load_reference_hypotheses",
     "pair_model_flags",
-    "query_matchability",
     "reconstructed_relative_error",
     "save_route_audit",
     "weighted_bearing_fim",
+    "write_risk_ply",
 ]
 
 __version__ = "0.5.0"

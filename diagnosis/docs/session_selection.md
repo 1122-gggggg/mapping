@@ -106,7 +106,6 @@ Greedy procedure:
 6. Classify leftovers into update/reference/submap/quarantine roles.
 
 Prefer **one fewer video** over a cheap merge that adds tracks without independent geometry.
-
 ## Fail-closed bridges
 
 A session-to-session link is a geometric **edge** only after verification:
@@ -119,18 +118,33 @@ A session-to-session link is a geometric **edge** only after verification:
 - Sim(3) fit on a support set and validation on a disjoint hold-out
 - cycle/graph checks where redundant paths exist
 
+`STRONG` and `USABLE` additionally require **exact-pair provenance**:
+
+| Requirement | Fail-closed result if missing |
+| --- | --- |
+| `evidence_scope=exact_pair` | shared-map / VPR / unknown → at most `WEAK` |
+| `independent_artifact=true` | legacy `trusted_geometry` tracks are not independent |
+| group-disjoint fit/holdout IDs | overlapping IDs cannot be `STRONG`/`USABLE` |
+| complete finite geometry (R/t/scale/parallax/depth/coverage/reproj/holdout) | incomplete → `AMBIGUOUS` or `WEAK` |
+
+VPR, raw matches, and same-map tracks may be parsed for diagnostics. They never
+silently become independent evidence. Incomplete legacy records stay readable
+and are downgraded.
+
+`GEOMETRY_REINFORCEMENT` stays `LOCAL_RELATION_ONLY` unless there are at least
+two independent groups, group-disjoint holdout, and complete geometry.
+
 Fail-closed rules:
 
 | Condition | Action |
 | --- | --- |
 | Uncertain metric or missing evidence | `QUARANTINE` |
 | No reliable geometric edge to the base | `NEW_SUBMAP` |
-| Only `REJECT` / `AMBIGUOUS` links | do not merge |
+| Only `REJECT` / `AMBIGUOUS` / `WEAK` links | do not merge |
 | Unique critical bridge or one unverified critical bridge | do not force-merge |
 | Retrieval high but geometry absent | proposal only; queue S3 verification |
 
 A critical bridge is the unique usable connector of two groups of size at least 2. Never promote a session into the base on that single hinge.
-
 ## VPR is not an edge
 
 Visual place recognition / retrieval only proposes candidate pairs. A high similarity or many retrieved pairs is **not** covisibility, not a verified relative pose, and not merge authority. This distinction is especially important for forward/reverse flights, repeated structures and appearance changes.
@@ -162,6 +176,7 @@ sfm-qa select-sessions \
   --videos DIR \
   --output DIR \
   [--vpr-candidates session_pairs.json] \
+  [--edge-probes exact_pair_probes.json] \
   [--maps DIR] \
   [--config PATH]
 ```
@@ -171,7 +186,8 @@ sfm-qa select-sessions \
 | `--videos` | yes | Input videos; normally one video per session. |
 | `--output` | yes | Stage 0A/0B reports. |
 | `--vpr-candidates` | no | Retrieval candidate JSON. Proposal ranking only; never geometric authority. |
-| `--maps` | no | Existing reconstructions/verified tracks for Stage 0B. |
+| `--edge-probes` | no | Exact-pair geometry artifacts. Shared-map/VPR records in this file are ignored. |
+| `--maps` | no | Existing reconstructions/verified tracks for Stage 0B. Shared-map tracks cannot become STRONG/USABLE. |
 | `--config` | no | YAML overlay merged onto heuristic defaults. |
 
 Python entry:

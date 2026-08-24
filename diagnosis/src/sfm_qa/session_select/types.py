@@ -67,6 +67,22 @@ class SessionQuality:
     internal_quality_score: float = 0.0
     internal_status: str = "REJECT"
     reasons: tuple[str, ...] = ()
+    hard_valid: bool = True
+    hard_failures: tuple[str, ...] = ()
+    metric_coverage: float = 0.0
+    soft_rank: float = 0.5
+    candidate_tier: str = "UNSCORED"
+    admission_state: str = "UNASSESSED"
+    evaluation_role: str | None = None
+    evidence_provenance: tuple[str, ...] = ()
+    coverage_cells: tuple[str, ...] = ()
+    degeneracy_flags: tuple[str, ...] = ()
+    session_graph_degree: float | None = None
+    component_size: int | None = None
+    is_isolated: bool = False
+    incident_bridges: int | None = None
+    is_articulation: bool = False
+    graph_radius: int | None = None
 
 
 @dataclass
@@ -92,6 +108,23 @@ class SessionEdgeQuality:
     is_critical_bridge: bool = False
     status: str = "REJECT"
     reasons: tuple[str, ...] = ()
+    independent_artifact: bool = False
+    evidence_scope: str = "unknown"
+    geometry_artifact: str | None = None
+    geometry_artifact_sha256: str | None = None
+    fit_evidence_ids: tuple[str, ...] = ()
+    holdout_evidence_ids: tuple[str, ...] = ()
+    support_count: int | None = None
+    holdout_count: int | None = None
+    holdout_inlier_ratio: float | None = None
+    holdout_residual: float | None = None
+    bridge_group_ids: tuple[str, ...] = ()
+    group_holdout_disjoint: bool = False
+    bridge_diversity_axes: tuple[str, ...] = ()
+    degeneracy_flags: tuple[str, ...] = ()
+    geometry_complete: bool = False
+    parallax_deg: float | None = None
+    edge_positive_depth_ratio: float | None = None
 
 
 @dataclass

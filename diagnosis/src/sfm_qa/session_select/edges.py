@@ -41,6 +41,23 @@ try:
         is_critical_bridge: bool
         status: str
         reasons: tuple[str, ...]
+        independent_artifact: bool = False
+        evidence_scope: str = "unknown"
+        geometry_artifact: str | None = None
+        geometry_artifact_sha256: str | None = None
+        fit_evidence_ids: tuple[str, ...] = ()
+        holdout_evidence_ids: tuple[str, ...] = ()
+        support_count: int | None = None
+        holdout_count: int | None = None
+        holdout_inlier_ratio: float | None = None
+        holdout_residual: float | None = None
+        bridge_group_ids: tuple[str, ...] = ()
+        group_holdout_disjoint: bool = False
+        bridge_diversity_axes: tuple[str, ...] = ()
+        degeneracy_flags: tuple[str, ...] = ()
+        geometry_complete: bool = False
+        parallax_deg: float | None = None
+        edge_positive_depth_ratio: float | None = None
 
 except Exception:  # pragma: no cover
     _LocalEdge = None  # type: ignore[misc, assignment]
@@ -113,11 +130,32 @@ def classify_session_edge(
     cycle_error: float | None = None,
     consensus_ambiguous: bool = False,
     trusted_geometry: bool = False,
+    independent_artifact: bool = False,
+    evidence_scope: str = "unknown",
+    geometry_artifact: str | None = None,
+    geometry_artifact_sha256: str | None = None,
+    fit_evidence_ids: Sequence[str] | None = None,
+    holdout_evidence_ids: Sequence[str] | None = None,
+    holdout_inlier_ratio: float | None = None,
+    holdout_residual: float | None = None,
+    bridge_groups: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+    group_holdout_disjoint: bool = False,
+    degeneracy_flags: Sequence[str] | None = None,
+    geometry_complete: bool | None = None,
+    parallax_deg: float | None = None,
+    edge_positive_depth_ratio: float | None = None,
     config: Mapping[str, Any] | None = None,
     reasons: Sequence[str] | None = None,
     **aliases: Any,
 ) -> Any:
-    """Fail-closed edge status. Zero verified + zero groups is never STRONG."""
+    """Fail-closed edge status. Incomplete or shared-map evidence cannot be STRONG/USABLE."""
+
+    from sfm_qa.session_select.admission import (
+        assess_declared_bridge_groups,
+        geometry_metrics_complete,
+        normalize_evidence_scope,
+        usable_geometry_ready,
+    )
 
     verified = _as_int(num_verified_pairs, 0)
     for key in ("verified", "n_verified", "num_verified"):
@@ -126,10 +164,10 @@ def classify_session_edge(
             break
     if verified <= 0 and num_cross_session_tracks:
         verified = _as_int(num_cross_session_tracks, 0)
-    groups = _as_int(independent_bridge_groups, 0)
+    declared_groups = _as_int(independent_bridge_groups, 0)
     for key in ("groups", "n_groups", "independent_bridges"):
         if key in aliases and aliases[key] is not None:
-            groups = _as_int(aliases[key], 0)
+            declared_groups = _as_int(aliases[key], 0)
             break
     candidates = _as_int(num_candidate_pairs, 0)
     for key in ("candidates", "vpr_candidates", "num_vpr"):
@@ -146,42 +184,221 @@ def classify_session_edge(
     )
     min_pairs = int(_lookup(config, "edge.min_verified_pairs_for_usable", 8) or 8)
     max_rot = float(_lookup(config, "edge.max_rotation_consensus_deg", 5.0) or 5.0)
+    max_trans = float(_lookup(config, "edge.max_translation_dir_consensus_deg", 15.0) or 15.0)
     max_scale = float(_lookup(config, "edge.max_scale_consensus_rel", 0.15) or 0.15)
+    min_parallax = float(_lookup(config, "edge.min_bridge_parallax_deg", 1.0) or 1.0)
+    min_depth = float(_lookup(config, "edge.min_positive_depth_ratio", 0.9) or 0.9)
+    min_coverage = float(_lookup(config, "edge.min_spatial_coverage", 0.1) or 0.1)
+    max_reproj = float(_lookup(config, "edge.max_cross_reproj_px", 5.0) or 5.0)
+    min_holdout_inliers = float(_lookup(config, "edge.min_holdout_inlier_ratio", 0.45) or 0.45)
+    max_holdout_residual = float(_lookup(config, "edge.max_holdout_residual_px", 8.0) or 8.0)
+
+    independent = bool(
+        independent_artifact
+        if "independent_artifact" not in aliases
+        else aliases.get("independent_artifact")
+    )
+    source = aliases.get("source")
+    shared_map = bool(aliases.get("shared_map") or source in {"shared_map", "map", "reconstruction"})
+    scope = normalize_evidence_scope(
+        aliases.get("evidence_scope", evidence_scope),
+        independent_artifact=independent,
+        shared_map=shared_map or bool(trusted_geometry and not independent),
+        source=source,
+    )
+    if source == "vpr" or scope == "vpr":
+        notes.append("shared_map_or_vpr_is_not_independent_geometry")
+        independent = False
+        scope = "vpr"
+    if shared_map or scope == "shared_map":
+        notes.append("shared_map_or_vpr_is_not_independent_geometry")
+        independent = False
+        scope = "shared_map"
+    if trusted_geometry and not independent:
+        notes.append("legacy_trusted_geometry_is_not_independent_artifact")
+        scope = scope if scope in {"shared_map", "vpr", "raw_tracks"} else "shared_map"
+
+    fit_ids = [
+        str(item)
+        for item in (
+            fit_evidence_ids
+            or aliases.get("fit_ids")
+            or aliases.get("fitting_ids")
+            or ()
+        )
+    ]
+    holdout_ids = [
+        str(item)
+        for item in (
+            holdout_evidence_ids
+            or aliases.get("holdout_ids")
+            or aliases.get("validation_ids")
+            or ()
+        )
+    ]
+    if set(fit_ids) & set(holdout_ids):
+        notes.append("fit_holdout_ids_overlap")
+        independent = False
+    if independent and (not fit_ids or not holdout_ids):
+        notes.append("missing_disjoint_fit_or_holdout_evidence")
+
+    group_payload = bridge_groups if bridge_groups is not None else aliases.get("bridge_groups")
+    assessment = assess_declared_bridge_groups(
+        group_payload,
+        fit_evidence_ids=fit_ids,
+        holdout_evidence_ids=holdout_ids,
+        query_frame_separation=int(_lookup(config, "edge.query_frame_separation", 30) or 30),
+        reference_frame_separation=int(
+            _lookup(config, "edge.reference_frame_separation", 30) or 30
+        ),
+    )
+    notes.extend(assessment.reasons)
+    groups = assessment.independent_group_count if group_payload is not None else declared_groups
+    if group_payload is not None and declared_groups != assessment.independent_group_count:
+        notes.append("declared_bridge_group_count_recomputed")
+    if independent and assessment.status != "STRONG":
+        independent = False
+        notes.append("independent_group_contract_failed")
+    disjoint = bool(assessment.fit_holdout_group_disjoint or group_holdout_disjoint)
+    if fit_ids and holdout_ids and set(fit_ids).isdisjoint(set(holdout_ids)):
+        if group_payload is None:
+            disjoint = True
+        elif assessment.fit_holdout_group_disjoint:
+            disjoint = True
+    else:
+        disjoint = False
+
+    rotation = rotation_consensus_deg if rotation_consensus_deg is not None else aliases.get(
+        "rotation_consensus_deg"
+    )
+    translation = (
+        translation_direction_consensus_deg
+        if translation_direction_consensus_deg is not None
+        else aliases.get("translation_direction_consensus_deg")
+    )
+    scale = scale_consensus if scale_consensus is not None else aliases.get("scale_consensus")
+    parallax = parallax_deg if parallax_deg is not None else aliases.get(
+        "parallax_deg", aliases.get("bridge_parallax_deg")
+    )
+    positive_depth = (
+        edge_positive_depth_ratio
+        if edge_positive_depth_ratio is not None
+        else aliases.get("edge_positive_depth_ratio", aliases.get("positive_depth_ratio"))
+    )
+    coverage = spatial_coverage if spatial_coverage is not None else aliases.get("spatial_coverage")
+    reprojection = (
+        cross_session_reprojection_error
+        if cross_session_reprojection_error is not None
+        else aliases.get("reprojection_error", aliases.get("cross_session_reprojection_error"))
+    )
+    holdout_ratio = (
+        holdout_inlier_ratio
+        if holdout_inlier_ratio is not None
+        else aliases.get("holdout_inlier_ratio")
+    )
+    holdout_resid = (
+        holdout_residual
+        if holdout_residual is not None
+        else aliases.get("holdout_residual", aliases.get("holdout_residual_p90"))
+    )
+    complete = geometry_metrics_complete(
+        {
+            "rotation_consensus_deg": rotation,
+            "translation_direction_consensus_deg": translation,
+            "scale_consensus": scale,
+            "parallax_deg": parallax,
+            "edge_positive_depth_ratio": positive_depth,
+            "spatial_coverage": coverage,
+            "cross_session_reprojection_error": reprojection,
+            "holdout_inlier_ratio": holdout_ratio,
+            "holdout_residual": holdout_resid,
+        }
+    )
+    if geometry_complete is False:
+        complete = False
+    if not complete:
+        notes.append("incomplete_bridge_geometry")
+
+    quality_issues: list[str] = []
+    if complete:
+        if rotation is not None and float(rotation) > max_rot:
+            quality_issues.append("rotation_consensus_above_soft_target")
+        if translation is not None and float(translation) > max_trans:
+            quality_issues.append("translation_consensus_above_soft_target")
+        if scale is not None and float(scale) > max_scale:
+            quality_issues.append("scale_consensus_above_soft_target")
+        if parallax is not None and float(parallax) < min_parallax:
+            quality_issues.append("bridge_parallax_below_soft_target")
+        if positive_depth is not None and float(positive_depth) < min_depth:
+            quality_issues.append("positive_depth_below_soft_target")
+        if coverage is not None and float(coverage) < min_coverage:
+            quality_issues.append("spatial_coverage_below_soft_target")
+        if reprojection is not None and float(reprojection) > max_reproj:
+            quality_issues.append("cross_reprojection_above_soft_target")
+        if holdout_ratio is not None and float(holdout_ratio) < min_holdout_inliers:
+            quality_issues.append("holdout_inlier_ratio_below_soft_target")
+        if holdout_resid is not None and float(holdout_resid) > max_holdout_residual:
+            quality_issues.append("holdout_residual_above_soft_target")
+    notes.extend(quality_issues)
+    flags = [str(item) for item in (degeneracy_flags or aliases.get("degeneracy_flags") or ())]
+    if aliases.get("planar_dominant"):
+        flags.append("PLANAR_DOMINANT")
 
     status = "REJECT"
     score = 0.0
     is_bridge = False
+    ready = usable_geometry_ready(
+        independent_artifact=independent,
+        evidence_scope=scope,
+        independent_groups=groups if group_payload is not None else (groups if independent else 0),
+        group_holdout_disjoint=disjoint,
+        geometry_complete=complete,
+        fit_evidence_ids=fit_ids,
+        holdout_evidence_ids=holdout_ids,
+        min_groups=1,
+    )
+    if not independent:
+        notes.append("no_independent_geometry_artifact")
 
-    if verified <= 0 and groups <= 0:
+    if verified <= 0 and declared_groups <= 0 and groups <= 0:
         notes.append("vpr_is_not_a_geometric_edge")
         if candidates > 0:
             notes.append("vpr_candidates_only_not_an_edge")
         else:
             notes.append("no_verified_geometry")
-        # Retrieval is not a geometric edge. WEAK would be admissible to core.
         status = "REJECT"
         score = 0.05 if candidates else 0.0
-    elif not trusted_geometry and verified <= 0:
-        notes.append("untrusted_geometry_fail_closed")
+    elif scope == "vpr" and not independent:
+        notes.append("vpr_cannot_promote_unverified_edge")
         status = "REJECT"
         score = 0.05
+    elif not ready:
+        notes.append("legacy_or_incomplete_evidence_downgraded")
+        if verified > 0 or declared_groups > 0:
+            notes.append("shared_reconstruction_not_independent_geometry")
+            status = "WEAK"
+            score = min(0.35, max(verified, 1) / 10_000.0)
+        elif candidates > 0:
+            status = "AMBIGUOUS"
+            score = 0.05
+        else:
+            status = "REJECT"
+            score = 0.05
     else:
         if verified < min_tracks:
             notes.append(f"cross_tracks_below_heuristic_{min_tracks}")
         if groups < 1:
             notes.append("no_independent_bridge_group")
-        rot = rotation_consensus_deg
-        if consensus_ambiguous or (rot is not None and float(rot) > max_rot):
+        if consensus_ambiguous:
             notes.append("cross_session_pose_consensus_ambiguous")
             status = "AMBIGUOUS"
             score = 0.2
-        elif scale_consensus is not None and float(scale_consensus) > max_scale:
-            notes.append("cross_session_scale_consensus_ambiguous")
+        elif quality_issues or flags:
+            if flags:
+                notes.append("strong_edge_blocked_by_explicit_degeneracy")
+            notes.append("strong_edge_requires_complete_quality_geometry")
             status = "AMBIGUOUS"
             score = 0.2
-        elif verified <= 0 or groups < 1:
-            status = "AMBIGUOUS"
-            score = 0.15
         else:
             score = min(1.0, verified / 200.0) * 0.5 + min(1.0, groups / max(min_groups, 1)) * 0.5
             if groups >= min_groups and verified >= min_tracks:
@@ -197,11 +414,16 @@ def classify_session_edge(
                 status = "WEAK"
                 score = min(0.4, score)
 
-    if status == "STRONG" and (verified <= 0 or groups <= 0):
-        status = "REJECT"
+    if status in {"STRONG", "USABLE"} and not ready:
+        status = "AMBIGUOUS"
         is_bridge = False
-        score = 0.05
-        notes.append("strong_blocked_without_verified_bridges")
+        score = 0.15
+        notes.append("strong_usable_blocked_without_complete_independent_geometry")
+    if status == "STRONG" and (verified <= 0 or groups < min_groups):
+        status = "AMBIGUOUS"
+        is_bridge = False
+        score = 0.15
+        notes.append("strong_edge_requires_two_independent_bridge_groups")
 
     return _construct(
         _edge_cls(),
@@ -211,14 +433,14 @@ def classify_session_edge(
         num_verified_pairs=verified,
         num_cross_session_tracks=tracks,
         num_cross_session_observations=num_cross_session_observations,
-        independent_bridge_groups=groups,
+        independent_bridge_groups=groups if group_payload is not None else declared_groups,
         inlier_count=inlier_count if inlier_count is not None else (verified or None),
         inlier_ratio=inlier_ratio,
-        rotation_consensus_deg=rotation_consensus_deg,
-        translation_direction_consensus_deg=translation_direction_consensus_deg,
-        scale_consensus=scale_consensus,
-        cross_session_reprojection_error=cross_session_reprojection_error,
-        spatial_coverage=spatial_coverage,
+        rotation_consensus_deg=rotation,
+        translation_direction_consensus_deg=translation,
+        scale_consensus=scale,
+        cross_session_reprojection_error=reprojection,
+        spatial_coverage=coverage,
         cycle_support=cycle_support,
         cycle_error=cycle_error,
         edge_quality_score=float(score),
@@ -226,7 +448,26 @@ def classify_session_edge(
         is_critical_bridge=False,
         status=status,
         reasons=tuple(dict.fromkeys(notes)),
+        independent_artifact=bool(independent and ready),
+        evidence_scope=scope,
+        geometry_artifact=geometry_artifact or aliases.get("geometry_artifact"),
+        geometry_artifact_sha256=geometry_artifact_sha256
+        or aliases.get("geometry_artifact_sha256"),
+        fit_evidence_ids=tuple(sorted(dict.fromkeys(fit_ids))),
+        holdout_evidence_ids=tuple(sorted(dict.fromkeys(holdout_ids))),
+        support_count=len(fit_ids) or None,
+        holdout_count=len(holdout_ids) or None,
+        holdout_inlier_ratio=holdout_ratio,
+        holdout_residual=holdout_resid,
+        bridge_group_ids=assessment.independent_group_ids,
+        group_holdout_disjoint=bool(disjoint),
+        bridge_diversity_axes=("time", "image", "landmark", "region") if groups else (),
+        degeneracy_flags=tuple(dict.fromkeys(flags)),
+        geometry_complete=bool(complete),
+        parallax_deg=parallax,
+        edge_positive_depth_ratio=positive_depth,
     )
+
 
 
 def _session_for_image(name: str, session_ids: Sequence[str]) -> str | None:
@@ -327,7 +568,11 @@ def _parse_colmap_text(
             "num_cross_session_tracks": count,
             "num_cross_session_observations": pair_obs.get(key),
             "independent_bridge_groups": groups,
-            "trusted_geometry": True,
+            "trusted_geometry": False,
+            "independent_artifact": False,
+            "evidence_scope": "shared_map",
+            "source": "shared_map",
+            "shared_map": True,
         }
     return out
 
@@ -476,14 +721,93 @@ def _load_maps_dir_candidates(maps_dir: Path) -> dict[tuple[str, str], dict[str,
     return pairs
 
 
+def load_edge_probe_candidates(
+    payload: Mapping[str, Any] | None,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Keep only exact-pair probe records. Shared-map/VPR payloads are ignored."""
+
+    if not payload:
+        return {}
+    normalized: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _pair_key(left: Any, right: Any) -> tuple[str, str] | None:
+        a, b = str(left or ""), str(right or "")
+        if not a or not b or a == b:
+            return None
+        return (a, b) if a <= b else (b, a)
+
+    direct = payload.get("edges")
+    if isinstance(direct, Mapping):
+        for raw_key, raw_value in direct.items():
+            if not isinstance(raw_value, Mapping):
+                continue
+            bits = str(raw_key).replace("__", "|").split("|", 1)
+            if len(bits) != 2:
+                continue
+            key = _pair_key(bits[0], bits[1])
+            if key is None:
+                continue
+            if str(raw_value.get("evidence_scope") or "exact_pair") != "exact_pair":
+                continue
+            normalized[key] = {**dict(raw_value), "evidence_scope": "exact_pair"}
+    elif isinstance(direct, list):
+        for raw_value in direct:
+            if not isinstance(raw_value, Mapping):
+                continue
+            key = _pair_key(
+                raw_value.get("session_a") or raw_value.get("a"),
+                raw_value.get("session_b") or raw_value.get("b"),
+            )
+            if key is None or str(raw_value.get("evidence_scope") or "exact_pair") != "exact_pair":
+                continue
+            normalized[key] = {**dict(raw_value), "evidence_scope": "exact_pair"}
+
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list):
+        return normalized
+    for raw in artifacts:
+        if not isinstance(raw, Mapping):
+            continue
+        if raw.get("artifact_type") not in {None, "SESSION_PAIR_PROBE_V1"}:
+            continue
+        pair = raw.get("pair")
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            key = _pair_key(pair[0], pair[1])
+        else:
+            key = _pair_key(raw.get("session_a"), raw.get("session_b"))
+        if key is None:
+            continue
+        metrics = raw.get("metrics") if isinstance(raw.get("metrics"), Mapping) else raw
+        if str(metrics.get("evidence_scope") or raw.get("evidence_scope") or "exact_pair") != "exact_pair":
+            continue
+        fit_ids = list(metrics.get("fit_evidence_ids") or metrics.get("fit_ids") or ())
+        holdout_ids = list(metrics.get("holdout_evidence_ids") or metrics.get("holdout_ids") or ())
+        independent = bool(metrics.get("independent_artifact", metrics.get("verified")))
+        if independent:
+            independent = bool(fit_ids and holdout_ids and set(fit_ids).isdisjoint(holdout_ids))
+        evidence = {
+            **dict(metrics),
+            "source": "independent_pair_probe",
+            "independent_artifact": independent,
+            "evidence_scope": "exact_pair",
+            "geometry_artifact": raw.get("geometry_artifact"),
+            "geometry_artifact_sha256": raw.get("digest") or raw.get("geometry_artifact_sha256"),
+            "fit_ids": fit_ids,
+            "holdout_ids": holdout_ids,
+        }
+        normalized[key] = evidence
+    return normalized
+
+
 def build_session_edges(
     session_ids: Sequence[str],
     *,
     maps_dir: str | Path | None = None,
     vpr_payload: Mapping[str, Any] | None = None,
+    edge_probe_payload: Mapping[str, Any] | None = None,
     config: Mapping[str, Any] | None = None,
 ) -> list[Any]:
-    """Candidate-only unless a map supplies verified tracks + independent groups."""
+    """Candidate-only unless an exact-pair probe supplies complete independent geometry."""
 
     ids = [str(sid) for sid in session_ids if sid]
     if len(ids) < 2:
@@ -491,7 +815,7 @@ def build_session_edges(
 
     evidence: dict[tuple[str, str], dict[str, Any]] = {}
     for key, row in load_vpr_candidates(vpr_payload).items():
-        evidence[key] = dict(row)
+        evidence[key] = {**dict(row), "source": row.get("source") or "vpr", "evidence_scope": "vpr"}
 
     if maps_dir is not None:
         root = Path(maps_dir)
@@ -505,6 +829,8 @@ def build_session_edges(
                         int(current.get("num_candidate_pairs") or 0),
                         int(row.get("num_candidate_pairs") or 0),
                     )
+                merged.setdefault("source", "shared_map")
+                merged.setdefault("evidence_scope", "shared_map")
                 evidence[key] = merged
             sep = int(_lookup(config, "edge.query_frame_separation", 30) or 30)
             for model in _discover_map_models(root):
@@ -515,9 +841,19 @@ def build_session_edges(
                     merged.update(row)
                     evidence[key] = merged
 
+    probes = load_edge_probe_candidates(edge_probe_payload)
+    for key, row in probes.items():
+        current = evidence.get(key, {})
+        merged = dict(current)
+        merged.update(row)
+        if current.get("num_candidate_pairs"):
+            merged["num_candidate_pairs"] = max(
+                int(current.get("num_candidate_pairs") or 0),
+                int(row.get("num_candidate_pairs") or row.get("candidate_pairs") or 0),
+            )
+        evidence[key] = merged
+
     edges: list[Any] = []
-    # Without maps, do not invent an all-pairs graph. Emit only pairs that have
-    # candidate or verified evidence; those stay non-STRONG unless geometry exists.
     keys = sorted(evidence) if evidence else []
     for a, b in keys:
         if a not in ids or b not in ids:
@@ -525,20 +861,45 @@ def build_session_edges(
         row = evidence[(a, b)]
         verified = _as_int(row.get("num_verified_pairs") or row.get("num_cross_session_tracks"), 0)
         groups = _as_int(row.get("independent_bridge_groups"), 0)
-        trusted = bool(row.get("trusted_geometry")) and verified > 0
         edges.append(
             classify_session_edge(
                 a,
                 b,
                 num_verified_pairs=verified,
                 independent_bridge_groups=groups,
-                num_candidate_pairs=_as_int(row.get("num_candidate_pairs"), 0),
+                num_candidate_pairs=_as_int(
+                    row.get("num_candidate_pairs") or row.get("candidate_pairs"), 0
+                ),
                 num_cross_session_tracks=row.get("num_cross_session_tracks"),
                 num_cross_session_observations=row.get("num_cross_session_observations"),
-                trusted_geometry=trusted,
+                rotation_consensus_deg=row.get("rotation_consensus_deg"),
+                translation_direction_consensus_deg=row.get(
+                    "translation_direction_consensus_deg"
+                ),
+                scale_consensus=row.get("scale_consensus"),
+                cross_session_reprojection_error=row.get("cross_session_reprojection_error"),
+                spatial_coverage=row.get("spatial_coverage"),
+                independent_artifact=bool(row.get("independent_artifact")),
+                evidence_scope=str(row.get("evidence_scope") or "unknown"),
+                geometry_artifact=row.get("geometry_artifact"),
+                geometry_artifact_sha256=row.get("geometry_artifact_sha256"),
+                fit_evidence_ids=row.get("fit_evidence_ids") or row.get("fit_ids"),
+                holdout_evidence_ids=row.get("holdout_evidence_ids") or row.get("holdout_ids"),
+                holdout_inlier_ratio=row.get("holdout_inlier_ratio"),
+                holdout_residual=row.get("holdout_residual"),
+                bridge_groups=row.get("bridge_groups"),
+                group_holdout_disjoint=bool(row.get("group_holdout_disjoint")),
+                degeneracy_flags=row.get("degeneracy_flags"),
+                geometry_complete=row.get("geometry_complete"),
+                parallax_deg=row.get("parallax_deg"),
+                edge_positive_depth_ratio=row.get("edge_positive_depth_ratio"),
+                trusted_geometry=bool(row.get("trusted_geometry")),
                 config=config,
+                source=row.get("source"),
+                shared_map=row.get("shared_map"),
             )
         )
+
 
     try:
         from sfm_qa.session_select.critical_bridges import classify_critical_bridges
@@ -580,5 +941,6 @@ def annotate_critical_bridges(session_ids: Iterable[str], edges: Sequence[Any]) 
 __all__ = [
     "build_session_edges",
     "classify_session_edge",
+    "load_edge_probe_candidates",
     "load_vpr_candidates",
 ]

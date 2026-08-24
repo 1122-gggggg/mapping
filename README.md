@@ -128,8 +128,10 @@ sfm-qa analyze /path/to/map \
   --map-adapter package.module:AdapterClass \
   --logs /path/to/localization-results.csv \
   --output /path/to/diagnosis
-```
 
+# 風險球：消費 heatmap / weak-region / logs，不再算第二套 FIM
+sfm-diagnosis risk-ply /path/to/map --map-adapter colmap --output /path/to/risk
+```
 細節見 `docs/MAPDOCTOR_QA_INTEGRATION.md` 與 `diagnosis/docs/pipeline.md`。
 
 ---

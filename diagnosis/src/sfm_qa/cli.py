@@ -67,6 +67,15 @@ def _add_select_sessions(parser: argparse.ArgumentParser) -> None:
             "pre-build geometry verification; never treated as a geometric edge."
         ),
     )
+    parser.add_argument(
+        "--edge-probes",
+        type=Path,
+        default=None,
+        help=(
+            "Optional exact-pair geometry probe JSON. Shared-map/VPR records "
+            "in this file are ignored."
+        ),
+    )
     parser.add_argument("--config", type=Path, default=None, help="Optional session_select YAML overlay")
 
 
@@ -184,6 +193,7 @@ def _run_select_sessions(args: argparse.Namespace) -> int:
         config=args.config,
         maps_dir=args.maps,
         vpr_candidates=args.vpr_candidates,
+        edge_probes=getattr(args, "edge_probes", None),
     )
     _print_select_summary(report, args.output)
     return 0

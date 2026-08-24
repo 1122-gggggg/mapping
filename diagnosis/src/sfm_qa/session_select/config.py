@@ -29,6 +29,11 @@ HEURISTIC_NOTES: dict[str, str] = {
     "internal_status.inconsistent_cycle_error_deg": "heuristic rotation-cycle INCONSISTENT gate",
     "edge.min_cross_tracks_for_verified": "heuristic; VPR alone never verifies",
     "edge.holdout_fraction": "heuristic explicit 80/20; never fit+validate on same points",
+    "edge.require_exact_pair_scope": "fail-closed invariant; shared-map/VPR cannot be STRONG/USABLE",
+    "edge.require_group_disjoint_holdout": "fail-closed invariant; fit and holdout must not share a group",
+    "edge.require_complete_geometry": "fail-closed invariant; missing finite geometry cannot be STRONG/USABLE",
+    "edge.min_holdout_inlier_ratio": "heuristic holdout quality; not a calibrated success probability",
+    "edge.max_holdout_residual_px": "heuristic holdout residual; not a calibrated success probability",
     "image_qa.blur_variance_reject": "heuristic Laplacian variance",
     "influence.high_reproj_delta": "heuristic offline contrast; not a live LOO authority",
 }

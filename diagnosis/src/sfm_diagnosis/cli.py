@@ -14,6 +14,7 @@ from .diagnose import diagnose_pose, thresholds_from_dict
 from .evidence import load_build_evidence
 from .heatmap import HeatmapConfig, build_heatmap, save_heatmap
 from .io import write_json
+from .risk_ply import write_risk_ply
 from .logs import LocalizationHistory
 from .matchability import (
     matchability_config_from_dict,
@@ -170,6 +171,32 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "risk-ply":
+        m = _load_map(args)
+        receipt = write_risk_ply(
+            m,
+            args.output,
+            heatmap=args.heatmap,
+            weak_regions=args.weak_regions,
+            localization=args.logs,
+            include_actloc_shadow=bool(args.include_actloc_shadow),
+        )
+        print(
+            json.dumps(
+                {
+                    "output": receipt["ply"],
+                    "map_vertices": receipt["map_vertices"],
+                    "marker_spheres": receipt["marker_spheres"],
+                    "counts": receipt["counts"],
+                    "fim_recomputed": receipt["fim_recomputed"],
+                    "actloc": receipt["actloc"],
+                    "caveats": receipt["caveats"],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     m = _load_map(args)
     history = LocalizationHistory.load(args.logs) if getattr(args, "logs", None) else None
@@ -204,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in {
             "spacing_m": args.spacing,
             "orientation_mode": args.orientation_mode,
+            "sample_mode": getattr(args, "sample_mode", None),
             "orientations_per_position": args.orientations_per_position,
             "yaw_step_deg": args.yaw_step,
         }.items():
@@ -238,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
 
     if args.command == "repair":
         pose, _ = _resolve_pose(m, args)
@@ -386,7 +415,6 @@ def _parser() -> argparse.ArgumentParser:
     _add_map_adapter_arg(matchability)
     matchability.add_argument("--output", required=True, help="output directory")
 
-
     pose = sub.add_parser("pose", help="Diagnose one camera pose")
     _add_model_pose_args(pose)
     _add_history_environment_args(pose)
@@ -410,6 +438,11 @@ def _parser() -> argparse.ArgumentParser:
         metavar=("X0", "Y0", "Z0", "X1", "Y1", "Z1"),
     )
     heat.add_argument("--orientation-mode", choices=["map", "yaw_pitch"])
+    heat.add_argument(
+        "--sample-mode",
+        choices=["grid", "cameras"],
+        help="grid over bounds, or one sample at each reconstructed camera center",
+    )
     heat.add_argument("--orientations-per-position", type=int)
     heat.add_argument("--yaw-step", type=float)
     heat.add_argument("--pitches", nargs="+", type=float)
@@ -418,6 +451,22 @@ def _parser() -> argparse.ArgumentParser:
         help="correspondence events or landmark_matchability.csv",
     )
     _add_environment_args(heat)
+
+    risk = sub.add_parser(
+        "risk-ply",
+        help="Write map RGB vertices plus colored diagnosis/localization risk spheres",
+    )
+    risk.add_argument("model")
+    _add_map_adapter_arg(risk)
+    risk.add_argument("--output", required=True, help="output directory")
+    risk.add_argument("--heatmap", help="pose_health.csv or heatmap directory")
+    risk.add_argument("--weak-regions", help="weak-region JSON/CSV or analyze directory")
+    risk.add_argument("--logs", help="optional localization CSV/JSON/JSONL")
+    risk.add_argument(
+        "--include-actloc-shadow",
+        action="store_true",
+        help="include explicit ActLoc-proxy shadow markers; still not authorized evidence",
+    )
 
     repair = sub.add_parser(
         "repair",

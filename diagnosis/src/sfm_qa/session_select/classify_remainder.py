@@ -9,7 +9,7 @@ from .intake_tree import classify_leftover_vs_frozen_base, role_or_quarantine
 from .types import ROLES, SessionEdgeQuality, SessionInfluence, SessionQuality, edge_is_vpr_only
 
 _CORE_OK = frozenset({"STRONG", "USABLE"})
-_BLOCKED = frozenset({"AMBIGUOUS", "REJECT"})
+_BLOCKED = frozenset({"AMBIGUOUS", "REJECT", "WEAK"})
 
 
 def _quality_map(rows: Iterable[SessionQuality]) -> dict[str, SessionQuality]:

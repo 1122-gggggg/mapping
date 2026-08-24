@@ -42,6 +42,7 @@ SESSION_ROLE_COLUMNS = [
     "critical_bridge_dependency",
     "change_score",
     "role",
+    "fusion_authorization",
     "reason",
 ]
 
@@ -230,7 +231,6 @@ def _objective_terms(
         pass
     return empty
 
-
 def build_role_rows(
     qualities: Sequence[Any],
     edges: Sequence[Any],
@@ -243,6 +243,10 @@ def build_role_rows(
     change_score = extra.get("change_score") or {}
     core = [sid for sid, role in roles.items() if role in {"BASE_CORE", "BASE_SUPPORT"}]
     base_terms = _objective_terms(qualities, edges, core, config) if core else {}
+    try:
+        from sfm_qa.session_select.admission import classify_fusion_authorization
+    except Exception:  # pragma: no cover
+        classify_fusion_authorization = None  # type: ignore[assignment]
     rows: list[dict[str, Any]] = []
     for row in qualities:
         sid = getattr(row, "session_id", None)
@@ -261,11 +265,24 @@ def build_role_rows(
             default=0,
         )
         critical = any(getattr(edge, "is_critical_bridge", False) for edge in incident)
+        complete = any(getattr(edge, "geometry_complete", False) for edge in incident)
+        disjoint = any(getattr(edge, "group_holdout_disjoint", False) for edge in incident)
         info_gain = 0.0
         cov_gain = 0.0
         if core and sid not in core:
             info_gain = with_base["information"] - base_terms.get("information", 0.0)
             cov_gain = with_base["coverage"] - base_terms.get("coverage", 0.0)
+        role = roles.get(sid, "QUARANTINE")
+        fusion = extra.get("fusion_authorizations", {}).get(sid) if isinstance(extra.get("fusion_authorizations"), Mapping) else None
+        if fusion is None and classify_fusion_authorization is not None:
+            fusion = classify_fusion_authorization(
+                role=role,
+                has_holdout=disjoint,
+                independent_bridge_groups=int(groups or 0),
+                geometry_complete=bool(complete),
+                group_holdout_disjoint=bool(disjoint),
+                base_admitted=role in {"BASE_CORE", "BASE_SUPPORT"},
+            )
         rows.append(
             {
                 "session_id": sid,
@@ -288,7 +305,8 @@ def build_role_rows(
                 "num_independent_bridge_groups": groups,
                 "critical_bridge_dependency": bool(critical),
                 "change_score": change_score.get(sid, 0.0),
-                "role": roles.get(sid, "QUARANTINE"),
+                "role": role,
+                "fusion_authorization": fusion or "NONE",
                 "reason": reasons.get(
                     sid, "; ".join(getattr(row, "reasons", ()) or ())
                 ),

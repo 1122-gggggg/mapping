@@ -140,8 +140,16 @@ The original entry points still work:
 ```bash
 mapdoctor --help
 sfm-diagnosis --help
+
+# Colored risk spheres from a map plus optional heatmap / weak-region / logs.
+# Does not recompute FIM.
+sfm-diagnosis risk-ply /path/to/map --map-adapter colmap --output ./risk \
+  [--heatmap ./heatmap] [--weak-regions ./qa-out] [--logs loc.jsonl]
 ```
 
+FIM observability is not a calibrated success probability. Retrieval proxies
+for no-pose failures are not ground truth. ActLoc
+`StructuralLocalizabilityProxy` / `ExternalPredictorAdapter` remain shadow-only.
 ## overall_status
 
 | Status | Meaning |

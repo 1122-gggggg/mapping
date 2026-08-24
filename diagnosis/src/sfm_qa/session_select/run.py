@@ -409,6 +409,7 @@ def select_sessions(
     config: Any = None,
     maps_dir: str | Path | None = None,
     vpr_candidates: str | Path | None = None,
+    edge_probes: str | Path | None = None,
     **aliases: Any,
 ) -> dict[str, Any]:
     """QA videos, propose a pre-build subset, then select only verified geometry."""
@@ -421,6 +422,8 @@ def select_sessions(
         maps_dir = aliases.get("maps")
     if vpr_candidates is None:
         vpr_candidates = aliases.get("vpr") or aliases.get("vpr_candidates")
+    if edge_probes is None:
+        edge_probes = aliases.get("edge_probe") or aliases.get("edge_probes")
     if isinstance(config, (str, Path)) and maps_dir is None and aliases.get("config") is None:
         # Positional (videos, output, maps) from callers that treat the third slot as maps.
         maybe_maps = Path(config)
@@ -454,20 +457,27 @@ def select_sessions(
 
     session_ids = [row.session_id for row in qualities]
     vpr_payload = _load_vpr_payload(vpr_candidates)
+    probe_payload = _load_vpr_payload(edge_probes)
     edges = build_session_edges(
         session_ids,
         maps_dir=maps_dir,
         vpr_payload=vpr_payload,
+        edge_probe_payload=probe_payload,
         config=cfg,
     )
     for edge in edges:
-        if getattr(edge, "status", None) == "STRONG" and (
+        if getattr(edge, "status", None) in {"STRONG", "USABLE"} and (
             int(getattr(edge, "num_verified_pairs", 0) or 0) <= 0
-            or int(getattr(edge, "independent_bridge_groups", 0) or 0) <= 0
+            or not getattr(edge, "independent_artifact", False)
+            or str(getattr(edge, "evidence_scope", "")) != "exact_pair"
+            or not getattr(edge, "geometry_complete", False)
+            or not getattr(edge, "group_holdout_disjoint", False)
         ):
-            edge.status = "REJECT"
+            edge.status = "AMBIGUOUS"
             if hasattr(edge, "reasons"):
-                edge.reasons = tuple(edge.reasons) + ("maps_absent_or_unverified_not_strong",)
+                edge.reasons = tuple(edge.reasons) + (
+                    "maps_absent_or_unverified_not_strong",
+                )
 
     # Phase A: proposal-only. Candidate/VPR graph is allowed to rank expensive
     # geometric verification, never to authorize a merge.

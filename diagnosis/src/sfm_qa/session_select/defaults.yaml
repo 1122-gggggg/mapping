@@ -79,17 +79,27 @@ internal_status:
 
 edge:
   # VPR / retrieval is NEVER a geometric edge. Candidates only.
+  # STRONG/USABLE require exact-pair independent artifact, group-disjoint
+  # fit/holdout, and complete finite geometry. Shared-map tracks stay WEAK.
   min_cross_tracks_for_verified: 30      # heuristic
   min_verified_pairs_for_usable: 8       # heuristic
   max_rotation_consensus_deg: 5.0        # heuristic
   max_translation_dir_consensus_deg: 15.0  # heuristic
   max_scale_consensus_rel: 0.15          # heuristic
   max_cross_reproj_px: 5.0               # heuristic
+  min_bridge_parallax_deg: 1.0           # heuristic
+  min_positive_depth_ratio: 0.9          # heuristic
+  min_spatial_coverage: 0.1              # heuristic
+  min_holdout_inlier_ratio: 0.45         # heuristic
+  max_holdout_residual_px: 8.0           # heuristic
   query_frame_separation: 30             # heuristic
+  reference_frame_separation: 30         # heuristic
   reference_center_separation: 2.0       # heuristic scene units
   holdout_fraction: 0.2                  # heuristic explicit 80/20; never fit+validate on same points
   max_relative_sim3_residual: 0.05       # heuristic
-
+  require_exact_pair_scope: true         # fail-closed invariant
+  require_group_disjoint_holdout: true   # fail-closed invariant
+  require_complete_geometry: true        # fail-closed invariant
 image_qa:
   sharpness_sample_limit: 32             # heuristic
   underexposure_mean: 20.0               # heuristic 8-bit mean

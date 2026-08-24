@@ -19,6 +19,7 @@ class HeatmapConfig:
     spacing_m: float = 1.0
     padding_m: float = 0.0
     orientation_mode: str = "map"  # map | yaw_pitch
+    sample_mode: str = "grid"  # grid | cameras
     orientations_per_position: int = 3
     yaw_step_deg: float = 45.0
     pitches_deg: tuple[float, ...] = (0.0,)
@@ -198,6 +199,10 @@ def sample_positions(
     *,
     bounds: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
+    if str(getattr(cfg, "sample_mode", "grid")) == "cameras":
+        if map_data.num_images == 0:
+            return np.zeros((0, 3), dtype=float)
+        return np.asarray(map_data.image_centers, dtype=float)
     if bounds is None:
         if map_data.num_images:
             lo = map_data.image_centers.min(axis=0) - cfg.padding_m
