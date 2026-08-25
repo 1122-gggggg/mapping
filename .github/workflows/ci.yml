@@ -75,6 +75,8 @@ jobs:
             pipeline/test_intrinsics_holdout_gate.py \
             pipeline/test_plan_db_reuse_sweep.py \
             pipeline/test_plan_research_method_experiments.py \
+            pipeline/test_pose_graph_init.py \
+            pipeline/test_ggpt_sidecar.py \
             pipeline/test_recompute_site_scale.py \
             pipeline/test_verify_gauge_invariance.py \
             pipeline/test_build_localizable_map_core.py::PairGraphPerformanceTests \

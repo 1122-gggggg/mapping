@@ -266,6 +266,49 @@ Du et al., *RTMap: Real-Time Recursive Mapping with Change Detection and Localiz
 
 **Future-work decision:** these support accumulating multi-session evidence before replacing geometry. They do **not** justify copying an HD-map/3DGS representation into this sparse SfM localization system. Current code emits review evidence and `needs_tile_replace`; tile rebuilding, boundary-anchor optimization and revalidation are not implemented.
 
+### 4.15 Global-Aware Edge Prioritization — replace kNN pair init, not S3/S4
+
+Wei, Tolias, Matas & Barath, *Global-Aware Edge Prioritization for Pose Graph Initialization*, CVPR 2026.
+
+The paper's claim that matters here is not the GNN itself. On IMC23/MegaDepth, **multi-MST selection already beats per-image kNN** for every retrieval backbone, including MegaLoc, and the gap is largest at k=1–2. Connectivity-aware hop-distance modulation then adds long-range chords that kNN never proposes.
+
+**Replace:** GlueMap/COLMAP `num_neighbors` kNN as the *candidate-edge* initializer, using `pipeline/pose_graph_init.py`.
+
+**Do not replace:**
+
+- S3 VPR-blind forced reverse-direction bridges. MegaLoc similarity on this site is 0.10–0.17 reverse vs 0.31–0.59 same-direction; a MegaDepth-trained GNN will not invent that geometry.
+- S4 Doppelgangers++. The paper reports DG++ adds nothing *on VisymScenes facade duplicates after their ranks*. UAV forward/reverse aliasing is a different failure mode.
+
+**Implemented:** Kruskal multi-MST + hop-distance modulation + required-edge union. GNN rank CSV is an optional drop-in `score` column, not a production default.
+
+### 4.16 GGPT — dense visualization sidecar, never the localization map
+
+Chen, Wang, Zhang, Prokudin & Tang, *GGPT: Geometry-Grounded Point Transformer*, CVPR 2026.
+
+GGPT refines a dense feed-forward point map `Xd` with sparse SfM points `Xs` in 3D. The accompanying SfM (RoMa/UFM, sparse BA, DLT) is a 4–16 view recipe. That is not S5: this system maps 10²–10³ UAV frames with locked PINHOLE/SIMPLE_RADIAL intrinsics and a global mapper.
+
+Fuhe already ran a GGPT/Pi3 sidecar preflight and failed the sparse-overlap gate. The transformer cannot hallucinate missing co-visibility.
+
+**Do not replace:** S5 COLMAP GlobalMapper, S8 EDM cell-anchor geometry, or S9.
+
+**Supplement:** after poses and intrinsics are locked, tile 8-view subsets that already share ≥50 sparse points and emit a visualization/QA cloud. `pipeline/ggpt_sidecar.py` is the admission contract. Checkpoints stay external.
+
+### 4.17 RIC-Loc — selective posed-reference scores, not the flight localizer
+
+Kang, Kim, Lee & Kim, *Reference-Induced Consensus for Selective Posed-Reference Visual Localization*, arXiv:2607.04722.
+
+RIC-Loc lifts one map-frame SE(3) hypothesis per posed reference from a frozen VGGT pass, then fuses with robust SO(3)×R³ consensus. The unique product is ground-truth-free failure ranking: `σ_disp` (hypothesis spread) and `σ_cons` (track-conditioned covariance), fused as
+
+```text
+σ_joint = max(σ_cons / median_heldout(σ_cons), σ_disp / median_heldout(σ_disp))
+```
+
+on the covariance-eligible set. Table 1 shows the MegaLoc top-1−top-2 gap is near-random (AUROC 0.52–0.55) for pose failure. Cambridge outdoor translation still trails structure-based hloc (40 cm vs 16 cm).
+
+**Do not replace:** EDM 2D–3D cell-anchor localization. Outdoor metric translation and the 1.9–3.4 s VGGT pass are the wrong operating point for the flight stack.
+
+**Supplement:** S9 / `sfm-diagnosis consensus` already had RIC-Loc-style Student-t fusion. This change adds held-out `σ_joint` (`--held-out-hypotheses`) and refuses to treat retrieval-score gap as a reject signal. Covariance-ineligible queries have no `σ_joint` and must abstain.
+
 ---
 
 ## 5. Recommended production path after this optimization
@@ -288,6 +331,7 @@ S1/S2 motion-aware extraction
 S2b intrinsics bake-off
   ↓
 S3 verified cross-video pairs
+     (forced reverse-direction ∪ multi-MST retrieval chords)
   ↓
 S4 Doppelgangers++ + graph/cycle audit
   ↓
@@ -318,6 +362,9 @@ pairwise rescue failure         → RoMa v2 sealed A/B
 low overlap/parallax/symmetry   → MP-SfM A/B
 translation-edge outliers       → licensed LFOE build only, never silent fallback
 material dynamic contamination  → RoMo-style segmentation A/B
+dense visual QA after locked poses  → GGPT sidecar (overlap-gated tiles only)
+pair-graph sparsity / long-range chords → multi-MST edge prioritization
+held-out pose rejection             → RIC-Loc σ_joint (not retrieval-score gap)
 ```
 
 Every A/B comparison must use the same build corpus and untouched S9 sessions. The winner is the method with better localization robustness under equivalent compute/memory constraints, not the method with the lowest training/reprojection loss alone.
@@ -415,3 +462,6 @@ better method = passes geometry gates
 - Lipson, L., Deng, J. [*Multi-Session SLAM with Differentiable Wide-Baseline Pose Optimization*](https://openaccess.thecvf.com/content/CVPR2024/html/Lipson_Multi-Session_SLAM_with_Differentiable_Wide-Baseline_Pose_Optimization_CVPR_2024_paper.html). CVPR 2024.
 - Galappaththige, C. J. et al. [*Multi-View Pose-Agnostic Change Localization with Zero Labels*](https://openaccess.thecvf.com/content/CVPR2025/html/Galappaththige_Multi-View_Pose-Agnostic_Change_Localization_with_Zero_Labels_CVPR_2025_paper.html). CVPR 2025.
 - Du, Y. et al. [*RTMap: Real-Time Recursive Mapping with Change Detection and Localization*](https://openaccess.thecvf.com/content/ICCV2025/html/Du_RTMap_Real-Time_Recursive_Mapping_with_Change_Detection_and_Localization_ICCV_2025_paper.html). ICCV 2025.
+- Wei, T. et al. [*Global-Aware Edge Prioritization for Pose Graph Initialization*](https://openaccess.thecvf.com/content/CVPR2026/html/Wei_Global-Aware_Edge_Prioritization_for_Pose_Graph_Initialization_CVPR_2026_paper.html). CVPR 2026.
+- Chen, Y. et al. [*GGPT: Geometry-Grounded Point Transformer*](https://openaccess.thecvf.com/content/CVPR2026/html/Chen_GGPT_Geometry-Grounded_Point_Transformer_CVPR_2026_paper.html). CVPR 2026.
+- Kang, W. et al. [*Reference-Induced Consensus for Selective Posed-Reference Visual Localization*](https://arxiv.org/abs/2607.04722). arXiv:2607.04722, 2026.

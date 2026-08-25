@@ -75,6 +75,8 @@ def build_plan(args: argparse.Namespace) -> dict:
     baseline_out = experiment_root / "00_baseline_colmap_global_db_reuse"
     lfoe_out = experiment_root / "01_lfoe_glomap_filter"
     dg_out = experiment_root / "02_doppelgangers_pp_frontend"
+    gap_out = experiment_root / "03_global_edge_prior_frontend"
+    ggpt_out = experiment_root / "05_ggpt_dense_geometry"
 
     steps = [
         command_step(
@@ -144,13 +146,28 @@ def build_plan(args: argparse.Namespace) -> dict:
         command_step(
             "global_aware_edge_prioritization",
             3,
-            "blocked",
-            "Promising for initial pose-graph construction, but it is a front-end candidate-edge selection method.",
-            None,
-            ["global_edge_prior repo/model", "adapter from retrieval pairs to local pair graph"],
+            "adapter_ready",
+            "Wei et al. CVPR 2026: replace per-image retrieval kNN with multi-MST + hop-distance modulation. In-repo selector; GNN weights remain optional.",
             [
-                "Do not insert into the current DB-reuse sweep.",
-                "Evaluate in the next full DB/H5 generation cycle.",
+                args.python,
+                str(BUILD_ROOT / "pipeline" / "pose_graph_init.py"),
+                "--scores", str(run_dir / "retrieval_pair_scores.csv"),
+                "--required", str(run_dir / "forced_bridges.txt"),
+                "--k-msts", "2",
+                "--modulation-lambda", "0.5",
+                "--output", str(gap_out / "pairs.txt"),
+                "--report", str(gap_out / "pose_graph_init.json"),
+            ],
+            [
+                "retrieval_pair_scores.csv (image_a,image_b,score)",
+                "forced_bridges.txt as required reverse-direction edges",
+                "optional global_edge_prior GNN ranks in the same CSV",
+            ],
+            [
+                "Do not drop S3 VPR-blind forced bridges; pass them as --required.",
+                "Do not skip S4 Doppelgangers++. The paper's VisymScenes win is not a substitute for UAV reverse-direction aliasing.",
+                "Do not insert into the current DB-reuse sweep; evaluate at the next pair-graph generation.",
+                "Paper: https://openaccess.thecvf.com/content/CVPR2026/html/Wei_Global-Aware_Edge_Prioritization_for_Pose_Graph_Initialization_CVPR_2026_paper.html",
             ],
         ),
         command_step(
@@ -167,12 +184,24 @@ def build_plan(args: argparse.Namespace) -> dict:
         command_step(
             "ggpt_dense_geometry",
             5,
-            "blocked",
-            "GGPT improves dense feed-forward reconstruction with sparse geometry guidance; not a primary localization-map fix.",
-            None,
-            ["GGPT code/checkpoints", "dense-output evaluation target"],
+            "admission_ready",
+            "GGPT refines dense feed-forward points under locked SfM guidance. Sidecar admission is in-repo; checkpoints remain external. Not a localization-map fix.",
             [
-                "Use only for dense visual QA or changed-region visualization after localization gates pass.",
+                args.python,
+                str(BUILD_ROOT / "pipeline" / "ggpt_sidecar.py"),
+                "--covisibility", str(run_dir / "covisibility_pairs.json"),
+                "--poses-locked",
+                "--output", str(ggpt_out / "ggpt_admission.json"),
+            ],
+            [
+                "locked S5 poses and seed-identical intrinsics",
+                "covisibility pair counts from the sparse model",
+                "GGPT code/checkpoints for the actual dense pass after admission",
+            ],
+            [
+                "Reject when the overlap gate fails; GGPT cannot invent missing co-visibility.",
+                "Accepted tiles are visualization_only. Do not feed GGPT dense points into EDM/S9.",
+                "Paper: https://openaccess.thecvf.com/content/CVPR2026/html/Chen_GGPT_Geometry-Grounded_Point_Transformer_CVPR_2026_paper.html",
             ],
         ),
     ]

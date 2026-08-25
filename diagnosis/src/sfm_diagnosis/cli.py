@@ -98,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             max_consensus_sigma_m=args.max_consensus_sigma,
             max_rotation_dispersion_deg=args.max_rotation_dispersion,
             min_covariance_eligible_ratio=args.min_covariance_eligible_ratio,
+            held_out_path=args.held_out_hypotheses,
         )
         payload = {
             "queries": results,
@@ -105,8 +106,9 @@ def main(argv: list[str] | None = None) -> int:
             "source": str(Path(args.hypotheses)),
             "interpretation": (
                 "sigma_disp measures cross-reference disagreement; sigma_cons measures "
-                "information/covariance weakness. Keep them separate when diagnosing aliasing "
-                "versus poor geometric observability."
+                "information/covariance weakness. sigma_joint is RIC-Loc's held-out "
+                "median-normalized max fusion and is only set when --held-out-hypotheses "
+                "is provided. Retrieval-score gaps are not a pose-failure signal."
             ),
         }
         _emit(payload, args.output)
@@ -407,6 +409,13 @@ def _parser() -> argparse.ArgumentParser:
     consensus.add_argument("--max-consensus-sigma", type=float, default=0.5)
     consensus.add_argument("--max-rotation-dispersion", type=float, default=5.0)
     consensus.add_argument("--min-covariance-eligible-ratio", type=float, default=0.5)
+    consensus.add_argument(
+        "--held-out-hypotheses",
+        help=(
+            "disjoint hypothesis table used only to fit RIC-Loc σ_joint medians; "
+            "do not pass the query set being ranked"
+        ),
+    )
 
     route = sub.add_parser(
         "route",

@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -116,6 +117,15 @@ class ReferenceConsensusMetrics:
             "reference_consensus_sigma_m": self.sigma_cons_m,
             "reference_rotation_dispersion_deg": self.rotation_dispersion_deg,
         }
+
+
+@dataclass(frozen=True)
+class SelectiveNormalization:
+    """Held-out medians for RIC-Loc σ_joint (Kang et al., arXiv:2607.04722 Eq. 22)."""
+
+    median_sigma_cons_m: float
+    median_sigma_disp_m: float
+    n_covariance_eligible: int
 
 
 class ReferenceConsensusStatus(str, Enum):
@@ -297,6 +307,42 @@ def compute_reference_consensus(
     )
 
 
+def fit_selective_normalization(
+    metrics: Sequence[ReferenceConsensusMetrics],
+) -> SelectiveNormalization | None:
+    """Fit RIC-Loc fusion scales on a held-out, covariance-eligible set.
+
+    In-sample medians are not this function's contract. Pass a disjoint query
+    split (leave-one-scene-out, cross-building, or a frozen S9 calibration set).
+    """
+    eligible = [row for row in metrics if row.sigma_cons_m is not None]
+    if not eligible:
+        return None
+    cons = np.asarray([row.sigma_cons_m for row in eligible], dtype=float)
+    disp = np.asarray([row.sigma_disp_m for row in eligible], dtype=float)
+    return SelectiveNormalization(
+        median_sigma_cons_m=float(np.median(cons)),
+        median_sigma_disp_m=float(np.median(disp)),
+        n_covariance_eligible=len(eligible),
+    )
+
+
+def compute_sigma_joint(
+    metrics: ReferenceConsensusMetrics,
+    normalization: SelectiveNormalization | None,
+) -> float | None:
+    """Return max(σ_cons/median, σ_disp/median), or None if not covariance-eligible.
+
+    Retrieval-score gaps are intentionally unused: Kang et al. Table 1 shows
+    top-1−top-2 MegaLoc margins are near-random for pose-failure ranking.
+    """
+    if normalization is None or metrics.sigma_cons_m is None:
+        return None
+    cons = metrics.sigma_cons_m / max(float(normalization.median_sigma_cons_m), 1e-12)
+    disp = metrics.sigma_disp_m / max(float(normalization.median_sigma_disp_m), 1e-12)
+    return float(max(cons, disp))
+
+
 def assess_reference_consensus(
     metrics: ReferenceConsensusMetrics,
     *,
@@ -455,10 +501,13 @@ def analyze_reference_hypotheses(
     max_rotation_dispersion_deg: float = 5.0,
     min_covariance_eligible_ratio: float = 0.5,
     min_hypothesis_count: int = 2,
+    held_out_path: str | Path | None = None,
+    selective_normalization: SelectiveNormalization | None = None,
 ) -> list[dict]:
     hypotheses = load_reference_hypotheses(path)
     groups = group_reference_hypotheses(hypotheses)
     rows = []
+    computed: list[tuple[str, ReferenceConsensusMetrics, ReferenceConsensusAssessment]] = []
     for query_id, group in groups.items():
         metrics = compute_reference_consensus(
             group,
@@ -474,13 +523,38 @@ def analyze_reference_hypotheses(
             min_covariance_eligible_ratio=min_covariance_eligible_ratio,
             min_hypothesis_count=min_hypothesis_count,
         )
+        computed.append((query_id, metrics, assessment))
+
+    normalization = selective_normalization
+    if held_out_path is not None:
+        held_groups = group_reference_hypotheses(load_reference_hypotheses(held_out_path))
+        leaked = sorted(set(groups) & set(held_groups))
+        if leaked:
+            raise ValueError(
+                "held-out query ids leak into the ranked set: " + ", ".join(leaked)
+            )
+        held_metrics = [
+            compute_reference_consensus(
+                group,
+                student_t_nu=student_t_nu,
+                covariance_floor_m=covariance_floor_m,
+                sigma_inflation=sigma_inflation,
+            )
+            for group in held_groups.values()
+        ]
+        normalization = fit_selective_normalization(held_metrics)
+
+    for query_id, metrics, assessment in computed:
         log_fields = metrics.localization_log_row()
         log_fields["reference_joint_gate_ratio"] = assessment.joint_gate_ratio
+        sigma_joint = compute_sigma_joint(metrics, normalization)
+        log_fields["reference_sigma_joint"] = sigma_joint
         rows.append(
             {
                 "query_id": query_id,
                 "metrics": metrics.as_dict(),
                 "assessment": assessment.as_dict(),
+                "sigma_joint": sigma_joint,
                 "localization_log_fields": log_fields,
             }
         )

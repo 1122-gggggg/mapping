@@ -88,6 +88,16 @@ site 測試必須各自在新程序執行，避免 Python 模組快取把另一�
   最終模型仍須通過固定內參、S6 與 S9。
 - **S9 才是驗收**。「有輸出檔」不等於完成。
 
+### 2026 三篇論文怎麼接（替換 vs 補上）
+
+細節與反例見 `docs/PAPER_DRIVEN_SYSTEM_OPTIMIZATION_20260823.md` §4.15–4.17。
+
+| 論文 | 接到哪 | 替換？ | 補上？ |
+|---|---|---|---|
+| Wei et al. CVPR 2026 全域邊排序 | S3 / pair-graph kNN 候選邊 | **只替換 per-image kNN**。`pipeline/pose_graph_init.py` 用 multi-MST + hop-distance。 | 必留 S3 VPR-blind 反向橋（`--required`）與 S4 Doppelgangers++。GNN 權重可選，不是預設。 |
+| Chen et al. CVPR 2026 GGPT | S5 之後的 dense QA | **不替換** S5/S8/S9。論文是 4–16 視圖，不是這套 UAV 全域建圖。 | `pipeline/ggpt_sidecar.py`：姿態/內參鎖定 + 共視 overlap gate 通過才准 visualization tile。福和橋已證明缺 overlap 不能硬跑。 |
+| Kang et al. 2026 RIC-Loc | S9 / `sfm-diagnosis consensus` | **不替換** EDM。Cambridge 室外平移仍輸 structure-based；VGGT 每 query 1.9–3.4 s。 | held-out `σ_joint` 做拒答。MegaLoc top-1−top-2 **不是**失敗訊號。covariance-ineligible 必須 abstain。 |
+
 ### 論文方法整合
 
 - **G-MASt3R-SfM**：移植 geometrically verified view pruning；dense pair filter 只保留最大的 verified component，component ratio 不足直接 fail。沒有再加 MSO/PGO，因為下游 global positioning + BA 已涵蓋較完整的目標。

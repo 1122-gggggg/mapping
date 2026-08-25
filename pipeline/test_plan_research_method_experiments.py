@@ -100,3 +100,19 @@ def test_research_method_plan_blocks_unlicensed_lfoe(tmp_path: Path):
     assert step["status"] == "blocked"
     assert not step["command"]
     assert any("no license" in note.lower() for note in step["notes"])
+
+
+def test_edge_prioritization_and_ggpt_use_inrepo_adapters(tmp_path: Path):
+    plan = build_plan(make_args(tmp_path))
+    statuses = {step["name"]: step["status"] for step in plan["steps"]}
+    gap = next(item for item in plan["steps"] if item["name"] == "global_aware_edge_prioritization")
+    ggpt = next(item for item in plan["steps"] if item["name"] == "ggpt_dense_geometry")
+
+    assert statuses["global_aware_edge_prioritization"] == "adapter_ready"
+    assert gap["command"][1].endswith("/pipeline/pose_graph_init.py")
+    assert "--required" in gap["command"]
+    assert any("forced" in note.lower() or "VPR-blind" in note for note in gap["notes"])
+
+    assert statuses["ggpt_dense_geometry"] == "admission_ready"
+    assert ggpt["command"][1].endswith("/pipeline/ggpt_sidecar.py")
+    assert any("visualization_only" in note for note in ggpt["notes"])
